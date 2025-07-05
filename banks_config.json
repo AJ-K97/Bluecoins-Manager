@@ -1,0 +1,21 @@
+{
+    "banks": {
+        "HSBC": {
+            "date_column": "Transaction Date",
+            "date_format": "%d %b %Y",
+            "description_column": "Description",
+            "amount_column": "Amount",
+            "type_determination": "amount_sign"
+        },
+        "Wise": {
+            "date_column": "Created on",
+            "date_format": "%d-%m-%Y %H:%M:%S",
+            "description_column": "Target name",
+            "amount_column": "Source amount (after fees)",
+            "type_determination": "direction_column",
+            "direction_column": "Direction",
+            "direction_in_value": "IN",
+            "direction_out_value": "OUT"
+        }
+    }
+}

@@ -1,0 +1,86 @@
+{
+    "TRANSFER LP SDB504AVI ANZ Joint Account 665889369 Joint Bank Transfe YIB139507 INTERNET BANKING": {
+        "parent_category": "Other",
+        "category": "Transfer"
+    },
+    "TRANSFER RTP Bond Return NATAAU33XXXN20250219000000162388240 MISS JENNA LEE MCKIEVER 19FEB2025 23:08:49 YRTV10821 VDU": {
+        "parent_category": "Other",
+        "category": "Refunds"
+    },
+    "TRANSFER 074361015S5XWLLX60 HCFHEALTH 0578026 Z@LC18414 SYSTEM GENERATED": {
+        "parent_category": "Health & Fitness",
+        "category": "Health Insurance"
+    },
+    "GOOGLE ONE 12FEB25 ATMA896 17:50:37 4402   VISA    AUD Google One 018374 Barangaroo  AU A88816541 ATM": {
+        "parent_category": "Entertain",
+        "category": "App/Subscription"
+    },
+    "TRANSFER LP SDB503NXO ANZ Joint Account 665889369 Joint Bank Transfe YIB110116 INTERNET BANKING": {
+        "parent_category": "Other",
+        "category": "Transfer"
+    },
+    "TRANSFER TO 098-705486-439 YIB106043 INTERNET BANKING": {
+        "parent_category": "Other",
+        "category": "Transfer"
+    },
+    "TRANSFER Aurizn Salary Aurizn Defence P 0361424 Z@LC08939 SYSTEM GENERATED": {
+        "parent_category": "Employer",
+        "category": "Salary"
+    },
+    "SP ALLYFASHION.COM 08FEB25 ATMA896 19:44:09 4402   VISA    AUD SP ALLYFASHION.COM 305109 CAMPERDOWN  AU A88868366 ATM": {
+        "parent_category": "Entertainment",
+        "category": "Shopping"
+    },
+    "EZYPAY*REVO FITNESS VICT 08FEB25 ATMA896 11:19:51 4402   VISA    AUD Ezypay*Revo Fitness Vict 049349oSydney    AU A88856308 ATM": {
+        "parent_category": "Health & Fitness",
+        "category": "Gym"
+    },
+    "TRANSFER RTP 014111 665889369 NOTPROVIDED HKBAAU2SXXXN20250205009244014915920 ANZ Joint Account 05FEB2025 15:23:16 Joint bank transfer YRT389088 INTERNET BANKING": {
+        "parent_category": "Other",
+        "category": "Transfer"
+    },
+    "GOOGLE YOUTUBEPREMIUM 03FEB25 ATMA896 17:06:25 4402   VISA    AUD Google YouTubePremium 303036 Barangaroo  AU A88897811 ATM": {
+        "parent_category": "Entertainment",
+        "category": "App/Subscription"
+    },
+    "GOOGLE ONE 01FEB25 ATMA896 23:09:08 4402   VISA    AUD Google One 009494 Barangaroo  AU A88843282 ATM": {
+        "parent_category": "Entertainment",
+        "category": "App/Subscription"
+    },
+    "RAC INSURANCE QB 29JAN25 ATMA896 07:46:48 4402   VISA    AUD RAC INSURANCE QB 739886 WEST PERTH  AU A88875957 ATM": {
+        "parent_category": "Transportation",
+        "category": "Car Insurance"
+    },
+    "JUST FOR YOU LVNGSTN 24JAN25 ATMA896 19:46:01 4402   VISA    AUD JUST FOR YOU LVNGSTN 553036 CANNING VALE AU A88820235 ATM": {
+        "parent_category": "Entertainment",
+        "category": "Food"
+    },
+    "TRANSFER TO 098-705486-439 YIB147479 INTERNET BANKING": {
+        "parent_category": "Other",
+        "category": "Transfer"
+    },
+    "TRANSFER Aurizn Salary Aurizn Defence P 0721976 Z@LC12003 SYSTEM GENERATED": {
+        "parent_category": "Employer",
+        "category": "Salary"
+    },
+    "TRANSFER RTP 062948 26865234 NOTPROVIDED HKBAAU2SXXXN20250127001259364444430 CommBank Acc 27JAN2025 21:14:35 CommBank transfer YRT875211 INTERNET BANKING": {
+        "parent_category": "Other",
+        "category": "Transfer"
+    },
+    "TRANSFER RTP 923100 313697052 NOTPROVIDED HKBAAU2SXXXN20250127000032029153110 ING Ajithkumar 27JAN2025 18:25:09 ING Transfer YRTB75032 INTERNET BANKING": {
+        "parent_category": "Other",
+        "category": "Transfer"
+    },
+    "AMAZON MARKETPLACE AU 25JAN25 ATMA896 10:49:33 4402   VISA    AUD AMAZON MARKETPLACE AU 124557 SYDNEY SOUTH AU A88828756 ATM": {
+        "parent_category": "Entertainment",
+        "category": "Electronics"
+    },
+    "TRANSFER RTP 086495 534112197 NOTPROVIDED HKBAAU2SXXXN20250126004832839640260 Yellow Lemon Party Hire 26JAN2025 11:13:16 Ajith proposal picnic YRTN73539 INTERNET BANKING": {
+        "parent_category": "Entertainment",
+        "category": "Fun"
+    },
+    "WOOLWORTHS/NICHOLSON RD 24JAN25 ATMA896 19:55:08 4402   VISA    AUD WOOLWORTHS/NICHOLSON RD 108393&CANNINGVALE AU A88833496 ATM": {
+        "parent_category": "Household",
+        "category": "Grocery"
+    }
+}
