@@ -4,6 +4,35 @@ import json
 import os
 from datetime import datetime
 
+def parse_flexible_date(date_str, format_list):
+    """
+    Try multiple date formats until one works.
+    Returns parsed datetime object or None if no format works.
+    """
+    for format_str in format_list:
+        try:
+            return datetime.strptime(date_str, format_str)
+        except ValueError:
+            continue
+    return None
+
+def get_date_formats(bank_config):
+    """
+    Get date formats from bank config, supporting both old and new format.
+    Returns list of date formats to try.
+    """
+    # New format: multiple formats in a list
+    if "date_formats" in bank_config:
+        return bank_config["date_formats"]
+    
+    # Old format: single format (backward compatibility)
+    elif "date_format" in bank_config:
+        return [bank_config["date_format"]]
+    
+    # Fallback to common formats if none specified
+    else:
+        return ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y"]
+
 def load_accounts():
     """Load accounts from data/accounts.json"""
     try:
@@ -122,13 +151,16 @@ def convert_command(args):
             print(f"Error: Invalid type_determination for bank '{args.bank}'")
             return
 
-        # Parse and format date to Bluecoins format (M/D/YYYY)
-        try:
-            date = datetime.strptime(date_str, bank_config["date_format"])
-            formatted_date = date.strftime("%m/%d/%Y")
-        except ValueError:
-            print(f"Error: Invalid date '{date_str}' in transaction: {row}")
+        # Parse and format date to Bluecoins format (M/D/YYYY) using flexible parsing
+        date_formats = get_date_formats(bank_config)
+        date = parse_flexible_date(date_str, date_formats)
+        
+        if date is None:
+            print(f"Error: Could not parse date '{date_str}' with any of these formats: {date_formats}")
+            print(f"Transaction: {description}")
             continue
+        
+        formatted_date = date.strftime("%m/%d/%Y")
 
         # Handle categories
         if description in category_mapping:

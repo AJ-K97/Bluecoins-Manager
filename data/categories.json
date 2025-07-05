@@ -1,53 +1,67 @@
 {
     "Bluecoins": {
         "expense": {
+            "Entertainment": [
+                "App/Subscription",
+                "Shopping",
+                "Game Dev",
+                "Movies",
+                "Sports",                
+                "Food",
+                "Electronics",
+                "Fun",
+                "Travel"
+            ],
+            "Health & Fitness": [
+                "Beauty",
+                "Health Insurance",
+                "Gym/Fitness Memberships",
+                "Medical Expenses",
+                "Sports & Recreation"
+            ],
+            "Household": [
+                "Clothing",
+                "Grocery",
+                "School"
+            ],   
             "Transportation": [
                 "Car Insurance",
                 "Fuel",
                 "Maintenance",
-                "Transport"
+                "Parking Fees",
+                "Public Transport"
+            ],                                 
+            "Utilities": [
+                "Cable",
+                "Electricity",
+                "Vehicle",
+                "Water"
             ],
-            "Health & Fitness": [
-                "Health Insurance",
-                "Gym",
-                "Medical"
-            ],
-            "Entertainment": [
-                "App/Subscription",
-                "Shopping",
-                "Food",
-                "Electronics",
-                "Fun"
-            ],
-            "Household": [
-                "Grocery",
-                "Utilities",
-                "Home Maintenance"
-            ],
-            "Other": [
+            "Others": [
+                "Adjustment",
+                "Fees",
+                "Investment",
+                "Tmp",
                 "Transfer",
-                "Refunds",
-                "Miscellaneous"
-            ],
-            "Technology": [
-                "Software"
+                "Others"
             ]
         },
         "income": {
             "Employer": [
                 "Salary",
-                "Bonus",
-                "Benefits"
+                "Bonus"
+            ],
+            "Friends": [
+                "Transfer"
             ],
             "Investment": [
                 "Dividends",
                 "Interest",
-                "Capital Gains"
+                "Profit/Returns"
             ],
             "Other": [
                 "Refunds",
-                "Gifts",
-                "Miscellaneous"
+                "Others"
             ]
         }
     }

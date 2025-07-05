@@ -2,14 +2,14 @@
     "banks": {
         "HSBC": {
             "date_column": "Transaction Date",
-            "date_format": "%d %b %Y",
+            "date_formats": ["%d %b %Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"],
             "description_column": "Description",
             "amount_column": "Amount",
             "type_determination": "amount_sign"
         },
         "Wise": {
             "date_column": "Created on",
-            "date_format": "%d-%m-%Y %H:%M:%S",
+            "date_formats": ["%Y-%m-%d %H:%M:%S", "%d-%m-%Y %H:%M:%S", "%d/%m/%Y %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"],
             "description_column": "Target name",
             "amount_column": "Source amount (after fees)",
             "type_determination": "direction_column",

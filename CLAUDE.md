@@ -90,21 +90,38 @@ python main.py convert --bank HSBC --input input.csv --output output.csv --use-m
 
 ### Bank Configuration (`data/banks_config.json`)
 
-Defines column mappings and parsing rules for each bank:
+Defines column mappings and parsing rules for each bank with **flexible date format support**:
 
 ```json
 {
   "banks": {
     "HSBC": {
       "date_column": "Transaction Date",
-      "date_format": "%d %b %Y",
+      "date_formats": ["%d %b %Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"],
       "description_column": "Description",
       "amount_column": "Amount",
       "type_determination": "amount_sign"
+    },
+    "Wise": {
+      "date_column": "Created on",
+      "date_formats": ["%Y-%m-%d %H:%M:%S", "%d-%m-%Y %H:%M:%S", "%d/%m/%Y %H:%M:%S"],
+      "description_column": "Target name",
+      "amount_column": "Source amount (after fees)",
+      "type_determination": "direction_column",
+      "direction_column": "Direction",
+      "direction_in_value": "IN",
+      "direction_out_value": "OUT"
     }
   }
 }
 ```
+
+**Date Format Features:**
+- **Multiple formats per bank**: Uses `date_formats` array to try multiple date patterns
+- **Automatic fallback**: Tries each format until one works successfully  
+- **Backward compatibility**: Still supports old `date_format` (single format) configs
+- **Common format fallback**: Uses common patterns if no formats specified
+- **Consistent output**: Always converts to Bluecoins format `%m/%d/%Y`
 
 ### Account Management (`data/accounts.json`)
 
@@ -151,13 +168,14 @@ Persistent storage for learned transaction categorizations:
 - All configuration stored in `data/` directory for organization
 - Interactive category assignment pauses execution for user input during conversion
 - Modular CLI design allows easy extension of subcommands
-- Date parsing uses bank-specific formats defined in configuration
+- **Flexible date parsing**: Supports multiple date formats per bank with automatic fallback
 - Amount handling converts to absolute values for Bluecoins compatibility
 - CSV files are expected to be UTF-8 encoded with BOM support
 
 ## Key Patterns
 
 - **Bank Format Abstraction**: Each bank has configurable column mappings rather than hardcoded parsing
+- **Flexible Date Parsing**: Tries multiple date formats per bank until one succeeds, with automatic fallback
 - **Interactive Category Learning**: Unknown transactions prompt for categorization, building a persistent mapping
 - **Flexible Amount Handling**: Supports both signed amounts and separate direction columns
 - **Clean Data Processing**: Handles whitespace, non-breaking spaces, and formatting inconsistencies
