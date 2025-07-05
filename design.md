@@ -7,7 +7,7 @@ You're building a **Python CLI toolkit** to process financial transaction data f
 
 - Convert files into a standardized output format.
 - Map descriptions to categories using a customizable ruleset and optionally ML model.
-- Support multiple banks' CSV formats (e.g., HSBC, ING).
+- Support multiple banks' CSV formats (e.g., HSBC, Wise).
 - Allow local JSON-based configuration for `accounts` and `category mappings`.
 - Be parameter-based and modular, so users can manage configs from CLI (`--add`, `--delete`, etc.).
 - Be easily extendable with ML classification support for future automation.
@@ -31,7 +31,7 @@ python main.py account --delete HSBC
 - Support `--add` and `--delete` flags under `account`.
 - Load/edit/save JSON file that stores accounts as a list:
 ```json
-["HSBC", "ING", "CommBank"]
+["HSBC", "Wise", "CommBank"]
 ```
 
 ---
@@ -71,7 +71,7 @@ python main.py category --template Bluecoins --delete --parent "Car" --child "Fu
 
 ### 3. 📁 Parsing Input CSVs Based on Bank Format
 
-**Supported banks**: `HSBC`, `ING`
+**Supported banks**: `HSBC`, `Wise`
 
 **Each bank has different column structure.**
 
@@ -80,7 +80,7 @@ python main.py category --template Bluecoins --delete --parent "Car" --child "Fu
 ```python
 BANK_FORMATS = {
     "HSBC": {"date": "Date", "account": "Account", "description": "Description", "credit": "Credit", "debit": "Debit"},
-    "ING": {"date": "Transaction Date", "account": "Account Name", "description": "Narrative", "credit": "Cr", "debit": "Dr"}
+    "Wise": {"date": "Transaction Date", "account": "Account Name", "description": "Narrative", "credit": "Cr", "debit": "Dr"}
 }
 ```
 

@@ -1,0 +1,54 @@
+{
+    "Bluecoins": {
+        "expense": {
+            "Transportation": [
+                "Car Insurance",
+                "Fuel",
+                "Maintenance",
+                "Transport"
+            ],
+            "Health & Fitness": [
+                "Health Insurance",
+                "Gym",
+                "Medical"
+            ],
+            "Entertainment": [
+                "App/Subscription",
+                "Shopping",
+                "Food",
+                "Electronics",
+                "Fun"
+            ],
+            "Household": [
+                "Grocery",
+                "Utilities",
+                "Home Maintenance"
+            ],
+            "Other": [
+                "Transfer",
+                "Refunds",
+                "Miscellaneous"
+            ],
+            "Technology": [
+                "Software"
+            ]
+        },
+        "income": {
+            "Employer": [
+                "Salary",
+                "Bonus",
+                "Benefits"
+            ],
+            "Investment": [
+                "Dividends",
+                "Interest",
+                "Capital Gains"
+            ],
+            "Other": [
+                "Refunds",
+                "Gifts",
+                "Miscellaneous"
+            ]
+        }
+    }
+}

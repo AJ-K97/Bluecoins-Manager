@@ -27,7 +27,7 @@ Develop a Python-based Command-Line Interface (CLI) toolkit that converts bank t
 
 1. **Account Management**
 
-   - Add or delete financial institutions (e.g., HSBC, ING).
+   - Add or delete financial institutions (e.g., HSBC, Wise).
    - Stored in `data/accounts.json`.
 
 2. **Category Management**
@@ -92,7 +92,7 @@ Develop a Python-based Command-Line Interface (CLI) toolkit that converts bank t
 
 **Tasks:**
 
-- Define `BANK_FORMATS` dictionary for ING and HSBC.
+- Define `BANK_FORMATS` dictionary for Wise and HSBC.
 - Implement parser that normalizes input CSV columns.
 - Validate parser with sample data.
 
@@ -129,7 +129,7 @@ Develop a Python-based Command-Line Interface (CLI) toolkit that converts bank t
 
 **Tasks:**
 
-- Add sample CSVs for HSBC & ING.
+- Add sample CSVs for HSBC & Wise.
 - Write `README.md` for usage guide.
 - Add CLI help messages and examples.
 - Final code cleanup and modular refactor if needed.

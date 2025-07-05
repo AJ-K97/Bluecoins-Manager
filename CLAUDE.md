@@ -8,29 +8,41 @@ This is a **Financial CLI Toolkit** - a Python application that converts bank tr
 
 ## Current Architecture
 
-The project is currently in an early prototype stage with a single `main.py` file that:
+The project has been refactored into a modular CLI toolkit with subcommands:
 
-- Reads bank transaction CSV files using configurable column mappings
-- Converts transactions to Bluecoins CSV format
-- Handles interactive category assignment with persistent storage
-- Supports multiple bank formats (HSBC, Wise) through `banks_config.json`
+- **Account Management** - Add, delete, and list financial institutions
+- **Category Management** - Hierarchical categories with template support
+- **File Conversion** - Convert bank CSV files to Bluecoins format
+- **Interactive Categorization** - Learn and persist transaction categories
 
 ### Key Components
 
-- **`main.py`** - Main conversion script with CLI interface
-- **`banks_config.json`** - Bank-specific column mappings and date formats
-- **`category_mapping.json`** - Persistent storage for transaction categorization
+- **`main.py`** - Modular CLI with subcommands (account, category, convert)
+- **`data/banks_config.json`** - Bank-specific column mappings and date formats
+- **`data/accounts.json`** - List of configured financial institutions
+- **`data/categories.json`** - Hierarchical category templates
+- **`data/category_mapping.json`** - Persistent transaction categorization mappings
 
 ## Common Development Commands
 
 ### Running the Application
 
 ```bash
-# Convert bank CSV to Bluecoins format
-python3 main.py --bank HSBC --input input.csv --output output.csv --account-type "Bank" --account "HSBC Savings"
-
-# View help
+# View all available commands
 python3 main.py --help
+
+# Account management
+python3 main.py account --list
+python3 main.py account --add "CommBank"
+python3 main.py account --delete "CommBank"
+
+# Category management
+python3 main.py category --list
+python3 main.py category --add --type expense --parent "Technology" --child "Software"
+python3 main.py category --delete --type expense --parent "Technology" --child "Software"
+
+# Convert bank CSV to Bluecoins format
+python3 main.py convert --bank HSBC --input input.csv --output output.csv --account-type "Bank" --account "HSBC Savings"
 ```
 
 ### Testing
@@ -41,47 +53,42 @@ The project currently has no automated tests. Testing is done manually by:
 2. Verifying output format matches Bluecoins requirements
 3. Checking category assignment persistence
 
-## Planned Architecture (Per spec.md)
+## Current Implementation Status
 
-The project will evolve into a modular structure with:
+✅ **COMPLETED SPRINTS:**
+- **Sprint 1**: CLI structure with account management subcommands
+- **Sprint 2**: Category management with hierarchical templates
+- **Sprint 3**: Bank format handling and input parsing
+- **Sprint 4**: File conversion engine with subcommand interface
+
+❌ **REMAINING WORK:**
+- **Sprint 5**: ML-based auto-categorization (optional)
+- **Sprint 6**: Final testing and documentation
+
+### Next Phase - ML Integration (Optional)
+
+The remaining work involves adding ML capabilities:
 
 ```
-project_root/
-├── main.py               # CLI entry point with subcommands
-├── parser.py             # Bank format parsing logic
-├── converter.py          # CSV conversion engine
-├── config_manager.py     # JSON config management
-├── model/
-│   ├── train_model.py    # ML model training
-│   ├── predict.py        # ML prediction logic
-│   └── model.pkl         # Trained model
-├── data/
-│   ├── accounts.json     # Account management
-│   ├── categories.json   # Category hierarchy
-│   └── sample_dataset.csv
+model/
+├── train_model.py        # ML model training
+├── predict.py           # ML prediction logic
+└── model.pkl            # Trained model
 ```
 
-### Future CLI Commands
+### Future ML Commands
 
 ```bash
-# Account management
-python main.py account --add HSBC
-python main.py account --delete HSBC
+# Train model from existing category mappings
+python main.py train-model --dataset data/category_mapping.json
 
-# Category management  
-python main.py category --template Bluecoins --add "expense" --parent "Car" --child "Fuel"
-python main.py category --template Bluecoins --delete --parent "Car" --child "Fuel"
-
-# File conversion
-python main.py convert --input input.csv --output output.csv --bank HSBC --template Bluecoins
-
-# ML model training
-python main.py train-model --dataset sample_dataset.csv
+# Use ML for auto-categorization during conversion
+python main.py convert --bank HSBC --input input.csv --output output.csv --use-ml
 ```
 
 ## Configuration Files
 
-### Bank Configuration (`banks_config.json`)
+### Bank Configuration (`data/banks_config.json`)
 
 Defines column mappings and parsing rules for each bank:
 
@@ -99,9 +106,35 @@ Defines column mappings and parsing rules for each bank:
 }
 ```
 
-### Category Mapping (`category_mapping.json`)
+### Account Management (`data/accounts.json`)
 
-Stores user-defined transaction categorizations for consistency:
+Simple list of configured financial institutions:
+
+```json
+["HSBC", "Wise", "CommBank"]
+```
+
+### Category Templates (`data/categories.json`)
+
+Hierarchical category structure with template support:
+
+```json
+{
+  "Bluecoins": {
+    "expense": {
+      "Transportation": ["Car Insurance", "Fuel", "Maintenance"],
+      "Entertainment": ["App/Subscription", "Shopping", "Food"]
+    },
+    "income": {
+      "Employer": ["Salary", "Bonus", "Benefits"]
+    }
+  }
+}
+```
+
+### Transaction Mappings (`data/category_mapping.json`)
+
+Persistent storage for learned transaction categorizations:
 
 ```json
 {
@@ -114,9 +147,11 @@ Stores user-defined transaction categorizations for consistency:
 
 ## Development Notes
 
-- The current implementation requires Python 3.x with no external dependencies
-- Interactive category assignment pauses execution for user input
-- Date parsing uses specific formats defined per bank
+- Python 3.x required with no external dependencies (yet)
+- All configuration stored in `data/` directory for organization
+- Interactive category assignment pauses execution for user input during conversion
+- Modular CLI design allows easy extension of subcommands
+- Date parsing uses bank-specific formats defined in configuration
 - Amount handling converts to absolute values for Bluecoins compatibility
 - CSV files are expected to be UTF-8 encoded with BOM support
 

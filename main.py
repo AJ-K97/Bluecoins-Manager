@@ -1,24 +1,58 @@
 import argparse
 import csv
 import json
+import os
 from datetime import datetime
 
-def main():
-    # Set up command-line argument parser
-    parser = argparse.ArgumentParser(description="Convert bank CSV to Bluecoins CSV")
-    parser.add_argument("--bank", required=True, help="Bank name (e.g., ANZ, Wise)")
-    parser.add_argument("--input", required=True, help="Input CSV file path")
-    parser.add_argument("--output", required=True, help="Output CSV file path")
-    parser.add_argument("--account-type", required=True, help="Account type (e.g., Bank, Credit Card)")
-    parser.add_argument("--account", required=True, help="Account name (e.g., ANZ Savings)")
-    args = parser.parse_args()
+def load_accounts():
+    """Load accounts from data/accounts.json"""
+    try:
+        with open("data/accounts.json", "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return []
 
+def save_accounts(accounts):
+    """Save accounts to data/accounts.json"""
+    with open("data/accounts.json", "w") as f:
+        json.dump(accounts, f, indent=4)
+
+def account_command(args):
+    """Handle account subcommand"""
+    accounts = load_accounts()
+    
+    if args.add:
+        if args.add in accounts:
+            print(f"Account '{args.add}' already exists.")
+        else:
+            accounts.append(args.add)
+            save_accounts(accounts)
+            print(f"Account '{args.add}' added successfully.")
+    
+    elif args.delete:
+        if args.delete in accounts:
+            accounts.remove(args.delete)
+            save_accounts(accounts)
+            print(f"Account '{args.delete}' deleted successfully.")
+        else:
+            print(f"Account '{args.delete}' not found.")
+    
+    elif args.list:
+        if accounts:
+            print("Available accounts:")
+            for account in accounts:
+                print(f"  - {account}")
+        else:
+            print("No accounts configured.")
+
+def convert_command(args):
+    """Handle convert subcommand - preserved from original functionality"""
     # Load bank configuration
     try:
-        with open("banks_config.json", "r") as f:
+        with open("data/banks_config.json", "r") as f:
             config = json.load(f)
     except FileNotFoundError:
-        print("Error: banks_config.json not found. Please create it with bank mappings.")
+        print("Error: data/banks_config.json not found. Please create it with bank mappings.")
         return
     if args.bank not in config["banks"]:
         print(f"Error: Bank '{args.bank}' not found in configuration.")
@@ -27,7 +61,7 @@ def main():
 
     # Load existing category mappings
     try:
-        with open("category_mapping.json", "r") as f:
+        with open("data/category_mapping.json", "r") as f:
             category_mapping = json.load(f)
     except FileNotFoundError:
         category_mapping = {}
@@ -138,9 +172,137 @@ def main():
     print(f"Successfully wrote {len(bluecoins_rows)} transactions to '{args.output}'")
 
     # Save updated category mappings
-    with open("category_mapping.json", "w") as f:
+    with open("data/category_mapping.json", "w") as f:
         json.dump(category_mapping, f, indent=4)
-    print("Category mappings saved to 'category_mapping.json'")
+    print("Category mappings saved to 'data/category_mapping.json'")
+
+def load_categories():
+    """Load categories from data/categories.json"""
+    try:
+        with open("data/categories.json", "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+def save_categories(categories):
+    """Save categories to data/categories.json"""
+    with open("data/categories.json", "w") as f:
+        json.dump(categories, f, indent=4)
+
+def category_command(args):
+    """Handle category subcommand"""
+    categories = load_categories()
+    
+    if args.list:
+        if not categories:
+            print("No category templates found.")
+            return
+        
+        template = args.template or "Bluecoins"
+        if template not in categories:
+            print(f"Template '{template}' not found.")
+            return
+        
+        print(f"Categories for template '{template}':")
+        for type_name, parent_categories in categories[template].items():
+            print(f"  {type_name.upper()}:")
+            for parent, children in parent_categories.items():
+                print(f"    {parent}:")
+                for child in children:
+                    print(f"      - {child}")
+    
+    elif args.add:
+        template = args.template or "Bluecoins"
+        if template not in categories:
+            categories[template] = {"expense": {}, "income": {}}
+        
+        if args.type not in categories[template]:
+            categories[template][args.type] = {}
+        
+        if args.parent not in categories[template][args.type]:
+            categories[template][args.type][args.parent] = []
+        
+        if args.child in categories[template][args.type][args.parent]:
+            print(f"Category '{args.child}' already exists under '{args.parent}'.")
+        else:
+            categories[template][args.type][args.parent].append(args.child)
+            save_categories(categories)
+            print(f"Added category '{args.child}' under '{args.parent}' in {args.type} template '{template}'.")
+    
+    elif args.delete:
+        template = args.template or "Bluecoins"
+        if template not in categories:
+            print(f"Template '{template}' not found.")
+            return
+        
+        if args.type not in categories[template]:
+            print(f"Type '{args.type}' not found in template '{template}'.")
+            return
+        
+        if args.parent not in categories[template][args.type]:
+            print(f"Parent category '{args.parent}' not found.")
+            return
+        
+        if args.child not in categories[template][args.type][args.parent]:
+            print(f"Category '{args.child}' not found under '{args.parent}'.")
+            return
+        
+        categories[template][args.type][args.parent].remove(args.child)
+        
+        # Clean up empty parent categories
+        if not categories[template][args.type][args.parent]:
+            del categories[template][args.type][args.parent]
+        
+        save_categories(categories)
+        print(f"Deleted category '{args.child}' from '{args.parent}' in {args.type} template '{template}'.")
+
+def main():
+    # Set up main parser
+    parser = argparse.ArgumentParser(description="Financial CLI Toolkit")
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # Account subcommand
+    account_parser = subparsers.add_parser("account", help="Manage financial accounts")
+    account_group = account_parser.add_mutually_exclusive_group(required=True)
+    account_group.add_argument("--add", help="Add a new account")
+    account_group.add_argument("--delete", help="Delete an existing account")
+    account_group.add_argument("--list", action="store_true", help="List all accounts")
+
+    # Category subcommand
+    category_parser = subparsers.add_parser("category", help="Manage transaction categories")
+    category_group = category_parser.add_mutually_exclusive_group(required=True)
+    category_group.add_argument("--add", action="store_true", help="Add a new category")
+    category_group.add_argument("--delete", action="store_true", help="Delete a category")
+    category_group.add_argument("--list", action="store_true", help="List all categories")
+    category_parser.add_argument("--template", default="Bluecoins", help="Template name (default: Bluecoins)")
+    category_parser.add_argument("--type", choices=["expense", "income"], help="Category type (expense or income)")
+    category_parser.add_argument("--parent", help="Parent category name")
+    category_parser.add_argument("--child", help="Child category name")
+
+    # Convert subcommand
+    convert_parser = subparsers.add_parser("convert", help="Convert bank CSV to Bluecoins format")
+    convert_parser.add_argument("--bank", required=True, help="Bank name (e.g., HSBC, Wise)")
+    convert_parser.add_argument("--input", required=True, help="Input CSV file path")
+    convert_parser.add_argument("--output", required=True, help="Output CSV file path")
+    convert_parser.add_argument("--account-type", required=True, help="Account type (e.g., Bank, Credit Card)")
+    convert_parser.add_argument("--account", required=True, help="Account name (e.g., HSBC Savings)")
+
+    # Parse arguments
+    args = parser.parse_args()
+
+    # Ensure data directory exists
+    if not os.path.exists("data"):
+        os.makedirs("data")
+
+    # Route to appropriate command
+    if args.command == "account":
+        account_command(args)
+    elif args.command == "category":
+        category_command(args)
+    elif args.command == "convert":
+        convert_command(args)
+    else:
+        parser.print_help()
 
 if __name__ == "__main__":
     main()
