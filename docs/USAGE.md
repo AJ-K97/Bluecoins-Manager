@@ -61,6 +61,8 @@ python3 main.py
 ```
 This will guide you through:
 -   Importing transactions (with file pickers!)
+-   **Managing Transactions** (View recent, Edit Category, Delete)
+-   **Exporting** to Bluecoins CSV (Filtered by account/date)
 -   Managing accounts
 
 ### B. Command Mode

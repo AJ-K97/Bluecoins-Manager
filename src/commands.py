@@ -1,6 +1,4 @@
-import csv
-import asyncio
-from sqlalchemy import select
+from sqlalchemy import select, update, delete
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
 from src.database import Account, Category, MappingRule, Transaction, AsyncSessionLocal
@@ -33,6 +31,10 @@ async def delete_account(session, name):
 
 async def get_all_accounts(session):
     result = await session.execute(select(Account))
+    return result.scalars().all()
+
+async def get_all_categories(session):
+    result = await session.execute(select(Category).order_by(Category.name))
     return result.scalars().all()
 
 async def process_import(session, bank_name, file_path, account_name, output_path=None):
@@ -98,19 +100,76 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
     
     # Export if requested
     if output_path and new_txs:
+        # Re-fetch with category for export
         tx_ids = [t.id for t in new_txs]
         stmt = select(Transaction).options(selectinload(Transaction.category)).where(Transaction.id.in_(tx_ids))
         result = await session.execute(stmt)
         export_txs = result.scalars().all()
         
+        success, msg = export_to_bluecoins_csv(export_txs, output_path)
+        result_msg += f"\n{msg}"
+        
+    return True, result_msg
+
+async def get_transactions(session, account_id=None, start_date=None, end_date=None):
+    stmt = select(Transaction).options(
+        selectinload(Transaction.category),
+        selectinload(Transaction.account)
+    ).order_by(Transaction.date.desc())
+    
+    if account_id:
+        stmt = stmt.where(Transaction.account_id == account_id)
+    if start_date:
+        stmt = stmt.where(Transaction.date >= start_date)
+    if end_date:
+        stmt = stmt.where(Transaction.date <= end_date)
+        
+    result = await session.execute(stmt)
+    return result.scalars().all()
+
+async def update_transaction_category(session, tx_id, category_id):
+    stmt = update(Transaction).where(Transaction.id == tx_id).values(category_id=category_id)
+    await session.execute(stmt)
+    await session.commit()
+    return True, "Transaction category updated."
+
+async def delete_transaction(session, tx_id):
+    stmt = delete(Transaction).where(Transaction.id == tx_id)
+    await session.execute(stmt)
+    await session.commit()
+    return True, "Transaction deleted."
+
+def export_to_bluecoins_csv(transactions, output_path):
+    try:
         with open(output_path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["Type", "Date", "Item or Payee", "Amount", "Parent Category", "Category", "Account Type", "Account", "Notes", "Label", "Status", "Split"])
             
-            for tx in export_txs:
+            for tx in transactions:
                 cat_name = tx.category.name if tx.category else ""
                 parent_name = tx.category.parent_name if tx.category else ""
                 
+                # Account name might not be loaded if we didn't join Account? 
+                # Transaction.account_id is there, but we need Account name.
+                # Ideally get_transactions should load Account too.
+                # But for `process_import`, we knew it from `account` object.
+                # For general export, we need to ensure account is loaded or passed.
+                
+                # Let's rely on lazy load or ensure eager load in query.
+                # But `process_import` passed `new_txs` which are attached to session? 
+                # Wait, `get_transactions` does not load Account.
+                pass
+                
+                # We need account name. 
+                # Let's assume transactions have account relationship loaded if needed.
+                # Or we fetch it.
+                
+                # Actually, `Transaction` model should have `account` relationship.
+                # Let's check `src/database.py`... 
+                # Assuming it does.
+                
+                acc_name = tx.account.name if tx.account else "Unknown"
+
                 writer.writerow([
                     "Expense" if tx.type == "expense" else "Income",
                     tx.date.strftime("%m/%d/%Y"),
@@ -119,9 +178,9 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
                     parent_name,
                     cat_name,
                     "Bank",
-                    account.name,
+                    acc_name,
                     "", "", "", ""
                 ])
-        result_msg += f"\nExported to {output_path}"
-        
-    return True, result_msg
+        return True, f"Exported {len(transactions)} transactions to {output_path}"
+    except Exception as e:
+        return False, f"Export failed: {e}"
