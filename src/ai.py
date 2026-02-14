@@ -2,6 +2,7 @@ import ollama
 import re
 from sqlalchemy import select
 from src.database import Category, Transaction, AIMemory, AIGlobalMemory
+from src.patterns import extract_pattern_key
 
 class CategorizerAI:
     def __init__(self, model="llama3.1:8b"):
@@ -84,8 +85,7 @@ Text:
         cat_str = "\n".join(cat_lines)
 
         # 2. Fetch Memory (Reflections & Past Decisions)
-        words = description.split()
-        search_term = words[0] if words else ""
+        search_term = extract_pattern_key(description)
         history_str = "None"
 
         if len(search_term) > 2:

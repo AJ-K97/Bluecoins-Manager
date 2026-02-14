@@ -11,7 +11,8 @@ from src.commands import (
     get_transactions, update_transaction_category, delete_transaction, export_to_bluecoins_csv,
     get_all_categories, mark_transaction_verified, update_transaction_amount,
     add_category, delete_category, get_category_display_from_values, add_global_memory_instruction,
-    get_global_memory_entries, set_global_memory_active, delete_global_memory_instruction
+    get_global_memory_entries, set_global_memory_active, delete_global_memory_instruction,
+    reset_database, seed_reference_data
 )
 from src.ai import CategorizerAI
 
@@ -476,6 +477,34 @@ async def manage_global_rulebook_menu(session):
                     ok, msg = await delete_global_memory_instruction(session, selected_id)
                     print(f"\n{msg}\n")
 
+async def reset_database_menu(session):
+    print("\n⚠️  Danger Zone: Reset Database")
+    print("This will permanently delete all accounts, categories, transactions, and AI memory.\n")
+
+    confirm_1 = await inquirer.confirm(
+        message="Do you want to reset the entire database?"
+    ).execute_async()
+    if not confirm_1:
+        return
+
+    confirm_text = await inquirer.text(
+        message="Type RESET to confirm:"
+    ).execute_async()
+    if confirm_text != "RESET":
+        print("Confirmation text mismatch. Reset cancelled.\n")
+        return
+
+    confirm_2 = await inquirer.confirm(
+        message="Final confirmation: This cannot be undone. Proceed?"
+    ).execute_async()
+    if not confirm_2:
+        return
+
+    ok, msg = await reset_database()
+    print(f"\n{msg}")
+    ok_seed, seed_msg = await seed_reference_data(session)
+    print(f"{seed_msg}\n")
+
 
 
 async def import_review_callback(tx_data, current_cat_id, confidence, current_type, reasoning, session):
@@ -688,6 +717,8 @@ async def interactive_main():
     await init_db()
     
     async with AsyncSessionLocal() as session:
+        _, seed_msg = await seed_reference_data(session)
+        print(seed_msg)
         while True:
             action = await inquirer.select(
                 message="Main Menu:",
@@ -697,6 +728,7 @@ async def interactive_main():
                     "Manage Categories",
                     "Manage Accounts",
                     "Manage AI Rulebook",
+                    "Reset Database",
                     "Chat with your Data",
                     Choice(value=None, name="Exit")
                 ],
@@ -716,6 +748,8 @@ async def interactive_main():
                 await manage_categories_menu(session)
             elif action == "Manage AI Rulebook":
                 await manage_global_rulebook_menu(session)
+            elif action == "Reset Database":
+                await reset_database_menu(session)
             elif action == "Chat with your Data":
                 await chat_wizard(session)
 

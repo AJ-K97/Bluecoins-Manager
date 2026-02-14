@@ -1,10 +1,13 @@
 import csv
+import json
+import os
 from sqlalchemy import select, update, delete
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
-from src.database import Account, Category, Transaction, AsyncSessionLocal, AIMemory, AIGlobalMemory
+from src.database import Account, Category, Transaction, AsyncSessionLocal, AIMemory, AIGlobalMemory, Base, engine
 from src.parser import BankParser
 from src.ai import CategorizerAI
+from src.patterns import extract_pattern_key
 
 async def list_accounts(session):
     result = await session.execute(select(Account))
@@ -94,6 +97,56 @@ async def delete_global_memory_instruction(session, entry_id):
     await session.delete(row)
     await session.commit()
     return True, "Rule deleted."
+
+async def reset_database():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+    return True, "Database reset complete."
+
+async def seed_reference_data(session, accounts_path="data/accounts.json", categories_path="data/categories.json"):
+    accounts_added = 0
+    categories_added = 0
+
+    if os.path.exists(accounts_path):
+        with open(accounts_path, "r", encoding="utf-8") as f:
+            accounts_data = json.load(f)
+        for account_name in accounts_data:
+            name = str(account_name).strip()
+            if not name:
+                continue
+            res = await session.execute(select(Account).where(Account.name == name))
+            if not res.scalar_one_or_none():
+                session.add(Account(name=name, institution=name))
+                accounts_added += 1
+
+    if os.path.exists(categories_path):
+        with open(categories_path, "r", encoding="utf-8") as f:
+            categories_data = json.load(f)
+
+        for _template_name, types in categories_data.items():
+            for type_name, parents in types.items():
+                for parent_name, children in parents.items():
+                    for child_name in children:
+                        child = str(child_name).strip()
+                        parent = str(parent_name).strip()
+                        tx_type = str(type_name).strip()
+                        if not child or not parent or not tx_type:
+                            continue
+
+                        stmt = select(Category).where(
+                            Category.name == child,
+                            Category.parent_name == parent,
+                            Category.type == tx_type
+                        )
+                        existing = await session.execute(stmt)
+                        if existing.scalar_one_or_none():
+                            continue
+                        session.add(Category(name=child, parent_name=parent, type=tx_type))
+                        categories_added += 1
+
+    await session.commit()
+    return True, f"Seed complete. Added {accounts_added} accounts and {categories_added} categories."
 
 async def add_category(session, name, parent_name, type):
     # Check if exists
@@ -227,8 +280,7 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
         await session.flush() # Get ID
         
         # Create Memory Entry
-        words = tx_data["description"].split()
-        pattern_key = words[0].upper() if words else "UNKNOWN"
+        pattern_key = extract_pattern_key(tx_data["description"])
         
         memory = AIMemory(
             transaction_id=new_tx.id,
@@ -326,8 +378,7 @@ async def update_transaction_category(session, tx_id, category_id):
             session.add(memory)
         else:
             # Create new if missing
-            words = tx.description.split()
-            pattern_key = words[0].upper() if words else "UNKNOWN"
+            pattern_key = extract_pattern_key(tx.description)
             new_mem = AIMemory(
                  transaction_id=tx.id,
                  pattern_key=pattern_key,
