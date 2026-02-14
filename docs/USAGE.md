@@ -83,3 +83,24 @@ python3 main.py account --add "My Bank"
 python3 main.py convert --bank HSBC --input path/to/file.csv --account "My Bank" --output results.csv
 ```
 This will also trigger the AI categorization for any unknown transactions!
+
+## 4. 🧠 Local LLM Pipeline (Private + Incremental)
+
+For a complete runbook on building a local model workflow that learns from your transactions and custom skills, see:
+
+- `docs/LOCAL_LLM_PIPELINE.md`
+
+Quick command examples:
+```bash
+# Build/update embedding index from your transactions
+python3 main.py llm reindex
+
+# Add a custom behavioral rule
+python3 main.py llm skill-add --name "review-first" --instruction "If uncertain, recommend review." --priority 10
+
+# Ask questions using your indexed local data
+python3 main.py llm ask --query "What are my top spending categories this month?"
+
+# Export verified examples for periodic LoRA fine-tuning
+python3 main.py llm export-finetune
+```

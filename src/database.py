@@ -85,6 +85,42 @@ class AIGlobalMemory(Base):
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+
+class LLMKnowledgeChunk(Base):
+    __tablename__ = "llm_knowledge_chunks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source_type = Column(String, index=True, nullable=False)  # e.g. transaction
+    source_id = Column(Integer, index=True, nullable=False)
+    content = Column(Text, nullable=False)
+    metadata_json = Column(Text, nullable=True)
+    embedding_model = Column(String, nullable=False)
+    embedding_vector = Column(Text, nullable=False)  # JSON serialized list[float]
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class LLMSkill(Base):
+    __tablename__ = "llm_skills"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True, nullable=False)
+    description = Column(Text, nullable=True)
+    instruction = Column(Text, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    priority = Column(Integer, default=100, nullable=False)  # lower means earlier in prompt
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class LLMFineTuneExample(Base):
+    __tablename__ = "llm_finetune_examples"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source_transaction_id = Column(Integer, ForeignKey("transactions.id"), nullable=False)
+    prompt = Column(Text, nullable=False)
+    response = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 # Add back_populates to Transaction
 Transaction.memory_entries = relationship("AIMemory", back_populates="transaction", cascade="all, delete-orphan")
 
