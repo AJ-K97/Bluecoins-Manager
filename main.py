@@ -5,7 +5,15 @@ import os
 from sqlalchemy.exc import IntegrityError
 from src.database import init_db, AsyncSessionLocal
 from src.interactive import interactive_main
-from src.commands import list_accounts, add_account, delete_account, process_import
+from src.commands import (
+    list_accounts,
+    add_account,
+    delete_account,
+    process_import,
+    rebuild_category_understanding,
+    get_resettable_table_names,
+    reset_selected_tables,
+)
 from src.local_llm import LocalLLMPipeline
 
 async def account_command(args):
@@ -78,6 +86,22 @@ async def llm_command(args):
         elif args.llm_action == "export-finetune":
             stats = await pipeline.export_finetune_jsonl(session, args.output)
             print(f"Exported {stats['examples']} examples to {stats['output_path']}")
+        elif args.llm_action == "rebuild-category-understanding":
+            count = await rebuild_category_understanding(session)
+            await session.commit()
+            print(f"Rebuilt category understanding profiles for {count} categories.")
+
+
+async def db_command(args):
+    async with AsyncSessionLocal() as session:
+        if args.db_action == "list-tables":
+            print("Resettable tables:")
+            for name in get_resettable_table_names():
+                print(f"- {name}")
+        elif args.db_action == "reset":
+            selected = get_resettable_table_names() if args.all else args.tables
+            ok, msg = await reset_selected_tables(session, selected)
+            print(msg)
 
 
 async def main():
@@ -129,6 +153,23 @@ async def main():
     llm_export = llm_subparsers.add_parser("export-finetune")
     llm_export.add_argument("--output", default="data/finetune/transactions_train.jsonl")
 
+    llm_rebuild_cat = llm_subparsers.add_parser("rebuild-category-understanding")
+
+    # Database table maintenance
+    db_parser = subparsers.add_parser("db")
+    db_subparsers = db_parser.add_subparsers(dest="db_action", required=True)
+
+    db_list = db_subparsers.add_parser("list-tables")
+
+    db_reset = db_subparsers.add_parser("reset")
+    db_reset_group = db_reset.add_mutually_exclusive_group(required=True)
+    db_reset_group.add_argument("--all", action="store_true", help="Reset all resettable tables")
+    db_reset_group.add_argument(
+        "--tables",
+        nargs="+",
+        help="Table names to reset. Use `python3 main.py db list-tables` to view options.",
+    )
+
     args = parser.parse_args()
     
     await init_db()
@@ -142,6 +183,8 @@ async def main():
         await convert_command(args)
     elif args.command == "llm":
         await llm_command(args)
+    elif args.command == "db":
+        await db_command(args)
     else:
         parser.print_help()
 

@@ -1,10 +1,24 @@
 import csv
 import json
 import os
-from sqlalchemy import select, update, delete
+from collections import Counter
+from sqlalchemy import select, update, delete, func
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
-from src.database import Account, Category, Transaction, AsyncSessionLocal, AIMemory, AIGlobalMemory, Base, engine
+from src.database import (
+    Account,
+    Category,
+    Transaction,
+    AsyncSessionLocal,
+    AIMemory,
+    AIGlobalMemory,
+    AICategoryUnderstanding,
+    LLMKnowledgeChunk,
+    LLMSkill,
+    LLMFineTuneExample,
+    Base,
+    engine,
+)
 from src.parser import BankParser
 from src.ai import CategorizerAI
 from src.patterns import extract_pattern_key
@@ -40,6 +54,86 @@ async def get_all_accounts(session):
 async def get_all_categories(session):
     result = await session.execute(select(Category).order_by(Category.parent_name, Category.name))
     return result.scalars().all()
+
+
+def format_category_label(parent_name, cat_name, cat_type):
+    parent = parent_name or "Uncategorized"
+    name = cat_name or "Uncategorized"
+    ctype = (cat_type or "unknown").lower()
+    return f"{parent} > {name} [{ctype}]"
+
+
+def format_category_obj_label(category):
+    if not category:
+        return "Uncategorized > Uncategorized [unknown]"
+    return format_category_label(category.parent_name, category.name, category.type)
+
+
+async def rebuild_category_understanding(session, category_ids=None):
+    """
+    Build/update stored category intent profiles from verified transactions.
+    """
+    stmt = select(Category)
+    if category_ids:
+        stmt = stmt.where(Category.id.in_(list(set(category_ids))))
+    cat_res = await session.execute(stmt)
+    categories = cat_res.scalars().all()
+
+    updates = 0
+    for cat in categories:
+        tx_stmt = (
+            select(Transaction)
+            .where(
+                Transaction.category_id == cat.id,
+                Transaction.is_verified.is_(True),
+            )
+            .order_by(Transaction.date.desc())
+            .limit(40)
+        )
+        tx_res = await session.execute(tx_stmt)
+        txs = tx_res.scalars().all()
+
+        pattern_counter = Counter()
+        sample_descriptions = []
+        for tx in txs:
+            key = extract_pattern_key(tx.description)
+            if key:
+                pattern_counter[key] += 1
+            if tx.description:
+                sample_descriptions.append(tx.description)
+
+        top_patterns = [k for k, _ in pattern_counter.most_common(8)]
+        samples = sample_descriptions[:8]
+        verified_count = len(txs)
+
+        understanding = (
+            f"Category intent profile for {format_category_obj_label(cat)}. "
+            f"Use this when merchant/payee intent matches. "
+            f"Verified examples: {verified_count}. "
+            f"Common merchant patterns: {', '.join(top_patterns) if top_patterns else 'none yet'}. "
+            f"Treat this as a strict hint for this specific category and type ({cat.type})."
+        )
+
+        existing_res = await session.execute(
+            select(AICategoryUnderstanding).where(AICategoryUnderstanding.category_id == cat.id)
+        )
+        row = existing_res.scalar_one_or_none()
+        payload = json.dumps({"samples": samples, "patterns": top_patterns}, ensure_ascii=True)
+        if row:
+            row.understanding = understanding
+            row.sample_transactions_json = payload
+            session.add(row)
+        else:
+            session.add(
+                AICategoryUnderstanding(
+                    category_id=cat.id,
+                    understanding=understanding,
+                    sample_transactions_json=payload,
+                )
+            )
+        updates += 1
+
+    return updates
 
 def get_transaction_category_display(tx):
     if tx.type == "transfer" and tx.category_id is None:
@@ -104,6 +198,98 @@ async def reset_database():
         await conn.run_sync(Base.metadata.create_all)
     return True, "Database reset complete."
 
+
+RESETTABLE_MODELS = {
+    "accounts": Account,
+    "categories": Category,
+    "transactions": Transaction,
+    "ai_memory": AIMemory,
+    "ai_global_memory": AIGlobalMemory,
+    "ai_category_understanding": AICategoryUnderstanding,
+    "llm_knowledge_chunks": LLMKnowledgeChunk,
+    "llm_skills": LLMSkill,
+    "llm_finetune_examples": LLMFineTuneExample,
+}
+
+# parent -> hard dependent children (FK/consistency must be addressed first if non-empty)
+RESET_HARD_DEPENDENCIES = {
+    "accounts": ["transactions"],
+    "categories": ["transactions", "ai_category_understanding"],
+    "transactions": ["ai_memory", "llm_finetune_examples"],
+}
+
+# delete order from most dependent to least dependent
+RESET_DELETE_ORDER = [
+    "ai_memory",
+    "llm_finetune_examples",
+    "llm_knowledge_chunks",
+    "ai_category_understanding",
+    "transactions",
+    "accounts",
+    "categories",
+    "ai_global_memory",
+    "llm_skills",
+]
+
+
+def get_resettable_table_names():
+    return list(RESETTABLE_MODELS.keys())
+
+
+async def get_table_row_counts(session, table_names=None):
+    target = table_names or get_resettable_table_names()
+    counts = {}
+    for name in target:
+        model = RESETTABLE_MODELS.get(name)
+        if not model:
+            continue
+        rows = await session.execute(select(func.count()).select_from(model))
+        counts[name] = int(rows.scalar_one() or 0)
+    return counts
+
+
+async def reset_selected_tables(session, table_names):
+    selected = list(dict.fromkeys([(t or "").strip().lower() for t in table_names if (t or "").strip()]))
+    if not selected:
+        return False, "No tables selected."
+
+    invalid = [t for t in selected if t not in RESETTABLE_MODELS]
+    if invalid:
+        valid = ", ".join(get_resettable_table_names())
+        return False, f"Unknown table(s): {', '.join(invalid)}. Valid options: {valid}"
+
+    counts = await get_table_row_counts(session)
+    blockers = []
+    for parent, dependents in RESET_HARD_DEPENDENCIES.items():
+        if parent not in selected:
+            continue
+        for dep in dependents:
+            if dep in selected:
+                continue
+            dep_count = counts.get(dep, 0)
+            if dep_count > 0:
+                blockers.append(
+                    f"Cannot reset '{parent}' without '{dep}' because '{dep}' has {dep_count} rows dependent on '{parent}'."
+                )
+
+    if blockers:
+        return False, "\n".join(blockers)
+
+    for table_name in RESET_DELETE_ORDER:
+        if table_name not in selected:
+            continue
+        await session.execute(delete(RESETTABLE_MODELS[table_name]))
+    await session.commit()
+
+    note = ""
+    if "transactions" in selected and "llm_knowledge_chunks" not in selected:
+        note = (
+            "\nNote: 'transactions' was reset but 'llm_knowledge_chunks' was not. "
+            "Run `python3 main.py llm reindex` or reset 'llm_knowledge_chunks' as well to avoid stale retrieval context."
+        )
+
+    return True, f"Reset completed for tables: {', '.join(selected)}.{note}"
+
 async def seed_reference_data(session, accounts_path="data/accounts.json", categories_path="data/categories.json"):
     accounts_added = 0
     categories_added = 0
@@ -157,13 +343,15 @@ async def add_category(session, name, parent_name, type):
     )
     result = await session.execute(stmt)
     if result.scalar_one_or_none():
-        return False, f"Category '{parent_name} > {name}' already exists."
+        return False, f"Category '{format_category_label(parent_name, name, type)}' already exists."
 
     new_cat = Category(name=name, parent_name=parent_name, type=type)
     session.add(new_cat)
     try:
+        await session.flush()
+        await rebuild_category_understanding(session, category_ids=[new_cat.id])
         await session.commit()
-        return True, f"Category '{parent_name} > {name}' added."
+        return True, f"Category '{format_category_label(parent_name, name, type)}' added."
     except Exception as e:
         await session.rollback()
         return False, f"Error adding category: {e}"
@@ -196,10 +384,17 @@ async def delete_category(session, category_id, reassign_category_id=None, delet
         else:
              return False, f"Category has {count} transactions. Please specify reassign_id or delete_transactions=True."
 
+    mem_res = await session.execute(
+        select(AICategoryUnderstanding).where(AICategoryUnderstanding.category_id == category_id)
+    )
+    mem_row = mem_res.scalar_one_or_none()
+    if mem_row:
+        await session.delete(mem_row)
+
     await session.delete(category)
     try:
         await session.commit()
-        return True, f"Category '{category.parent_name} > {category.name}' deleted."
+        return True, f"Category '{format_category_obj_label(category)}' deleted."
     except Exception as e:
         await session.rollback()
         return False, f"Error deleting category: {e}"
@@ -220,12 +415,16 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
         return False, f"Error parsing file: {e}", []
 
 
-    
+    # Keep category intent profiles warm for AI prompting.
+    await rebuild_category_understanding(session)
+    await session.commit()
+
     # Initialize AI
     ai = CategorizerAI()
     
     new_txs = []
     skipped = 0
+    verified_categories_touched = set()
     
     for tx_data in transactions:
         # Check duplicate
@@ -281,6 +480,8 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
         )
         session.add(new_tx)
         await session.flush() # Get ID
+        if is_verified and cat_id:
+            verified_categories_touched.add(cat_id)
         
         # Create Memory Entry
         pattern_key = extract_pattern_key(tx_data["description"])
@@ -296,6 +497,10 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
         new_txs.append(new_tx)
     
     await session.commit()
+
+    if verified_categories_touched:
+        await rebuild_category_understanding(session, category_ids=list(verified_categories_touched))
+        await session.commit()
     
     result_msg = f"Imported {len(new_txs)} transactions. Skipped {skipped} duplicates."
     
@@ -346,8 +551,18 @@ async def update_transaction_category(session, tx_id, category_id):
     # Check for change
     old_cat_id = tx.category_id
     
+    selected_category = None
+    if category_id:
+        cat_stmt = select(Category).where(Category.id == category_id)
+        cat_res = await session.execute(cat_stmt)
+        selected_category = cat_res.scalar_one_or_none()
+        if not selected_category:
+            return False, "Selected category not found."
+
     # Update Transaction
     tx.category_id = category_id
+    if selected_category:
+        tx.type = selected_category.type
     tx.is_verified = True
     session.add(tx)
     
@@ -358,13 +573,15 @@ async def update_transaction_category(session, tx_id, category_id):
         if old_cat_id:
              r = await session.execute(select(Category).where(Category.id == old_cat_id))
              c = r.scalar_one_or_none()
-             if c: old_cat_name = c.name
+             if c:
+                 old_cat_name = format_category_obj_label(c)
              
         new_cat_name = "None"
         if category_id:
              r = await session.execute(select(Category).where(Category.id == category_id))
              c = r.scalar_one_or_none()
-             if c: new_cat_name = c.name
+             if c:
+                 new_cat_name = format_category_obj_label(c)
         
         # Get Reasoning from memory
         prev_reasoning = memory.ai_reasoning if memory else "Unknown"
@@ -396,6 +613,10 @@ async def update_transaction_category(session, tx_id, category_id):
             memory.user_selected_category_id = category_id
             session.add(memory)
             
+    touched_categories = [c for c in [old_cat_id, category_id] if c]
+    if touched_categories:
+        await rebuild_category_understanding(session, category_ids=touched_categories)
+
     await session.commit()
     return True, "Transaction category updated and verified."
 
@@ -423,7 +644,10 @@ async def mark_transaction_verified(session, tx_id):
         if memory:
             memory.user_selected_category_id = tx.category_id
             session.add(memory)
-            
+
+        if tx.category_id:
+            await rebuild_category_understanding(session, category_ids=[tx.category_id])
+
     await session.commit()
     return True, "Transaction verified."
 

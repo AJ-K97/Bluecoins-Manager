@@ -90,6 +90,11 @@ What it does:
 - computes embeddings,
 - upserts into `llm_knowledge_chunks`.
 
+Rebuild category intent memory (used by categorization prompts):
+```bash
+python3 main.py llm rebuild-category-understanding
+```
+
 ### B. Ask questions against your indexed data
 
 ```bash

@@ -12,11 +12,61 @@ from src.commands import (
     get_all_categories, mark_transaction_verified, update_transaction_amount,
     add_category, delete_category, get_category_display_from_values, add_global_memory_instruction,
     get_global_memory_entries, set_global_memory_active, delete_global_memory_instruction,
-    reset_database, seed_reference_data
+    reset_database, seed_reference_data, format_category_obj_label, format_category_label,
+    get_resettable_table_names, get_table_row_counts, reset_selected_tables
 )
 from src.ai import CategorizerAI
 
 from src.tui import TransactionReviewApp
+
+
+def _group_categories_by_type_and_parent(categories):
+    grouped = {}
+    for c in categories:
+        ctype = (c.type or "unknown").lower()
+        parent = c.parent_name or "Uncategorized"
+        grouped.setdefault(ctype, {}).setdefault(parent, []).append(c)
+    for ctype in grouped:
+        for parent in grouped[ctype]:
+            grouped[ctype][parent] = sorted(grouped[ctype][parent], key=lambda x: x.name.lower())
+    return grouped
+
+
+async def choose_category_tree(session, prompt_prefix="Select Category", default_type=None):
+    cats = await get_all_categories(session)
+    if not cats:
+        return None
+
+    grouped = _group_categories_by_type_and_parent(cats)
+    available_types = sorted(grouped.keys())
+    if default_type and default_type in available_types:
+        available_types = [default_type] + [t for t in available_types if t != default_type]
+
+    selected_type = await inquirer.select(
+        message=f"{prompt_prefix}: Select Type",
+        choices=[Choice(value=t, name=t.upper()) for t in available_types] + [Choice(value=None, name="Cancel")],
+    ).execute_async()
+    if not selected_type:
+        return None
+
+    parent_names = sorted(grouped[selected_type].keys())
+    selected_parent = await inquirer.fuzzy(
+        message=f"{prompt_prefix}: Select Parent ({selected_type})",
+        choices=[Choice(value=p, name=f"{p} [{selected_type}]") for p in parent_names] + [Choice(value=None, name="Back")],
+    ).execute_async()
+    if not selected_parent:
+        return None
+
+    child_choices = [
+        Choice(value=c, name=f"{c.name} [{selected_type}]")
+        for c in grouped[selected_type][selected_parent]
+    ]
+    child_choices.append(Choice(value=None, name="Back"))
+    return await inquirer.fuzzy(
+        message=f"{prompt_prefix}: Select Sub-Category ({selected_type} > {selected_parent})",
+        choices=child_choices,
+    ).execute_async()
+
 
 async def review_transactions(session, transactions):
     """
@@ -66,34 +116,14 @@ async def review_transactions(session, transactions):
         action, tx = result
         
         if action == 'modify':
-            # Hierarchical Category Selection
-            cats = await get_all_categories(session)
-            
-            # 1. Select Parent
-            parent_names = sorted(list(set(c.parent_name for c in cats if c.parent_name)))
-            parent_choices = [Choice(value=p, name=p) for p in parent_names]
-            parent_choices.append(Choice(value=None, name="Cancel"))
-            
-            selected_parent = await inquirer.fuzzy(
-                message=f"Select Parent Category for '{tx.description}':",
-                choices=parent_choices,
-            ).execute_async()
-            
-            if selected_parent:
-                # 2. Select Child (Sub-category)
-                child_cats = [c for c in cats if c.parent_name == selected_parent]
-                child_choices = [Choice(value=c.id, name=c.name) for c in child_cats]
-                child_choices.append(Choice(value=None, name="Back"))
-                
-                new_cat_id = await inquirer.fuzzy(
-                    message=f"Select Sub-Category for '{tx.description}':",
-                    choices=child_choices,
-                ).execute_async()
-                
-                if new_cat_id:
-                    await update_transaction_category(session, tx.id, new_cat_id)
-                    # Refresh transaction to get new category name
-                    await session.refresh(tx, ['category'])
+            selected_cat = await choose_category_tree(
+                session,
+                prompt_prefix=f"'{tx.description}'",
+                default_type=tx.type if tx.type in {"income", "expense"} else None,
+            )
+            if selected_cat:
+                await update_transaction_category(session, tx.id, selected_cat.id)
+                await session.refresh(tx, ['category'])
                 
         elif action == 'delete':
             confirm = await inquirer.confirm(message=f"Delete '{tx.description}'?").execute_async()
@@ -209,7 +239,7 @@ async def manage_transactions_menu(session):
             choices = []
             for t in txs[:50]: 
                 status = "✅" if t.is_verified else "  "
-                cat_name = t.category.name if t.category else "Uncategorized"
+                cat_name = format_category_obj_label(t.category) if t.category else "Uncategorized > Uncategorized [unknown]"
                 label = f"{status} {t.date.strftime('%Y-%m-%d')} | {t.description[:20]:<20} | {t.amount:>8.2f} | {cat_name}"
                 choices.append(Choice(value=t, name=label))
             choices.append(Choice(value=None, name="Back"))
@@ -233,15 +263,13 @@ async def manage_transactions_menu(session):
             ).execute_async()
             
             if tx_action == "Change Category":
-                cats = await get_all_categories(session)
-                cat_choices = [Choice(value=c.id, name=f"{c.parent_name} > {c.name}") for c in cats]
-                new_cat_id = await inquirer.fuzzy(
-                    message="Select New Category:",
-                    choices=cat_choices,
-                ).execute_async()
-                
-                if new_cat_id:
-                    await update_transaction_category(session, selected_tx.id, new_cat_id)
+                selected_cat = await choose_category_tree(
+                    session,
+                    prompt_prefix="Select New Category",
+                    default_type=selected_tx.type if selected_tx.type in {"income", "expense"} else None,
+                )
+                if selected_cat:
+                    await update_transaction_category(session, selected_tx.id, selected_cat.id)
                     print("Updated!")
             
             elif tx_action == "Verify / Approve":
@@ -275,19 +303,15 @@ async def manage_categories_menu(session):
                 print("No categories found.")
                 continue
                 
-            # Group by Parent
-            from collections import defaultdict
-            grouped = defaultdict(list)
-            for c in cats:
-                grouped[c.parent_name].append(c)
+            grouped = _group_categories_by_type_and_parent(cats)
                 
             print("\nCategories:")
-            for parent in sorted(grouped.keys()):
-                print(f"📁 {parent}")
-                for c in sorted(grouped[parent], key=lambda x: x.name):
-                    # Count transactions? Maybe overly expensive for simple list usage, 
-                    # but helpful. Let's keep it simple for now.
-                    print(f"   └── {c.name} ({c.type})")
+            for ctype in sorted(grouped.keys()):
+                print(f"Type: {ctype.upper()}")
+                for parent in sorted(grouped[ctype].keys()):
+                    print(f"  📁 {parent} [{ctype}]")
+                    for c in grouped[ctype][parent]:
+                        print(f"     └── {c.name} [{ctype}]")
             print("")
             
         elif action == "Add Category":
@@ -304,15 +328,17 @@ async def manage_categories_menu(session):
             else:
                 # Select existing parent
                 cats = await get_all_categories(session)
-                parents = sorted(list(set(c.parent_name for c in cats)))
+                parents = sorted(list(set(c.parent_name for c in cats if c.type == cat_type)))
                 if not parents:
-                    print("No existing parent categories. You must create one.")
+                    print(f"No existing {cat_type} parent categories. You must create one.")
                     parent_name = await inquirer.text(message="Enter New Parent Group Name:").execute_async()
                 else:
                     parent_name = await inquirer.fuzzy(
                         message="Select Parent Group:",
-                        choices=parents
+                        choices=[f"{p} [{cat_type}]" for p in parents]
                     ).execute_async()
+                    if parent_name:
+                        parent_name = parent_name.rsplit(" [", 1)[0]
             
             if not parent_name: continue
             
@@ -329,7 +355,7 @@ async def manage_categories_menu(session):
                 continue
                 
             # Select Category
-            choices = [Choice(value=c, name=f"{c.parent_name} > {c.name}") for c in cats]
+            choices = [Choice(value=c, name=format_category_obj_label(c)) for c in cats]
             choices.append(Choice(value=None, name="Cancel"))
             
             target_cat = await inquirer.fuzzy(
@@ -378,7 +404,7 @@ async def manage_categories_menu(session):
                         print("No other categories to reassign to!")
                         continue
                         
-                    rc_choices = [Choice(value=c.id, name=f"{c.parent_name} > {c.name}") for c in other_cats]
+                    rc_choices = [Choice(value=c.id, name=format_category_obj_label(c)) for c in other_cats]
                     reassign_id = await inquirer.fuzzy(
                         message="Select New Category for transactions:",
                         choices=rc_choices
@@ -387,7 +413,7 @@ async def manage_categories_menu(session):
                     if not reassign_id: continue
             
             # Final Confirm
-            confirm = await inquirer.confirm(message=f"Delete category '{target_cat.parent_name} > {target_cat.name}'?").execute_async()
+            confirm = await inquirer.confirm(message=f"Delete category '{format_category_obj_label(target_cat)}'?").execute_async()
             if confirm:
                 success, msg = await delete_category(session, target_cat.id, reassign_category_id=reassign_id, delete_transactions=delete_txs)
                 print(f"\n{msg}\n")
@@ -478,32 +504,73 @@ async def manage_global_rulebook_menu(session):
                     print(f"\n{msg}\n")
 
 async def reset_database_menu(session):
-    print("\n⚠️  Danger Zone: Reset Database")
-    print("This will permanently delete all accounts, categories, transactions, and AI memory.\n")
-
-    confirm_1 = await inquirer.confirm(
-        message="Do you want to reset the entire database?"
+    print("\n⚠️  Danger Zone: Reset Database / Tables")
+    action = await inquirer.select(
+        message="Reset Options:",
+        choices=[
+            "Reset Entire Database",
+            "Reset Specific Tables",
+            Choice(value=None, name="Cancel"),
+        ],
     ).execute_async()
-    if not confirm_1:
+
+    if not action:
         return
 
-    confirm_text = await inquirer.text(
-        message="Type RESET to confirm:"
-    ).execute_async()
-    if confirm_text != "RESET":
-        print("Confirmation text mismatch. Reset cancelled.\n")
+    if action == "Reset Entire Database":
+        confirm_1 = await inquirer.confirm(
+            message="Do you want to reset the entire database?"
+        ).execute_async()
+        if not confirm_1:
+            return
+
+        confirm_text = await inquirer.text(
+            message="Type RESET to confirm:"
+        ).execute_async()
+        if confirm_text != "RESET":
+            print("Confirmation text mismatch. Reset cancelled.\n")
+            return
+
+        confirm_2 = await inquirer.confirm(
+            message="Final confirmation: This cannot be undone. Proceed?"
+        ).execute_async()
+        if not confirm_2:
+            return
+
+        ok, msg = await reset_database()
+        print(f"\n{msg}")
+        ok_seed, seed_msg = await seed_reference_data(session)
+        print(f"{seed_msg}\n")
         return
 
-    confirm_2 = await inquirer.confirm(
-        message="Final confirmation: This cannot be undone. Proceed?"
+    table_names = get_resettable_table_names()
+    counts = await get_table_row_counts(session, table_names=table_names)
+    table_choices = [
+        Choice(value=t, name=f"{t} ({counts.get(t, 0)} rows)")
+        for t in table_names
+    ]
+    selected = await inquirer.checkbox(
+        message="Select tables to reset:",
+        choices=table_choices,
     ).execute_async()
-    if not confirm_2:
+
+    if not selected:
+        print("No tables selected.\n")
         return
 
-    ok, msg = await reset_database()
-    print(f"\n{msg}")
-    ok_seed, seed_msg = await seed_reference_data(session)
-    print(f"{seed_msg}\n")
+    confirm = await inquirer.confirm(
+        message=f"Reset selected tables ({', '.join(selected)})?"
+    ).execute_async()
+    if not confirm:
+        return
+
+    ok, msg = await reset_selected_tables(session, selected)
+    if ok:
+        print(f"\n{msg}\n")
+    else:
+        print("\nReset blocked:")
+        print(msg)
+        print("")
 
 
 
@@ -533,6 +600,7 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
             effective_cat_id = None
 
         parent_name, cat_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
+        suggestion_label = format_category_label(parent_name, cat_name, effective_type)
 
         type_disp = effective_type.upper()
         if effective_type == "transfer":
@@ -542,7 +610,7 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
             f"Date: {tx_data['date']}    Amount: {tx_data['amount']}",
             f"Type: {type_disp}",
             f"Description: {tx_data['description']}",
-            f"AI Suggestion: {parent_name} > {cat_name}",
+            f"AI Suggestion: {suggestion_label}",
             f"Confidence: {effective_confidence:.2f}",
             f"Reasoning: {effective_reasoning}"
         ])
@@ -579,59 +647,43 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
             return effective_cat_id, False, effective_type, effective_confidence, effective_reasoning
 
         if action == "change":
-            cats = await get_all_categories(session)
-
-            parent_names = sorted(list(set(c.parent_name for c in cats if c.parent_name)))
-            parent_choices = [Choice(value=p, name=p) for p in parent_names]
-            parent_choices.append(Choice(value=None, name="Cancel (Keep AI)"))
-
-            selected_parent = await inquirer.fuzzy(
-                message="Select Parent Category:",
-                choices=parent_choices,
-            ).execute_async()
-
-            if selected_parent:
-                child_cats = [c for c in cats if c.parent_name == selected_parent]
-                child_choices = [Choice(value=c, name=c.name) for c in child_cats]
-                child_choices.append(Choice(value=None, name="Back"))
-
-                selected_cat = await inquirer.fuzzy(
-                    message="Select Sub-Category:",
-                    choices=child_choices,
-                ).execute_async()
-
-                if selected_cat:
-                    old_parent, old_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
-                    old_label = f"{old_parent} > {old_name}"
-                    effective_cat_id = selected_cat.id
-                    effective_type = selected_cat.type
-                    new_label = f"{selected_cat.parent_name or 'Uncategorized'} > {selected_cat.name}"
-                    prior_reasoning = effective_reasoning or "No prior reasoning."
-                    reflection = await ai.generate_reflection(
-                        tx_data["description"],
-                        old_label,
-                        new_label,
-                        prior_reasoning
-                    )
-                    effective_reasoning = (
-                        f"Manual override during review: changed from {old_label} to {new_label}. "
-                        f"Reflection: {reflection}"
-                    )
-                    effective_confidence = 1.0
-                    if old_label != new_label:
-                        change_log.append(f"manual override {old_label} -> {new_label}")
+            selected_cat = await choose_category_tree(
+                session,
+                prompt_prefix="Change Category",
+                default_type=effective_type if effective_type in {"income", "expense"} else None,
+            )
+            if selected_cat:
+                old_parent, old_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
+                old_label = format_category_label(old_parent, old_name, effective_type)
+                effective_cat_id = selected_cat.id
+                effective_type = selected_cat.type
+                new_label = format_category_obj_label(selected_cat)
+                prior_reasoning = effective_reasoning or "No prior reasoning."
+                reflection = await ai.generate_reflection(
+                    tx_data["description"],
+                    old_label,
+                    new_label,
+                    prior_reasoning
+                )
+                effective_reasoning = (
+                    f"Manual override during review: changed from {old_label} to {new_label}. "
+                    f"Reflection: {reflection}"
+                )
+                effective_confidence = 1.0
+                if old_label != new_label:
+                    change_log.append(f"manual override {old_label} -> {new_label}")
             continue
 
         if action == "refresh":
             old_parent, old_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
-            old_label = f"{old_parent} > {old_name}"
+            old_label = format_category_label(old_parent, old_name, effective_type)
             new_cat_id, new_conf, new_reason, new_type = await ai.suggest_category(tx_data["description"], session)
             effective_cat_id = new_cat_id
             effective_confidence = new_conf
             effective_reasoning = new_reason
             effective_type = new_type or effective_type
             new_parent, new_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
-            new_label = f"{new_parent} > {new_name}"
+            new_label = format_category_label(new_parent, new_name, effective_type)
             if old_label != new_label:
                 change_log.append(f"refresh changed suggestion {old_label} -> {new_label}")
             continue
@@ -646,13 +698,13 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
                     tx_data["description"], session, extra_instruction=coaching_text.strip()
                 )
                 old_parent, old_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
-                old_label = f"{old_parent} > {old_name}"
+                old_label = format_category_label(old_parent, old_name, effective_type)
                 effective_cat_id = new_cat_id
                 effective_confidence = new_conf
                 effective_reasoning = new_reason
                 effective_type = new_type or effective_type
                 new_parent, new_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
-                new_label = f"{new_parent} > {new_name}"
+                new_label = format_category_label(new_parent, new_name, effective_type)
                 if old_label != new_label:
                     change_log.append(f"coached update {old_label} -> {new_label}")
             continue
@@ -707,7 +759,7 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
                 )
                 if conversation_instruction and conversation_instruction.strip():
                     old_parent, old_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
-                    old_label = f"{old_parent} > {old_name}"
+                    old_label = format_category_label(old_parent, old_name, effective_type)
 
                     new_cat_id, new_conf, new_reason, new_type = await ai.suggest_category(
                         tx_data["description"],
@@ -722,7 +774,7 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
                     effective_type = new_type or effective_type
 
                     new_parent, new_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
-                    new_label = f"{new_parent} > {new_name}"
+                    new_label = format_category_label(new_parent, new_name, effective_type)
                     if old_label != new_label:
                         change_log.append(f"discussion-informed update {old_label} -> {new_label}")
             continue

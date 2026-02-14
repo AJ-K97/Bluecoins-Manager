@@ -1,7 +1,7 @@
 import ollama
 import re
 from sqlalchemy import select
-from src.database import Category, Transaction, AIMemory, AIGlobalMemory
+from src.database import Category, Transaction, AIMemory, AIGlobalMemory, AICategoryUnderstanding
 from src.patterns import extract_pattern_key
 
 class CategorizerAI:
@@ -131,7 +131,11 @@ Text:
             if rows:
                 history_lines = []
                 for tx, mem in rows:
-                    cat_name = next((c.name for c in categories if c.id == tx.category_id), str(tx.category_id))
+                    cat_obj = next((c for c in categories if c.id == tx.category_id), None)
+                    if cat_obj:
+                        cat_name = f"{cat_obj.parent_name or 'Uncategorized'} > {cat_obj.name} [{cat_obj.type}]"
+                    else:
+                        cat_name = str(tx.category_id)
                     
                     reflection_note = ""
                     if mem and mem.reflection:
@@ -144,7 +148,24 @@ Text:
                 
                 history_str = "\n".join(history_lines)
 
-        # 2.5 Fetch Global User Coaching/Rules
+        # 2.5 Fetch Category Understanding Profiles
+        profile_stmt = (
+            select(AICategoryUnderstanding, Category)
+            .join(Category, Category.id == AICategoryUnderstanding.category_id)
+            .order_by(Category.type.asc(), Category.parent_name.asc(), Category.name.asc())
+        )
+        profile_res = await session.execute(profile_stmt)
+        profile_rows = profile_res.all()
+        profiles_str = "None"
+        if profile_rows:
+            lines = []
+            for p, c in profile_rows:
+                lines.append(
+                    f"- ID {c.id}: {(c.parent_name or 'Uncategorized')} > {c.name} [{c.type}] :: {p.understanding}"
+                )
+            profiles_str = "\n".join(lines)
+
+        # 2.6 Fetch Global User Coaching/Rules
         rule_stmt = select(AIGlobalMemory).where(AIGlobalMemory.is_active.is_(True)).order_by(AIGlobalMemory.created_at.desc()).limit(50)
         rule_res = await session.execute(rule_stmt)
         global_rules = rule_res.scalars().all()
@@ -178,11 +199,15 @@ Available Categories (List):
 Memory Bank (Similar Past Transactions & Reflections):
 {history_str}
 
+Category Understanding Memory (stored category intent profiles):
+{profiles_str}
+
 Global User Rulebook (persistent coaching):
 {global_rules_str}
 
 Rules:
 - If you see a "LEARNING/REFLECTION", you MUST apply that logic.
+- If you see a category understanding profile for a category, treat it as a strong prior for that category.
 - The category decision must be based on merchant/payee intent, NOT location.
 - Location can be ignored if present; do not use it to decide category.
 - Ignore banking noise like ATM/VISA/EFTPOS/card suffixes and legal prefixes.

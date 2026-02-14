@@ -7,7 +7,7 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.formatted_text import to_formatted_text
 from prompt_toolkit.styles import Style
-from src.commands import get_transaction_category_display
+from src.commands import format_category_label, get_transaction_category_display
 
 class TransactionReviewApp:
     def __init__(self, transactions, session, update_callback=None):
@@ -53,7 +53,8 @@ class TransactionReviewApp:
             
             cat_str = "Uncategorized"
             parent_name, cat_name = get_transaction_category_display(tx)
-            cat_str = f"{parent_name} > {cat_name}"
+            cat_type = tx.category.type if tx.category else tx.type
+            cat_str = format_category_label(parent_name, cat_name, cat_type)
             
             conf_str = ""
             if tx.confidence_score is not None and not tx.is_verified:

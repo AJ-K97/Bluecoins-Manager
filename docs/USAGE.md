@@ -95,6 +95,9 @@ Quick command examples:
 # Build/update embedding index from your transactions
 python3 main.py llm reindex
 
+# Rebuild category intent memory used by categorizer
+python3 main.py llm rebuild-category-understanding
+
 # Add a custom behavioral rule
 python3 main.py llm skill-add --name "review-first" --instruction "If uncertain, recommend review." --priority 10
 
@@ -103,4 +106,10 @@ python3 main.py llm ask --query "What are my top spending categories this month?
 
 # Export verified examples for periodic LoRA fine-tuning
 python3 main.py llm export-finetune
+
+# List resettable tables
+python3 main.py db list-tables
+
+# Reset only specific tables (dependency-checked)
+python3 main.py db reset --tables ai_memory llm_finetune_examples
 ```

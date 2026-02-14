@@ -86,6 +86,17 @@ class AIGlobalMemory(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class AICategoryUnderstanding(Base):
+    __tablename__ = "ai_category_understanding"
+
+    id = Column(Integer, primary_key=True, index=True)
+    category_id = Column(Integer, ForeignKey("categories.id"), unique=True, nullable=False, index=True)
+    understanding = Column(Text, nullable=False)
+    sample_transactions_json = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class LLMKnowledgeChunk(Base):
     __tablename__ = "llm_knowledge_chunks"
 
