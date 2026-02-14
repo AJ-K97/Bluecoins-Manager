@@ -55,6 +55,7 @@ class Transaction(Base):
     raw_csv_row = Column(Text) # Store original row for debugging
     is_verified = Column(Boolean, default=False) # True if user confirmed category
     confidence_score = Column(Float, nullable=True) # AI Confidence (0.0 - 1.0)
+    # ai_reasoning = Column(Text, nullable=True) # DEPRECATED: Moved to AIMemory table
 
 class MappingRule(Base):
     """
@@ -65,9 +66,29 @@ class MappingRule(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     keyword = Column(String, unique=True, index=True)
-    
     category_id = Column(Integer, ForeignKey("categories.id"))
+    
     category = relationship("Category")
+
+class AIMemory(Base):
+    __tablename__ = "ai_memory"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    transaction_id = Column(Integer, ForeignKey("transactions.id"))
+    pattern_key = Column(String, index=True) # e.g. "SHELL", "UBER"
+    
+    ai_suggested_category_id = Column(Integer, nullable=True)
+    user_selected_category_id = Column(Integer, nullable=True)
+    
+    ai_reasoning = Column(Text, nullable=True) # Initial reasoning
+    reflection = Column(Text, nullable=True) # Post-correction analysis
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    transaction = relationship("Transaction", back_populates="memory_entries")
+
+# Add back_populates to Transaction
+Transaction.memory_entries = relationship("AIMemory", back_populates="transaction", cascade="all, delete-orphan")
 
 async def init_db():
     async with engine.begin() as conn:

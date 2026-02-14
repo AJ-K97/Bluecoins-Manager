@@ -1,7 +1,7 @@
 from sqlalchemy import select, update, delete
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
-from src.database import Account, Category, MappingRule, Transaction, AsyncSessionLocal
+from src.database import Account, Category, MappingRule, Transaction, AsyncSessionLocal, AIMemory
 from src.parser import BankParser
 from src.ai import CategorizerAI
 
@@ -77,23 +77,42 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
         
         cat_id = rule_map.get(tx["description"])
         confidence = 1.0 if cat_id else 0.0
+        reasoning = "Matched via Mapping Rule" if cat_id else None
+        tx_type = tx["type"] # Default from parser
         
         # AI Suggestion
         if not cat_id:
             print(f"Resolving '{tx['description']}' with AI...")
-            cat_id, confidence = await ai.suggest_category(tx["description"], session)
+            cat_id, confidence, reasoning, suggested_type = await ai.suggest_category(tx["description"], session)
+            if suggested_type:
+                tx_type = suggested_type
         
         new_tx = Transaction(
             date=tx["date"],
             description=tx["description"],
             amount=tx["amount"],
-            type=tx["type"],
+            type=tx_type,
             account_id=account.id,
             category_id=cat_id,
             confidence_score=confidence,
-            raw_csv_row=tx["raw_csv_row"]
+            # ai_reasoning=reasoning, # DEPRECATED
+            raw_csv_row=tx["raw_csv_row"],
+            is_verified=False # Always false initially, require review
         )
         session.add(new_tx)
+        await session.flush() # Get ID
+        
+        # Create Memory Entry
+        words = tx["description"].split()
+        pattern_key = words[0].upper() if words else "UNKNOWN"
+        
+        memory = AIMemory(
+            transaction_id=new_tx.id,
+            pattern_key=pattern_key,
+            ai_suggested_category_id=cat_id,
+            ai_reasoning=reasoning
+        )
+        session.add(memory)
         new_txs.append(new_tx)
     
     await session.commit()
@@ -116,7 +135,8 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
 async def get_transactions(session, account_id=None, start_date=None, end_date=None):
     stmt = select(Transaction).options(
         selectinload(Transaction.category),
-        selectinload(Transaction.account)
+        selectinload(Transaction.account),
+        selectinload(Transaction.memory_entries)
     ).order_by(Transaction.date.desc())
     
     if account_id:
@@ -130,8 +150,73 @@ async def get_transactions(session, account_id=None, start_date=None, end_date=N
     return result.scalars().all()
 
 async def update_transaction_category(session, tx_id, category_id):
-    stmt = update(Transaction).where(Transaction.id == tx_id).values(category_id=category_id, is_verified=True)
-    await session.execute(stmt)
+    # Fetch existing transaction and memory
+    stmt = select(Transaction).where(Transaction.id == tx_id)
+    result = await session.execute(stmt)
+    tx = result.scalar_one_or_none()
+    
+    if not tx:
+        return False, "Transaction not found."
+
+    # Fetch Memory
+    mem_stmt = select(AIMemory).where(AIMemory.transaction_id == tx_id).order_by(AIMemory.created_at.desc())
+    mem_res = await session.execute(mem_stmt)
+    memory = mem_res.scalars().first()
+    
+    # Check for change
+    old_cat_id = tx.category_id
+    
+    # Update Transaction
+    tx.category_id = category_id
+    tx.is_verified = True
+    session.add(tx)
+    
+    # Handle Reflection if changed
+    if old_cat_id != category_id:
+        # Get names
+        old_cat_name = "None"
+        if old_cat_id:
+             r = await session.execute(select(Category).where(Category.id == old_cat_id))
+             c = r.scalar_one_or_none()
+             if c: old_cat_name = c.name
+             
+        new_cat_name = "None"
+        if category_id:
+             r = await session.execute(select(Category).where(Category.id == category_id))
+             c = r.scalar_one_or_none()
+             if c: new_cat_name = c.name
+        
+        # Get Reasoning from memory
+        prev_reasoning = memory.ai_reasoning if memory else "Unknown"
+        
+        # Generate Reflection
+        ai = CategorizerAI() # Re-init? Or pass in? It's fine to init here for now, or cleaner to pass.
+                             # But commands.py functions are called by TUI.
+        reflection = await ai.generate_reflection(tx.description, old_cat_name, new_cat_name, prev_reasoning)
+        
+        # Update Memory
+        if memory:
+            memory.user_selected_category_id = category_id
+            memory.reflection = reflection
+            session.add(memory)
+        else:
+            # Create new if missing
+            words = tx.description.split()
+            pattern_key = words[0].upper() if words else "UNKNOWN"
+            new_mem = AIMemory(
+                 transaction_id=tx.id,
+                 pattern_key=pattern_key,
+                 user_selected_category_id=category_id,
+                 reflection=reflection
+            )
+            session.add(new_mem)
+    
+    else:
+        # Just verification
+        if memory:
+            memory.user_selected_category_id = category_id
+            session.add(memory)
+            
     await session.commit()
     return True, "Transaction category updated and verified."
 
@@ -142,8 +227,24 @@ async def update_transaction_amount(session, tx_id, new_amount):
     return True, "Transaction amount updated and verified."
 
 async def mark_transaction_verified(session, tx_id):
-    stmt = update(Transaction).where(Transaction.id == tx_id).values(is_verified=True)
-    await session.execute(stmt)
+    # Fetch existing transaction and memory
+    stmt = select(Transaction).where(Transaction.id == tx_id)
+    result = await session.execute(stmt)
+    tx = result.scalar_one_or_none()
+    
+    if tx:
+        tx.is_verified = True
+        session.add(tx)
+        
+        # Update Memory
+        mem_stmt = select(AIMemory).where(AIMemory.transaction_id == tx_id).order_by(AIMemory.created_at.desc())
+        mem_res = await session.execute(mem_stmt)
+        memory = mem_res.scalars().first()
+        
+        if memory:
+            memory.user_selected_category_id = tx.category_id
+            session.add(memory)
+            
     await session.commit()
     return True, "Transaction verified."
 

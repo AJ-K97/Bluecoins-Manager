@@ -28,7 +28,8 @@ async def review_transactions(session, transactions):
     # Initial fetch
     stmt = select(Transaction).options(
         selectinload(Transaction.category),
-        selectinload(Transaction.account)
+        selectinload(Transaction.account),
+        selectinload(Transaction.memory_entries)
     ).where(Transaction.id.in_(tx_ids)).order_by(Transaction.date.desc())
     
     res = await session.execute(stmt)

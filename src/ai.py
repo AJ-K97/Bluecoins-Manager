@@ -1,7 +1,7 @@
 import ollama
 import re
 from sqlalchemy import select
-from src.database import Category, Transaction
+from src.database import Category, Transaction, AIMemory
 
 class CategorizerAI:
     def __init__(self, model="llama3.2:3b"):
@@ -14,41 +14,47 @@ class CategorizerAI:
 
     async def suggest_category(self, description, session):
         """
-        Suggests a category ID for the given transaction description.
-        Returns Integery category_id or None.
+        Suggests category and type for the transaction.
+        Returns (category_id, confidence, reasoning, type)
         """
         # 1. Fetch available categories
         result = await session.execute(select(Category))
         categories = result.scalars().all()
         if not categories:
-            return None
+            return None, 0.0, "No categories found.", "expense"
             
-        # Format: "ID: Parent > Name (Type)"
         cat_lines = [f"{c.id}: {c.parent_name} > {c.name} ({c.type})" for c in categories]
         cat_str = "\n".join(cat_lines)
         
-        # 2. Fetch history (Simple similarity search)
-        # Search for transactions starting with the same first word (often Merchant name)
+        # 2. Fetch Memory (Reflections & Past Decisions)
         words = description.split()
         search_term = words[0] if words else ""
         history_str = "None"
         
         if len(search_term) > 2:
-            # Get last 5 similar transactions that have a category
-            stmt = select(Transaction).where(
-                Transaction.description.ilike(f"{search_term}%"),
+            # Join Transaction with AIMemory to get reflections
+            stmt = select(Transaction, AIMemory).outerjoin(AIMemory, Transaction.id == AIMemory.transaction_id).where(
+                Transaction.description.ilike(f"%{search_term}%"),
                 Transaction.category_id.is_not(None)
             ).order_by(Transaction.date.desc()).limit(5)
             
             res = await session.execute(stmt)
-            txs = res.scalars().all()
+            rows = res.all() # list of (Transaction, AIMemory) tuples
             
-            if txs:
+            if rows:
                 history_lines = []
-                for t in txs:
-                    # We need the category name for context, so we might need eager load or just show ID
-                    # AI can map ID if we provided the list above.
-                    history_lines.append(f"- '{t.description}' -> Category ID {t.category_id}")
+                for tx, mem in rows:
+                    cat_name = next((c.name for c in categories if c.id == tx.category_id), str(tx.category_id))
+                    
+                    reflection_note = ""
+                    if mem and mem.reflection:
+                        reflection_note = f"\n  - LEARNING/REFLECTION: {mem.reflection}"
+                    
+                    # If verified by user, mark it
+                    user_tag = "[USER VERIFIED]" if tx.is_verified else "[AI PREDICTION]"
+                    
+                    history_lines.append(f"- '{tx.description}' -> {cat_name} ({tx.type}) {user_tag}{reflection_note}")
+                
                 history_str = "\n".join(history_lines)
 
         # 3. Web Search Context
@@ -56,14 +62,9 @@ class CategorizerAI:
         try:
             from duckduckgo_search import DDGS
             with DDGS() as ddgs:
-                # Search for the description (usually Payee)
-                # Cleaning description might help (remove dates/numbers if noisy)
-                query = description
-                results = list(ddgs.text(query, max_results=2))
+                results = list(ddgs.text(description, max_results=2))
                 if results:
                     search_context = "\n".join([f"- {r['param1']}: {r['body']}" for r in results])
-        except ImportError:
-            search_context = "Web search module not installed."
         except Exception as e:
             search_context = f"Web search failed: {e}"
 
@@ -72,18 +73,28 @@ class CategorizerAI:
 You are a financial assistant.
 Categorize this transaction: '{description}'
 
-Web Search Context (Background info about payee):
+Web Search Context:
 {search_context}
 
 Available Categories:
 {cat_str}
 
-Similar Past Transactions:
+Memory Bank (Similar Past Transactions & Reflections):
 {history_str}
 
+Reflections instructions:
+- If you see a "LEARNING/REFLECTION", you MUST apply that logic.
+- "Transfer" usually means movement between accounts (not an expense).
+- "Salary" is Income.
+
 Task:
-Return ONLY the ID of the best matching category and a confidence score (0.0 to 1.0).
-Format: "ID, Confidence" (e.g. "123, 0.95")
+Return a JSON object with:
+- "id": category ID (int) OR null if unsure/new.
+- "confidence": score (0.0 - 1.0)
+- "type": "expense", "income", or "transfer"
+- "reasoning": Explanation citing memory/reflection or web search.
+
+JSON ONLY.
 """
         
         try:
@@ -92,28 +103,75 @@ Format: "ID, Confidence" (e.g. "123, 0.95")
             ])
             content = response['message']['content'].strip()
             
-            # Parsing "ID, Confidence"
-            import re
-            valid_ids = {c.id for c in categories}
+            # JSON Parsing with fallback
+            data = {}
+            try:
+                import json
+                content = content.replace("```json", "").replace("```", "").strip()
+                match = re.search(r'\{.*\}', content, re.DOTALL)
+                if match:
+                    data = json.loads(match.group())
+                else:
+                    raise ValueError("No JSON block")
+            except Exception:
+                # Regex Fallback
+                id_match = re.search(r'["\']id["\']:\s*(\d+|null|None)', content, re.IGNORECASE)
+                conf_match = re.search(r'["\']confidence["\']:\s*([0-1]?\.?\d+)', content)
+                type_match = re.search(r'["\']type["\']:\s*["\'](expense|income|transfer)["\']', content, re.IGNORECASE)
+                reason_match = re.search(r'["\']reasoning["\']:\s*["\'](.*?)["\']', content)
+                
+                if id_match and id_match.group(1).lower() not in ['null', 'none']:
+                    data["id"] = int(id_match.group(1))
+                if conf_match:
+                    data["confidence"] = float(conf_match.group(1))
+                if type_match:
+                    data["type"] = type_match.group(1).lower()
+                if reason_match:
+                    data["reasoning"] = reason_match.group(1)
+
+            suggested_id = data.get("id")
+            if suggested_id is not None:
+                suggested_id = int(suggested_id)
+                
+            confidence = float(data.get("confidence", 0.0))
+            reasoning = data.get("reasoning", "No reasoning.")
+            tx_type = data.get("type", "expense")
             
-            # Try to match: digits, then maybe comma, then float
-            match = re.search(r'(\d+)\s*,\s*([0-1]?\.?\d+)', content)
+            # Validation
+            if suggested_id:
+                valid_ids = {c.id for c in categories}
+                if suggested_id not in valid_ids:
+                    return None, 0.0, f"Invalid ID {suggested_id}", tx_type
             
-            if match:
-                suggested_id = int(match.group(1))
-                confidence = float(match.group(2))
-                if suggested_id in valid_ids:
-                    return suggested_id, confidence
-            
-            # Fallback for just ID
-            match_id = re.search(r'(\d+)', content)
-            if match_id:
-                 suggested_id = int(match_id.group(1))
-                 if suggested_id in valid_ids:
-                     return suggested_id, 0.5 # Default confidence if not provided
-                     
-            return None, 0.0
+            return suggested_id, confidence, reasoning, tx_type
             
         except Exception as e:
-            print(f"AI Suggestion Error: {e}")
-            return None, 0.0
+            print(f"AI Error: {e}")
+            return None, 0.0, f"Error: {e}", "expense"
+
+    async def generate_reflection(self, description, old_category, new_category, previous_reasoning):
+        """
+        Asks AI to reflect on why it was wrong and what to learn.
+        """
+        prompt = f"""
+I made a mistake in categorizing: '{description}'
+I thought it was: {old_category}
+Reasoning was: {previous_reasoning}
+
+The USER corrected it to: {new_category}
+
+Task:
+Write a short "Reflection" rule for the Memory Bank.
+Example: "When I see 'Shell', if amount is positive it is Refund, otherwise Fuel."
+Example: " 'Uber' is usually 'Transport', but 'Uber Eats' is 'Food'."
+Keep it concise (1 sentence).
+
+Reflection:
+"""
+        try:
+            response = await self.client.chat(model=self.model, messages=[
+                {'role': 'user', 'content': prompt}
+            ])
+            return response['message']['content'].strip()
+        except Exception:
+            return "User corrected category."
