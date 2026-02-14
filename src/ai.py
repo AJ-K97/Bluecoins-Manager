@@ -23,7 +23,11 @@ class CategorizerAI:
         if not categories:
             return None, 0.0, "No categories found.", "expense"
             
-        cat_lines = [f"{c.id}: {c.parent_name} > {c.name} ({c.type})" for c in categories]
+        cat_lines = []
+        for c in sorted(categories, key=lambda x: (x.parent_name or "", x.name)):
+            parent = c.parent_name if c.parent_name else "No Parent"
+            cat_lines.append(f"ID {c.id}: {parent} > {c.name} ({c.type})")
+        
         cat_str = "\n".join(cat_lines)
         
         # 2. Fetch Memory (Reflections & Past Decisions)
@@ -58,11 +62,21 @@ class CategorizerAI:
                 history_str = "\n".join(history_lines)
 
         # 3. Web Search Context
+        # Clean description for better search/AI context
+        # Remove dates, times, long numeric codes using approx regex
+        clean_desc = re.sub(r'\d{2}[A-Z]{3}\d{2}', '', description) # 28JAN26
+        clean_desc = re.sub(r'\d{2}:\d{2}:\d{2}', '', clean_desc) # 23:30:46
+        # Remove common banking noise, but keep critical ones if they might matter (ATM is tricky)
+        # But for categorization, "ATM" usually implies cash out UNLESS there's a merchant name.
+        # If merchant name exists, it's a purchase.
+        clean_desc = re.sub(r'\b(VISA|AUD|ATMA\d+)\b', '', clean_desc) 
+        clean_desc = re.sub(r'\s+', ' ', clean_desc).strip()
+        
         search_context = "No information found."
         try:
             from duckduckgo_search import DDGS
             with DDGS() as ddgs:
-                results = list(ddgs.text(description, max_results=2))
+                results = list(ddgs.text(clean_desc, max_results=2))
                 if results:
                     search_context = "\n".join([f"- {r['param1']}: {r['body']}" for r in results])
         except Exception as e:
@@ -72,27 +86,39 @@ class CategorizerAI:
         prompt = f"""
 You are a financial assistant.
 Categorize this transaction: '{description}'
+cleaned_description: '{clean_desc}'
 
 Web Search Context:
 {search_context}
 
-Available Categories:
+Available Categories (List):
 {cat_str}
 
 Memory Bank (Similar Past Transactions & Reflections):
 {history_str}
 
+General Rules & ID hints:
+- Supermarkets (e.g. IGA, Woolworths, Coles, Aldi) -> Household > Grocery
+- Fast Food (Burgers, Pizza, Cafe), Restaurants, Dining Out -> Entertainment > Food
+- Streaming Services (e.g. Netflix, Spotify, Youtube) -> Entertainment > App/Subscription
+- "Salary" -> Income > Salary (Type: income)
+- "Transfer" -> Transfer > Transfer (Type: transfer)
+
 Reflections instructions:
 - If you see a "LEARNING/REFLECTION", you MUST apply that logic.
-- "Transfer" usually means movement between accounts (not an expense).
-- "Salary" is Income.
+- Do NOT hallucinate "Water" or "Utilities" for ordinary shops.
+- Look at the "Web Search Context" to identify what the merchant does (e.g. Grocery, Fast Food).
+- Ignore "ATM", "VISA", "EFTPOS" keywords if there is a merchant name. Focus on the merchant.
 
 Task:
 Return a JSON object with:
-- "id": category ID (int) OR null if unsure/new.
+- "reasoning": Concise explanation. Mention why you ruled out others if unsure.
+- "id": The EXACT Category ID from the list above. 
+    - Verify the ID exists in the specific "Available Categories" list provided.
+    - If you think it is "App/Subscription", look for ID under "Entertainment".
+    - If you think it is "Eating Out" or "Food", look for "Food" under "Entertainment".
 - "confidence": score (0.0 - 1.0)
 - "type": "expense", "income", or "transfer"
-- "reasoning": Explanation citing memory/reflection or web search.
 
 JSON ONLY.
 """
@@ -134,7 +160,14 @@ JSON ONLY.
                 suggested_id = int(suggested_id)
                 
             confidence = float(data.get("confidence", 0.0))
+            
             reasoning = data.get("reasoning", "No reasoning.")
+            if isinstance(reasoning, (dict, list)):
+                import json # Ensure json is available
+                reasoning = json.dumps(reasoning)
+            else:
+                reasoning = str(reasoning)
+                
             tx_type = data.get("type", "expense")
             
             # Validation
