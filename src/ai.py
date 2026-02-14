@@ -4,7 +4,7 @@ from sqlalchemy import select
 from src.database import Category, Transaction
 
 class CategorizerAI:
-    def __init__(self, model="llama3:latest"):
+    def __init__(self, model="llama3.2:3b"):
         """
         Initialize with the Ollama model.
         Ensure 'ollama serve' is running and the model is pulled.
