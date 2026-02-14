@@ -1,5 +1,3 @@
-import os
-import asyncio
 from datetime import datetime
 from InquirerPy import inquirer
 from InquirerPy.base.control import Choice
@@ -7,8 +5,114 @@ from src.database import init_db, AsyncSessionLocal
 from src.commands import (
     list_accounts, add_account, delete_account, process_import, get_all_accounts,
     get_transactions, update_transaction_category, delete_transaction, export_to_bluecoins_csv,
-    get_all_categories
+    get_all_categories, mark_transaction_verified, update_transaction_amount
 )
+
+async def review_transactions(session, transactions):
+    """
+    Interactive review of new transactions.
+    """
+    while True:
+        # Re-fetch or use passed objects? 
+        # Ideally we want live status.
+        # But transactions list passed from process_import might be detached or stale if we commit in loop.
+        # Let's rely on IDs.
+        
+        tx_ids = [t.id for t in transactions]
+        # Fetch fresh sort by date
+        current_txs = await get_transactions(session) # This gets ALL. We only want the new ones.
+        # Filter in python for now or better query? 
+        # process_import returned the objects. 
+        # Let's filter our list based on what we just imported.
+        
+        # Actually simplest is to iterate the list we have, but we need to know if they are verified.
+        # Let's refresh them.
+        from sqlalchemy import select
+        from src.database import Transaction
+        from sqlalchemy.orm import selectinload
+        
+        stmt = select(Transaction).options(selectinload(Transaction.category)).where(Transaction.id.in_(tx_ids)).order_by(Transaction.date.desc())
+        res = await session.execute(stmt)
+        review_list = res.scalars().all()
+        
+        if not review_list:
+            print("No transactions to review.")
+            break
+
+        # Check if all verified
+        unverified_count = sum(1 for t in review_list if not t.is_verified)
+        if unverified_count == 0:
+            print("\n✅ All transactions verified!\n")
+            break
+
+        print(f"\nReviewing {len(review_list)} transactions ({unverified_count} unverified).")
+        print("Select a transaction to Approve (Enter) or Modify.")
+        
+        choices = []
+        for t in review_list:
+            status = "✅" if t.is_verified else "  "
+            cat_name = t.category.name if t.category else "Uncategorized"
+            # Format: [v] Date | Desc | Amount | Category
+            label = f"{status} {t.date.strftime('%Y-%m-%d')} | {t.description[:20]:<20} | {t.amount:>8.2f} | {cat_name}"
+            choices.append(Choice(value=t, name=label))
+            
+        choices.append(Choice(value="ALL", name="✅ Approve ALL remaining"))
+        choices.append(Choice(value=None, name="Done / Skip"))
+        
+        selected = await inquirer.select(
+            message="Transaction List:",
+            choices=choices,
+            default=choices[0] # Default to first item
+        ).execute_async()
+        
+        if not selected:
+            break
+            
+        if selected == "ALL":
+            for t in review_list:
+                if not t.is_verified:
+                    await mark_transaction_verified(session, t.id)
+            print("All verified.")
+            break
+            
+        # Action Menu for Selected
+        action = await inquirer.select(
+            message=f"Action for '{selected.description}':",
+            choices=[
+                Choice(value="approve", name="✅ Approve / Verify"),
+                Choice(value="category", name="📝 Change Category"),
+                Choice(value="amount", name="💰 Change Amount"),
+                Choice(value="delete", name="❌ Delete"),
+                Choice(value=None, name="Back")
+            ]
+        ).execute_async()
+        
+        if action == "approve":
+            await mark_transaction_verified(session, selected.id)
+            # Auto loop continues and updates list
+            
+        elif action == "category":
+            cats = await get_all_categories(session)
+            cat_choices = [Choice(value=c.id, name=f"{c.parent_name} > {c.name}") for c in cats]
+            new_cat_id = await inquirer.fuzzy(
+                message="Select Category:",
+                choices=cat_choices,
+            ).execute_async()
+            if new_cat_id:
+                await update_transaction_category(session, selected.id, new_cat_id)
+
+        elif action == "amount":
+            new_amount_str = await inquirer.text(message="New Amount:", default=str(selected.amount)).execute_async()
+            try:
+                val = float(new_amount_str)
+                await update_transaction_amount(session, selected.id, val)
+            except ValueError:
+                print("Invalid amount.")
+
+        elif action == "delete":
+            if await inquirer.confirm(message="Delete this transaction?").execute_async():
+                await delete_transaction(session, selected.id)
+
 
 async def manage_accounts_menu(session):
     while True:
@@ -33,7 +137,7 @@ async def manage_accounts_menu(session):
                 print("\nAccounts:")
                 for acc in accounts:
                     print(f" - {acc.name} ({acc.institution})")
-                print("") # Newline
+                print("") 
                 
         elif action == "Add Account":
             name = await inquirer.text(message="Account Name:").execute_async()
@@ -85,9 +189,6 @@ async def manage_transactions_menu(session):
         ).execute_async()
         
         if action == "Export to CSV":
-            # Date Range?
-            # For simplicity let's just export all for now or ask "All Time?"
-            # Or ask for start/end string.
             start_str = await inquirer.text(message="Start Date (YYYY-MM-DD) or Enter for All:").execute_async()
             start_date = datetime.strptime(start_str, "%Y-%m-%d") if start_str else None
             
@@ -113,11 +214,11 @@ async def manage_transactions_menu(session):
                 continue
                 
             # Selection Menu
-            # Format: Date | Desc | Amount | Category
             choices = []
-            for t in txs[:50]: # Limit to 50 for UI
+            for t in txs[:50]: 
+                status = "✅" if t.is_verified else "  "
                 cat_name = t.category.name if t.category else "Uncategorized"
-                label = f"{t.date.strftime('%Y-%m-%d')} | {t.description[:20]:<20} | {t.amount:>10.2f} | {cat_name}"
+                label = f"{status} {t.date.strftime('%Y-%m-%d')} | {t.description[:20]:<20} | {t.amount:>8.2f} | {cat_name}"
                 choices.append(Choice(value=t, name=label))
             choices.append(Choice(value=None, name="Back"))
             
@@ -133,6 +234,7 @@ async def manage_transactions_menu(session):
                 message=f"Action for '{selected_tx.description}':",
                 choices=[
                     "Change Category",
+                    "Verify / Approve", 
                     "Delete Transaction",
                     Choice(value=None, name="Cancel")
                 ]
@@ -149,7 +251,11 @@ async def manage_transactions_menu(session):
                 if new_cat_id:
                     await update_transaction_category(session, selected_tx.id, new_cat_id)
                     print("Updated!")
-                    
+            
+            elif tx_action == "Verify / Approve":
+                await mark_transaction_verified(session, selected_tx.id)
+                print("Verified!")
+
             elif tx_action == "Delete Transaction":
                 confirm = await inquirer.confirm(message="Are you sure?").execute_async()
                 if confirm:
@@ -168,7 +274,6 @@ async def import_wizard(session):
     if not bank: return
 
     # 2. Select File
-    # Simple file input for now
     file_path = await inquirer.filepath(
         message="Path to CSV file:",
         default=os.getcwd() + "/",
@@ -190,7 +295,22 @@ async def import_wizard(session):
         choices=choices
     ).execute_async()
 
-    # 4. Output?
+    print("\nProcessing... (This may take a moment for AI categorization)\n")
+    # import logic
+    success, msg, new_txs = await process_import(session, bank, file_path, account_name) # No export path yet
+    
+    if success:
+        print(f"\n✅ Success: {msg}\n")
+        
+        if new_txs:
+            do_review = await inquirer.confirm(message="Review and Verify these transactions now?").execute_async()
+            if do_review:
+                await review_transactions(session, new_txs)
+    else:
+        print(f"\n❌ Error: {msg}\n")
+        return
+
+    # 4. Output? (Post-Review Export)
     do_export = await inquirer.confirm(message="Export to Bluecoins CSV now?").execute_async()
     output_path = None
     if do_export:
@@ -199,14 +319,23 @@ async def import_wizard(session):
             default="bluecoins_import.csv",
             validate=lambda x: not os.path.isdir(x)
         ).execute_async()
+        
+        # We need to re-fetch mainly if reviewed modified them.
+        # process_import returned just the message if verify not done in stream. 
+        # But we modified them in DB. So just fetch them again.
+        
+        tx_ids = [t.id for t in new_txs] if new_txs else []
+        if tx_ids:
+            from sqlalchemy import select
+            from src.database import Transaction
+            from sqlalchemy.orm import selectinload
+            stmt = select(Transaction).options(selectinload(Transaction.category), selectinload(Transaction.account)).where(Transaction.id.in_(tx_ids))
+            res = await session.execute(stmt)
+            final_txs = res.scalars().all()
+            
+            success, msg = export_to_bluecoins_csv(final_txs, output_path)
+            print(msg)
 
-    print("\nProcessing... (This may take a moment for AI categorization)\n")
-    success, msg = await process_import(session, bank, file_path, account_name, output_path)
-    
-    if success:
-        print(f"\n✅ Success: {msg}\n")
-    else:
-        print(f"\n❌ Error: {msg}\n")
 
 async def interactive_main():
     print("Welcome to Bluecoins Manager V2")

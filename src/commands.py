@@ -102,14 +102,14 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
     if output_path and new_txs:
         # Re-fetch with category for export
         tx_ids = [t.id for t in new_txs]
-        stmt = select(Transaction).options(selectinload(Transaction.category)).where(Transaction.id.in_(tx_ids))
+        stmt = select(Transaction).options(selectinload(Transaction.category), selectinload(Transaction.account)).where(Transaction.id.in_(tx_ids))
         result = await session.execute(stmt)
         export_txs = result.scalars().all()
         
         success, msg = export_to_bluecoins_csv(export_txs, output_path)
         result_msg += f"\n{msg}"
         
-    return True, result_msg
+    return True, result_msg, new_txs
 
 async def get_transactions(session, account_id=None, start_date=None, end_date=None):
     stmt = select(Transaction).options(
@@ -128,10 +128,22 @@ async def get_transactions(session, account_id=None, start_date=None, end_date=N
     return result.scalars().all()
 
 async def update_transaction_category(session, tx_id, category_id):
-    stmt = update(Transaction).where(Transaction.id == tx_id).values(category_id=category_id)
+    stmt = update(Transaction).where(Transaction.id == tx_id).values(category_id=category_id, is_verified=True)
     await session.execute(stmt)
     await session.commit()
-    return True, "Transaction category updated."
+    return True, "Transaction category updated and verified."
+
+async def update_transaction_amount(session, tx_id, new_amount):
+    stmt = update(Transaction).where(Transaction.id == tx_id).values(amount=new_amount, is_verified=True)
+    await session.execute(stmt)
+    await session.commit()
+    return True, "Transaction amount updated and verified."
+
+async def mark_transaction_verified(session, tx_id):
+    stmt = update(Transaction).where(Transaction.id == tx_id).values(is_verified=True)
+    await session.execute(stmt)
+    await session.commit()
+    return True, "Transaction verified."
 
 async def delete_transaction(session, tx_id):
     stmt = delete(Transaction).where(Transaction.id == tx_id)
