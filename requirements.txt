@@ -1,0 +1,9 @@
+sqlalchemy
+asyncpg
+python-telegram-bot
+ollama
+psycopg2-binary  # for synchronous scripts if needed
+python-dotenv
+greenlet # required for async sqlalchemy
+pandas
+alembic # optional but good for migrations
