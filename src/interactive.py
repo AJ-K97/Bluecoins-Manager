@@ -1,3 +1,5 @@
+import os
+
 from datetime import datetime
 from InquirerPy import inquirer
 from InquirerPy.base.control import Choice
@@ -276,7 +278,7 @@ async def import_wizard(session):
     # 2. Select File
     file_path = await inquirer.filepath(
         message="Path to CSV file:",
-        default=os.getcwd() + "/",
+        default=os.getcwd(), # Removed trailing slash
         validate=lambda x: os.path.isfile(x) and x.endswith('.csv'),
         only_files=True
     ).execute_async()
