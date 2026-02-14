@@ -54,6 +54,16 @@ The bot will listen for messages. Send it a CSV file (e.g., `HSBC_Statement.csv`
 
 ## 3. 🖥️ Using the CLI
 
+### A. Interactive Wizard (Recommended) 🪄
+Simply run `python3 main.py` without arguments to launch the interactive menu.
+```bash
+python3 main.py
+```
+This will guide you through:
+-   Importing transactions (with file pickers!)
+-   Managing accounts
+
+### B. Command Mode
 You can also use the command line directly.
 
 **Manage Accounts:**

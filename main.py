@@ -2,155 +2,32 @@ import argparse
 import asyncio
 import csv
 import os
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
-from src.database import init_db, Account, Category, MappingRule, Transaction, AsyncSessionLocal
-from src.parser import BankParser
-from src.ai import CategorizerAI
-
-async def list_accounts(session):
-    result = await session.execute(select(Account))
-    accounts = result.scalars().all()
-    if not accounts:
-        print("No accounts found.")
-    else:
-        print("Accounts:")
-        for acc in accounts:
-            print(f" - {acc.name} ({acc.institution})")
-
-async def add_account(session, name, institution):
-    try:
-        session.add(Account(name=name, institution=institution))
-        await session.commit()
-        print(f"Added account '{name}'.")
-    except IntegrityError:
-        await session.rollback()
-        print(f"Account '{name}' already exists.")
-
-async def delete_account(session, name):
-    result = await session.execute(select(Account).where(Account.name == name))
-    acc = result.scalar_one_or_none()
-    if acc:
-        await session.delete(acc)
-        await session.commit()
-        print(f"Deleted account '{name}'.")
-    else:
-        print(f"Account '{name}' not found.")
+from src.database import init_db, AsyncSessionLocal
+from src.interactive import interactive_main
+from src.commands import list_accounts, add_account, delete_account, process_import
 
 async def account_command(args):
     async with AsyncSessionLocal() as session:
         if args.list:
-            await list_accounts(session)
+            accounts = await list_accounts(session)
+            if not accounts:
+                print("No accounts found.")
+            else:
+                print("Accounts:")
+                for acc in accounts:
+                    print(f" - {acc.name} ({acc.institution})")
         elif args.add:
-            await add_account(session, args.add, args.add) # Use name as institution for now
+            success, msg = await add_account(session, args.add, args.add)
+            print(msg)
         elif args.delete:
-            await delete_account(session, args.delete)
+            success, msg = await delete_account(session, args.delete)
+            print(msg)
 
 async def convert_command(args):
-    parser = BankParser()
-    try:
-        transactions = parser.parse(args.bank, args.input)
-    except Exception as e:
-        print(f"Error parsing file: {e}")
-        return
-
     async with AsyncSessionLocal() as session:
-        # Check Account
-        result = await session.execute(select(Account).where(Account.name == args.account))
-        account = result.scalar_one_or_none()
-        if not account:
-            print(f"Account '{args.account}' not found in DB. Please add it first.")
-            return
-
-        print(f"Parsed {len(transactions)} transactions.")
-        
-        # Load Mapping Rules
-        mappings_result = await session.execute(select(MappingRule))
-        rules = mappings_result.scalars().all()
-        rule_map = {r.keyword: r.category_id for r in rules}
-        
-        # Initialize AI
-        ai = CategorizerAI()
-        
-        new_txs = []
-        for tx in transactions:
-            # Check for existing duplicate (same date, amount, desc, account)
-            stmt = select(Transaction).where(
-                Transaction.date == tx["date"],
-                Transaction.amount == tx["amount"],
-                Transaction.description == tx["description"],
-                Transaction.account_id == account.id
-            )
-            existing = await session.execute(stmt)
-            if existing.scalar_one_or_none():
-                continue
-            
-            cat_id = rule_map.get(tx["description"])
-            
-            # If not in rules, try AI
-            if not cat_id:
-                print(f"Resolving '{tx['description']}' with AI...")
-                cat_id = await ai.suggest_category(tx["description"], session)
-            
-            new_tx = Transaction(
-                date=tx["date"],
-                description=tx["description"],
-                amount=tx["amount"],
-                type=tx["type"],
-                account_id=account.id,
-                category_id=cat_id,
-                raw_csv_row=tx["raw_csv_row"]
-            )
-            
-            session.add(new_tx)
-            new_txs.append(new_tx)
-        
-        # Commit to save new transactions
-        await session.commit()
-        print(f"Imported {len(new_txs)} new transactions.")
-        
-        if args.output and new_txs:
-            # We need to refresh/load categories for these transactions to write the CSV
-            # Or just fetch them again with join
-            
-            # Re-query new transactions with eager load
-            tx_ids = [t.id for t in new_txs]
-            stmt = select(Transaction).options(selectinload(Transaction.category)).where(Transaction.id.in_(tx_ids))
-            result = await session.execute(stmt)
-            export_txs = result.scalars().all()
-            
-            with open(args.output, "w", newline="") as f:
-                writer = csv.writer(f)
-                # Bluecoins Header
-                writer.writerow(["Type", "Date", "Item or Payee", "Amount", "Parent Category", "Category", "Account Type", "Account", "Notes", "Label", "Status", "Split"])
-                
-                for tx in export_txs:
-                    # Map to Bluecoins format
-                    # Type: "Bank" (default from config? Old script had account_type arg)
-                    # We dropped account_type arg in this implementation, assume "Bank"
-                    
-                    cat_name = tx.category.name if tx.category else ""
-                    parent_name = tx.category.parent_name if tx.category else ""
-                    
-                    writer.writerow([
-                        "Expense" if tx.type == "expense" else "Income", # Bluecoins uses "Expense"/"Income"? No, logic was "e" / "i" in old script?
-                        # Old script: "Type" = "e" or "i"?
-                        # Let's check old script: `type_ = "i" if amount > 0 else "e"`
-                        # Bluecoins expects "Type" column to be what?
-                        # Actually standard CSV import usually handles "Expense", "Income" or "Transfer".
-                        # Old script wrote "type_".
-                        
-                        tx.date.strftime("%m/%d/%Y"),
-                        tx.description,
-                        str(tx.amount),
-                        parent_name,
-                        cat_name,
-                        "Bank", # Hardcoded for now
-                        account.name,
-                        "", "", "", ""
-                    ])
-            print(f"Exported to {args.output}")
+        success, msg = await process_import(session, args.bank, args.input, args.account, args.output)
+        print(msg)
 
 async def main():
     parser = argparse.ArgumentParser(description="Financial CLI V2")
@@ -174,7 +51,10 @@ async def main():
     
     await init_db()
     
-    if args.command == "account":
+    if not args.command:
+        # Launch Interactive Mode if no args
+        await interactive_main()
+    elif args.command == "account":
         await account_command(args)
     elif args.command == "convert":
         await convert_command(args)
