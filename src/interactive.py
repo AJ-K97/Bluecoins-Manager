@@ -10,110 +10,93 @@ from src.commands import (
     get_all_categories, mark_transaction_verified, update_transaction_amount
 )
 
+from src.tui import TransactionReviewApp
+
 async def review_transactions(session, transactions):
     """
-    Interactive review of new transactions.
+    Interactive review of new transactions using custom TUI.
     """
+    # Filter/Fetch fresh list
+    tx_ids = [t.id for t in transactions]
+    if not tx_ids:
+        return
+
+    from sqlalchemy import select
+    from src.database import Transaction
+    from sqlalchemy.orm import selectinload
+    
+    # Initial fetch
+    stmt = select(Transaction).options(
+        selectinload(Transaction.category),
+        selectinload(Transaction.account)
+    ).where(Transaction.id.in_(tx_ids)).order_by(Transaction.date.desc())
+    
+    res = await session.execute(stmt)
+    review_list = res.scalars().all()
+    
+    if not review_list:
+        print("No transactions to review.")
+        return
+
+    # Callback for TUI actions
+    async def on_update(tx, action):
+        if action == 'verify':
+            await mark_transaction_verified(session, tx.id)
+            # Refresh object state if needed, but simple attribute update might be enough for display
+            # tx.is_verified = True # Handled in TUI/Object
+            
+    # Main Loop
     while True:
-        # Re-fetch or use passed objects? 
-        # Ideally we want live status.
-        # But transactions list passed from process_import might be detached or stale if we commit in loop.
-        # Let's rely on IDs.
+        # Check if all done?
+        # Maybe not check, user can exit when they want.
         
-        tx_ids = [t.id for t in transactions]
-        # Fetch fresh sort by date
-        current_txs = await get_transactions(session) # This gets ALL. We only want the new ones.
-        # Filter in python for now or better query? 
-        # process_import returned the objects. 
-        # Let's filter our list based on what we just imported.
+        app = TransactionReviewApp(review_list, session, update_callback=on_update)
+        result = await app.run_async()
         
-        # Actually simplest is to iterate the list we have, but we need to know if they are verified.
-        # Let's refresh them.
-        from sqlalchemy import select
-        from src.database import Transaction
-        from sqlalchemy.orm import selectinload
-        
-        stmt = select(Transaction).options(selectinload(Transaction.category)).where(Transaction.id.in_(tx_ids)).order_by(Transaction.date.desc())
-        res = await session.execute(stmt)
-        review_list = res.scalars().all()
-        
-        if not review_list:
-            print("No transactions to review.")
-            break
-
-        # Check if all verified
-        unverified_count = sum(1 for t in review_list if not t.is_verified)
-        if unverified_count == 0:
-            print("\n✅ All transactions verified!\n")
-            break
-
-        print(f"\nReviewing {len(review_list)} transactions ({unverified_count} unverified).")
-        print("Select a transaction to Approve (Enter) or Modify.")
-        
-        choices = []
-        for t in review_list:
-            status = "✅" if t.is_verified else "  "
-            cat_name = t.category.name if t.category else "Uncategorized"
-            # Format: [v] Date | Desc | Amount | Category
-            label = f"{status} {t.date.strftime('%Y-%m-%d')} | {t.description[:20]:<20} | {t.amount:>8.2f} | {cat_name}"
-            choices.append(Choice(value=t, name=label))
-            
-        choices.append(Choice(value="ALL", name="✅ Approve ALL remaining"))
-        choices.append(Choice(value=None, name="Done / Skip"))
-        
-        selected = await inquirer.select(
-            message="Transaction List:",
-            choices=choices,
-            default=choices[0] # Default to first item
-        ).execute_async()
-        
-        if not selected:
+        if result is None:
             break
             
-        if selected == "ALL":
-            for t in review_list:
-                if not t.is_verified:
-                    await mark_transaction_verified(session, t.id)
-            print("All verified.")
-            break
-            
-        # Action Menu for Selected
-        action = await inquirer.select(
-            message=f"Action for '{selected.description}':",
-            choices=[
-                Choice(value="approve", name="✅ Approve / Verify"),
-                Choice(value="category", name="📝 Change Category"),
-                Choice(value="amount", name="💰 Change Amount"),
-                Choice(value="delete", name="❌ Delete"),
-                Choice(value=None, name="Back")
-            ]
-        ).execute_async()
+        action, tx = result
         
-        if action == "approve":
-            await mark_transaction_verified(session, selected.id)
-            # Auto loop continues and updates list
-            
-        elif action == "category":
+        if action == 'modify':
+            # Hierarchical Category Selection
             cats = await get_all_categories(session)
-            cat_choices = [Choice(value=c.id, name=f"{c.parent_name} > {c.name}") for c in cats]
-            new_cat_id = await inquirer.fuzzy(
-                message="Select Category:",
-                choices=cat_choices,
+            
+            # 1. Select Parent
+            parent_names = sorted(list(set(c.parent_name for c in cats if c.parent_name)))
+            parent_choices = [Choice(value=p, name=p) for p in parent_names]
+            parent_choices.append(Choice(value=None, name="Cancel"))
+            
+            selected_parent = await inquirer.fuzzy(
+                message=f"Select Parent Category for '{tx.description}':",
+                choices=parent_choices,
             ).execute_async()
-            if new_cat_id:
-                await update_transaction_category(session, selected.id, new_cat_id)
+            
+            if selected_parent:
+                # 2. Select Child (Sub-category)
+                child_cats = [c for c in cats if c.parent_name == selected_parent]
+                child_choices = [Choice(value=c.id, name=c.name) for c in child_cats]
+                child_choices.append(Choice(value=None, name="Back"))
+                
+                new_cat_id = await inquirer.fuzzy(
+                    message=f"Select Sub-Category for '{tx.description}':",
+                    choices=child_choices,
+                ).execute_async()
+                
+                if new_cat_id:
+                    await update_transaction_category(session, tx.id, new_cat_id)
+                    # Refresh transaction to get new category name
+                    await session.refresh(tx, ['category'])
+                
+        elif action == 'delete':
+            confirm = await inquirer.confirm(message=f"Delete '{tx.description}'?").execute_async()
+            if confirm:
+                await delete_transaction(session, tx.id)
+                review_list.remove(tx)
+                if not review_list:
+                    print("All transactions deleted.")
+                    break
 
-        elif action == "amount":
-            new_amount_str = await inquirer.text(message="New Amount:", default=str(selected.amount)).execute_async()
-            try:
-                val = float(new_amount_str)
-                await update_transaction_amount(session, selected.id, val)
-            except ValueError:
-                print("Invalid amount.")
-
-        elif action == "delete":
-            if await inquirer.confirm(message="Delete this transaction?").execute_async():
-                await delete_transaction(session, selected.id)
 
 
 async def manage_accounts_menu(session):
@@ -339,6 +322,24 @@ async def import_wizard(session):
             print(msg)
 
 
+from src.chat import FinanceChatAI
+
+async def chat_wizard(session):
+    print("\n💬 Chat with your Finance Data")
+    print("Ask questions like 'How much did I spend on Food last month?' or 'Show me top expenses'.")
+    print("Type 'exit' or 'q' to go back.\n")
+    
+    chat_ai = FinanceChatAI()
+    
+    while True:
+        question = await inquirer.text(message="You:").execute_async()
+        if question.lower() in ['exit', 'quit', 'q']:
+            break
+            
+        print("🤖 Thinking...")
+        response = await chat_ai.chat(question, session)
+        print(f"\nAI: {response}\n")
+
 async def interactive_main():
     print("Welcome to Bluecoins Manager V2")
     await init_db()
@@ -351,6 +352,7 @@ async def interactive_main():
                     "Import Transactions",
                     "Manage Transactions",
                     "Manage Accounts",
+                    "Chat with your Data",
                     Choice(value=None, name="Exit")
                 ],
             ).execute_async()
@@ -365,9 +367,12 @@ async def interactive_main():
                 await import_wizard(session)
             elif action == "Manage Transactions":
                 await manage_transactions_menu(session)
+            elif action == "Chat with your Data":
+                await chat_wizard(session)
 
 if __name__ == "__main__":
     try:
+        import asyncio
         asyncio.run(interactive_main())
     except KeyboardInterrupt:
         print("\nGoodbye!")
