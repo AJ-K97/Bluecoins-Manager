@@ -525,6 +525,8 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
     effective_type = current_type
     effective_confidence = confidence
     effective_reasoning = reasoning
+    change_log = []
+    discussion_history = []
 
     while True:
         if effective_type == "transfer":
@@ -552,16 +554,29 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
                 Choice(value="change", name="Change Category"),
                 Choice(value="refresh", name="Refresh LLM Reasoning"),
                 Choice(value="coach", name="Coach Model"),
+                Choice(value="discuss", name="Discuss Current Decision"),
                 Choice(value="skip", name="Skip Review (Accept as AI prediction)"),
             ],
             default="accept"
         ).execute_async()
 
         if action == "accept":
-            return effective_cat_id, True, effective_type
+            if change_log:
+                change_summary = " | ".join(change_log)
+                if effective_reasoning:
+                    effective_reasoning = f"{effective_reasoning} [Review changes: {change_summary}]"
+                else:
+                    effective_reasoning = f"Review changes: {change_summary}"
+            return effective_cat_id, True, effective_type, effective_confidence, effective_reasoning
 
         if action == "skip":
-            return effective_cat_id, False, effective_type
+            if change_log:
+                change_summary = " | ".join(change_log)
+                if effective_reasoning:
+                    effective_reasoning = f"{effective_reasoning} [Review changes: {change_summary}]"
+                else:
+                    effective_reasoning = f"Review changes: {change_summary}"
+            return effective_cat_id, False, effective_type, effective_confidence, effective_reasoning
 
         if action == "change":
             cats = await get_all_categories(session)
@@ -586,18 +601,39 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
                 ).execute_async()
 
                 if selected_cat:
+                    old_parent, old_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
+                    old_label = f"{old_parent} > {old_name}"
                     effective_cat_id = selected_cat.id
                     effective_type = selected_cat.type
-                    effective_reasoning = "User manually selected category during review."
+                    new_label = f"{selected_cat.parent_name or 'Uncategorized'} > {selected_cat.name}"
+                    prior_reasoning = effective_reasoning or "No prior reasoning."
+                    reflection = await ai.generate_reflection(
+                        tx_data["description"],
+                        old_label,
+                        new_label,
+                        prior_reasoning
+                    )
+                    effective_reasoning = (
+                        f"Manual override during review: changed from {old_label} to {new_label}. "
+                        f"Reflection: {reflection}"
+                    )
                     effective_confidence = 1.0
+                    if old_label != new_label:
+                        change_log.append(f"manual override {old_label} -> {new_label}")
             continue
 
         if action == "refresh":
+            old_parent, old_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
+            old_label = f"{old_parent} > {old_name}"
             new_cat_id, new_conf, new_reason, new_type = await ai.suggest_category(tx_data["description"], session)
             effective_cat_id = new_cat_id
             effective_confidence = new_conf
             effective_reasoning = new_reason
             effective_type = new_type or effective_type
+            new_parent, new_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
+            new_label = f"{new_parent} > {new_name}"
+            if old_label != new_label:
+                change_log.append(f"refresh changed suggestion {old_label} -> {new_label}")
             continue
 
         if action == "coach":
@@ -609,10 +645,86 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
                 new_cat_id, new_conf, new_reason, new_type = await ai.suggest_category(
                     tx_data["description"], session, extra_instruction=coaching_text.strip()
                 )
+                old_parent, old_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
+                old_label = f"{old_parent} > {old_name}"
                 effective_cat_id = new_cat_id
                 effective_confidence = new_conf
                 effective_reasoning = new_reason
                 effective_type = new_type or effective_type
+                new_parent, new_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
+                new_label = f"{new_parent} > {new_name}"
+                if old_label != new_label:
+                    change_log.append(f"coached update {old_label} -> {new_label}")
+            continue
+
+        if action == "discuss":
+            print("\nDiscussion mode for current transaction.")
+            print("Commands: /done to return, /search <query> to force web search.\n")
+
+            while True:
+                user_msg = await inquirer.text(
+                    message="You:"
+                ).execute_async()
+                user_msg = (user_msg or "").strip()
+
+                if not user_msg:
+                    continue
+                if user_msg.lower() in {"/done", "done", "exit"}:
+                    break
+
+                forced_search_query = None
+                llm_message = user_msg
+
+                if user_msg.lower().startswith("/search"):
+                    forced_search_query = user_msg[7:].strip()
+                    if not forced_search_query:
+                        print("Usage: /search <query>")
+                        continue
+                    llm_message = (
+                        "Use this explicit web search context to review the current decision. "
+                        f"Query: {forced_search_query}. Explain whether category/type should change and why."
+                    )
+
+                model_reply = await ai.discuss_transaction(
+                    tx_data=tx_data,
+                    current_type=effective_type,
+                    current_cat_id=effective_cat_id,
+                    current_reasoning=effective_reasoning,
+                    session=session,
+                    user_message=llm_message,
+                    conversation_history=discussion_history,
+                    web_search_query=forced_search_query
+                )
+
+                discussion_history.append({"role": "user", "content": user_msg})
+                discussion_history.append({"role": "assistant", "content": model_reply})
+                render_box([f"Model: {model_reply}"])
+
+            if discussion_history:
+                conversation_instruction = await ai.summarize_review_conversation(
+                    tx_description=tx_data["description"],
+                    conversation_history=discussion_history
+                )
+                if conversation_instruction and conversation_instruction.strip():
+                    old_parent, old_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
+                    old_label = f"{old_parent} > {old_name}"
+
+                    new_cat_id, new_conf, new_reason, new_type = await ai.suggest_category(
+                        tx_data["description"],
+                        session,
+                        extra_instruction=conversation_instruction.strip()
+                    )
+                    effective_cat_id = new_cat_id
+                    effective_confidence = new_conf
+                    effective_reasoning = (
+                        f"{new_reason} [Conversation guidance applied: {conversation_instruction.strip()}]"
+                    )
+                    effective_type = new_type or effective_type
+
+                    new_parent, new_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
+                    new_label = f"{new_parent} > {new_name}"
+                    if old_label != new_label:
+                        change_log.append(f"discussion-informed update {old_label} -> {new_label}")
             continue
 
 async def import_wizard(session):

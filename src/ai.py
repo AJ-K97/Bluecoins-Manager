@@ -19,6 +19,36 @@ class CategorizerAI:
         ])
         return response['message']['content'].strip()
 
+    def _clean_description(self, description):
+        clean_desc = re.sub(r'\d{2}[A-Z]{3}\d{2}', '', description) # 28JAN26
+        clean_desc = re.sub(r'\d{2}:\d{2}:\d{2}', '', clean_desc) # 23:30:46
+        clean_desc = re.sub(r'\b\d{4}\b', '', clean_desc)
+        clean_desc = re.sub(r'\b[A-Z0-9]{6,}\b', '', clean_desc)
+        clean_desc = re.sub(r'\b(VISA|AUD|ATMA\d*|EFTPOS|DEBIT|CREDIT)\b', '', clean_desc, flags=re.IGNORECASE)
+        clean_desc = re.sub(r'\s+', ' ', clean_desc).strip()
+        return clean_desc
+
+    def _run_web_search(self, query, max_results=3):
+        if not query or not str(query).strip():
+            return []
+        try:
+            from duckduckgo_search import DDGS
+            with DDGS() as ddgs:
+                return list(ddgs.text(str(query).strip(), max_results=max_results))
+        except Exception:
+            return []
+
+    def _format_search_results(self, results):
+        if not results:
+            return "No information found."
+        lines = []
+        for r in results:
+            title = r.get("title", "Unknown")
+            body = r.get("body", "")
+            href = r.get("href", "")
+            lines.append(f"- {title}: {body} {href}".strip())
+        return "\n".join(lines)
+
     def _parse_json_payload(self, content):
         try:
             import json
@@ -129,22 +159,9 @@ Text:
                 global_rules_str += f"\n- {extra_instruction}"
 
         # 3. Web Search Context
-        clean_desc = re.sub(r'\d{2}[A-Z]{3}\d{2}', '', description) # 28JAN26
-        clean_desc = re.sub(r'\d{2}:\d{2}:\d{2}', '', clean_desc) # 23:30:46
-        clean_desc = re.sub(r'\b\d{4}\b', '', clean_desc)
-        clean_desc = re.sub(r'\b[A-Z0-9]{6,}\b', '', clean_desc)
-        clean_desc = re.sub(r'\b(VISA|AUD|ATMA\d*|EFTPOS|DEBIT|CREDIT)\b', '', clean_desc, flags=re.IGNORECASE)
-        clean_desc = re.sub(r'\s+', ' ', clean_desc).strip()
-
-        search_context = "No information found."
-        try:
-            from duckduckgo_search import DDGS
-            with DDGS() as ddgs:
-                results = list(ddgs.text(clean_desc, max_results=2))
-                if results:
-                    search_context = "\n".join([f"- {r.get('title', 'Unknown')}: {r.get('body', '')}" for r in results])
-        except Exception as e:
-            search_context = f"Web search failed: {e}"
+        clean_desc = self._clean_description(description)
+        search_results = self._run_web_search(clean_desc, max_results=2)
+        search_context = self._format_search_results(search_results)
 
         # 4. Construct Prompt
         prompt = f"""
@@ -218,6 +235,111 @@ JSON ONLY.
         except Exception as e:
             print(f"AI Error: {e}")
             return None, 0.0, f"Error: {e}", "expense"
+
+    async def discuss_transaction(
+        self,
+        tx_data,
+        current_type,
+        current_cat_id,
+        current_reasoning,
+        session,
+        user_message,
+        conversation_history=None,
+        web_search_query=None
+    ):
+        """
+        Conversational assistant for discussing a single in-review transaction.
+        """
+        result = await session.execute(select(Category))
+        categories = result.scalars().all()
+        cat_by_id = {c.id: c for c in categories}
+        cat_lines = []
+        for c in sorted(categories, key=lambda x: (x.parent_name or "", x.name)):
+            cat_lines.append(f"ID {c.id}: {(c.parent_name or 'No Parent')} > {c.name} ({c.type})")
+        categories_text = "\n".join(cat_lines) if cat_lines else "No categories available."
+
+        if current_type == "transfer" and current_cat_id is None:
+            current_label = "(Transfer) > (Transfer)"
+        elif current_cat_id in cat_by_id:
+            cat = cat_by_id[current_cat_id]
+            current_label = f"{cat.parent_name or 'Uncategorized'} > {cat.name}"
+        else:
+            current_label = "Uncategorized > Uncategorized"
+
+        web_context = "None"
+        if web_search_query:
+            web_context = self._format_search_results(self._run_web_search(web_search_query, max_results=3))
+
+        history_text = "None"
+        if conversation_history:
+            lines = []
+            for msg in conversation_history[-12:]:
+                role = msg.get("role", "user").upper()
+                content = msg.get("content", "")
+                lines.append(f"{role}: {content}")
+            history_text = "\n".join(lines)
+
+        prompt = f"""
+You are helping a user review one bank transaction.
+Do not output JSON. Give a clear conversational answer.
+If asked to search, use provided web search context and cite uncertain points.
+Focus on WHY the current categorization was chosen, possible alternatives, and what evidence would change it.
+
+Transaction:
+- Date: {tx_data.get("date")}
+- Amount: {tx_data.get("amount")}
+- Description: {tx_data.get("description")}
+
+Current model decision:
+- Type: {current_type}
+- Category: {current_label}
+- Reasoning: {current_reasoning or "No reasoning yet."}
+
+Available categories:
+{categories_text}
+
+Conversation so far:
+{history_text}
+
+Web search context (if requested):
+{web_context}
+
+User message:
+{user_message}
+"""
+        try:
+            return await self._chat_once(prompt)
+        except Exception as e:
+            return f"I could not complete that discussion step: {e}"
+
+    async def summarize_review_conversation(self, tx_description, conversation_history):
+        """
+        Summarize a review discussion into compact instructions for re-categorization.
+        """
+        if not conversation_history:
+            return ""
+
+        lines = []
+        for msg in conversation_history[-20:]:
+            role = msg.get("role", "user").upper()
+            content = msg.get("content", "")
+            lines.append(f"{role}: {content}")
+        convo_text = "\n".join(lines)
+
+        prompt = f"""
+Summarize the following transaction-review conversation into concise categorization guidance.
+The guidance will be fed into a categorizer as extra instruction.
+Keep it <= 4 bullet points and include only actionable rules or conclusions.
+If no strong conclusion, state uncertainty briefly.
+
+Transaction description: {tx_description}
+Conversation:
+{convo_text}
+"""
+        try:
+            return await self._chat_once(prompt)
+        except Exception:
+            return ""
 
     async def generate_reflection(self, description, old_category, new_category, previous_reasoning):
         """
