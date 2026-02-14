@@ -57,6 +57,8 @@ class BankParser:
                     amount_str = clean_row[cfg["amount_column"]].replace(",", "")
                     try:
                         amount = float(amount_str)
+                        if cfg.get("negate_amounts", False):
+                            amount = -amount
                     except ValueError:
                         continue # Skip invalid amounts
 
@@ -81,7 +83,7 @@ class BankParser:
                     transactions.append({
                         "date": date_val,
                         "description": desc,
-                        "amount": abs(amount),
+                        "amount": amount,
                         "type": tx_type,
                         "raw_csv_row": json.dumps(clean_row, default=str)
                     })

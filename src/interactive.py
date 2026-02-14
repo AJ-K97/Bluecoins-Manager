@@ -405,10 +405,18 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
             cat_name = c.name
             cat_str = f"{c.parent_name} > {c.name}"
             
+    # Determine Type Display (especially for transfers)
+    type_disp = current_type.upper()
+    if current_type == "transfer":
+        if tx_data['amount'] < 0:
+            type_disp = "TRANSFER OUT"
+        else:
+            type_disp = "TRANSFER IN"
+            
     print(f"\n---------------------------------------------------")
     print(f"Date: {tx_data['date']} | Amount: {tx_data['amount']}")
     print(f"Desc: {tx_data['description']}")
-    print(f"AI Suggestion: {cat_name} ({confidence:.2f}) [{current_type}]")
+    print(f"AI Suggestion: {cat_name} ({confidence:.2f}) [{type_disp}]")
     if cat_str: print(f"Path: {cat_str}")
     print(f"Reasoning: {reasoning}")
     print(f"---------------------------------------------------")

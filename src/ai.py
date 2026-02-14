@@ -4,7 +4,7 @@ from sqlalchemy import select
 from src.database import Category, Transaction, AIMemory
 
 class CategorizerAI:
-    def __init__(self, model="llama3.2:3b"):
+    def __init__(self, model="llama3.1:8b"):
         """
         Initialize with the Ollama model.
         Ensure 'ollama serve' is running and the model is pulled.
@@ -64,12 +64,21 @@ class CategorizerAI:
         # 3. Web Search Context
         # Clean description for better search/AI context
         # Remove dates, times, long numeric codes using approx regex
+        # 3. Web Search Context
+        # Clean description for better search/AI context
+        # Remove dates (DDMMMYY, DD/MM/YYYY etc approx)
         clean_desc = re.sub(r'\d{2}[A-Z]{3}\d{2}', '', description) # 28JAN26
+        # Remove times
         clean_desc = re.sub(r'\d{2}:\d{2}:\d{2}', '', clean_desc) # 23:30:46
-        # Remove common banking noise, but keep critical ones if they might matter (ATM is tricky)
-        # But for categorization, "ATM" usually implies cash out UNLESS there's a merchant name.
-        # If merchant name exists, it's a purchase.
-        clean_desc = re.sub(r'\b(VISA|AUD|ATMA\d+)\b', '', clean_desc) 
+        
+        # Aggressive Cleaning: Remove card info, long codes, banking noise
+        # 4-digit numbers (often card ending)
+        clean_desc = re.sub(r'\b\d{4}\b', '', clean_desc)
+        # Long alphanumeric codes (6+ chars)
+        clean_desc = re.sub(r'\b[A-Z0-9]{6,}\b', '', clean_desc)
+        # Specific banking keywords and variations
+        clean_desc = re.sub(r'\b(VISA|AUD|ATMA\d*|EFTPOS|DEBIT|CREDIT)\b', '', clean_desc, flags=re.IGNORECASE)
+        
         clean_desc = re.sub(r'\s+', ' ', clean_desc).strip()
         
         search_context = "No information found."
@@ -98,23 +107,30 @@ Memory Bank (Similar Past Transactions & Reflections):
 {history_str}
 
 General Rules & ID hints:
-- Supermarkets (e.g. IGA, Woolworths, Coles, Aldi) -> Household > Grocery
-- Fast Food (Burgers, Pizza, Cafe), Restaurants, Dining Out -> Entertainment > Food
-- Streaming Services (e.g. Netflix, Spotify, Youtube) -> Entertainment > App/Subscription
 - "Salary" -> Income > Salary (Type: income)
 - "Transfer" -> Transfer > Transfer (Type: transfer)
 
 Reflections instructions:
 - If you see a "LEARNING/REFLECTION", you MUST apply that logic.
 - Do NOT hallucinate "Water" or "Utilities" for ordinary shops.
-- Look at the "Web Search Context" to identify what the merchant does (e.g. Grocery, Fast Food).
-- Ignore "ATM", "VISA", "EFTPOS" keywords if there is a merchant name. Focus on the merchant.
+- Use "Web Search Context" to identify the merchant's business type.
+- Ignore "ATM", "VISA", "EFTPOS" keywords. Focus on the merchant.
+- Ignore legal prefixes like "THE TRUSTEE FOR", "PTY LTD", "TRUST" when identifying the Payee. "THE TRUSTEE FOR BCF" -> Payee is "BCF".
 
 Task:
-Return a JSON object with:
+1. Identify the **Payee** (Merchant/Person) and **Location** (if available) from the description.
+2. Determine if it is a Transfer (e.g. "Transfer", "Internal Transfer", "Osko"). 
+   - **CRITICAL**: A transaction is NOT a transfer if it is a purchase from a business.
+   - Presence of a **Location** (e.g. Canning Vale) does NOT make it a Transfer.
+   - If the Payee is a known entity/brand, it is likely a PURCHASE.
+3. Determine the category based on the Payee/Type.
+4. Return a JSON object with:
+- "payee": The extracted merchant/payee name.
+- "location": The extracted location (or null).
 - "reasoning": Concise explanation. Mention why you ruled out others if unsure.
 - "id": The EXACT Category ID from the list above. 
     - Verify the ID exists in the specific "Available Categories" list provided.
+    - If it is a Transfer, use the Transfer category ID (usually 31 or similar).
     - If you think it is "App/Subscription", look for ID under "Entertainment".
     - If you think it is "Eating Out" or "Food", look for "Food" under "Entertainment".
 - "confidence": score (0.0 - 1.0)
