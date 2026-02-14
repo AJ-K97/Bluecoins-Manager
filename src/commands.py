@@ -253,14 +253,17 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
             tx_type = suggested_type
         if tx_type == "transfer":
             cat_id = None
+        ai_suggested_cat_id = cat_id if tx_type != "transfer" else None
+        ai_suggested_reasoning = reasoning
         
         # Review Callback
         if review_callback:
             # We pass the raw data and AI suggestion. 
-            # Callback should return (final_cat_id, verified_bool)
-            # It might also modify tx_type, but let's keep it simple for now or return a dict.
-            # Let's assume it returns (cat_id, is_verified, tx_type)
-            cat_id, is_verified, tx_type = await review_callback(tx_data, cat_id, confidence, tx_type, reasoning, session)
+            # Callback returns final reviewed values:
+            # (cat_id, is_verified, tx_type, confidence, reasoning)
+            cat_id, is_verified, tx_type, confidence, reasoning = await review_callback(
+                tx_data, cat_id, confidence, tx_type, reasoning, session
+            )
             if tx_type == "transfer":
                 cat_id = None
 
@@ -285,8 +288,8 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
         memory = AIMemory(
             transaction_id=new_tx.id,
             pattern_key=pattern_key,
-            ai_suggested_category_id=cat_id if tx_type != "transfer" else None,
-            ai_reasoning=reasoning,
+            ai_suggested_category_id=ai_suggested_cat_id,
+            ai_reasoning=reasoning or ai_suggested_reasoning,
             user_selected_category_id=cat_id if is_verified else None # If verified, we record it
         )
         session.add(memory)
