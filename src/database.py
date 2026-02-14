@@ -57,18 +57,7 @@ class Transaction(Base):
     confidence_score = Column(Float, nullable=True) # AI Confidence (0.0 - 1.0)
     # ai_reasoning = Column(Text, nullable=True) # DEPRECATED: Moved to AIMemory table
 
-class MappingRule(Base):
-    """
-    Learned rules for auto-categorization based on exact match.
-    Logic: If description contains `keyword`, assign `category_id`.
-    """
-    __tablename__ = "mapping_rules"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    keyword = Column(String, unique=True, index=True)
-    category_id = Column(Integer, ForeignKey("categories.id"))
-    
-    category = relationship("Category")
+
 
 class AIMemory(Base):
     __tablename__ = "ai_memory"

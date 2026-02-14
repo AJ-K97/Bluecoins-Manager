@@ -1,13 +1,15 @@
 import os
 
 from datetime import datetime
+from sqlalchemy import select
 from InquirerPy import inquirer
 from InquirerPy.base.control import Choice
 from src.database import init_db, AsyncSessionLocal
 from src.commands import (
     list_accounts, add_account, delete_account, process_import, get_all_accounts,
     get_transactions, update_transaction_category, delete_transaction, export_to_bluecoins_csv,
-    get_all_categories, mark_transaction_verified, update_transaction_amount
+    get_all_categories, mark_transaction_verified, update_transaction_amount,
+    add_category, delete_category
 )
 
 from src.tui import TransactionReviewApp
@@ -249,6 +251,217 @@ async def manage_transactions_menu(session):
                     print("Deleted.")
 
 
+async def manage_categories_menu(session):
+    while True:
+        action = await inquirer.select(
+            message="Manage Categories:",
+            choices=[
+                "List Categories",
+                "Add Category",
+                "Delete Category",
+                Choice(value=None, name="Back to Main Menu")
+            ]
+        ).execute_async()
+        
+        if not action: break
+        
+        if action == "List Categories":
+            cats = await get_all_categories(session)
+            if not cats:
+                print("No categories found.")
+                continue
+                
+            # Group by Parent
+            from collections import defaultdict
+            grouped = defaultdict(list)
+            for c in cats:
+                grouped[c.parent_name].append(c)
+                
+            print("\nCategories:")
+            for parent in sorted(grouped.keys()):
+                print(f"📁 {parent}")
+                for c in sorted(grouped[parent], key=lambda x: x.name):
+                    # Count transactions? Maybe overly expensive for simple list usage, 
+                    # but helpful. Let's keep it simple for now.
+                    print(f"   └── {c.name} ({c.type})")
+            print("")
+            
+        elif action == "Add Category":
+            cat_type = await inquirer.select(
+                message="Category Type:",
+                choices=["expense", "income"]
+            ).execute_async()
+            
+            is_new_parent = await inquirer.confirm(message="Is this a new Parent Category Group?").execute_async()
+            
+            parent_name = ""
+            if is_new_parent:
+                parent_name = await inquirer.text(message="Enter New Parent Group Name:").execute_async()
+            else:
+                # Select existing parent
+                cats = await get_all_categories(session)
+                parents = sorted(list(set(c.parent_name for c in cats)))
+                if not parents:
+                    print("No existing parent categories. You must create one.")
+                    parent_name = await inquirer.text(message="Enter New Parent Group Name:").execute_async()
+                else:
+                    parent_name = await inquirer.fuzzy(
+                        message="Select Parent Group:",
+                        choices=parents
+                    ).execute_async()
+            
+            if not parent_name: continue
+            
+            name = await inquirer.text(message="Enter Category Name:").execute_async()
+            if not name: continue
+            
+            success, msg = await add_category(session, name, parent_name, cat_type)
+            print(f"\n{msg}\n")
+            
+        elif action == "Delete Category":
+            cats = await get_all_categories(session)
+            if not cats:
+                print("No categories to delete.")
+                continue
+                
+            # Select Category
+            choices = [Choice(value=c, name=f"{c.parent_name} > {c.name}") for c in cats]
+            choices.append(Choice(value=None, name="Cancel"))
+            
+            target_cat = await inquirer.fuzzy(
+                message="Select Category to Delete:",
+                choices=choices
+            ).execute_async()
+            
+            if not target_cat: continue
+            
+            # Check logic
+            # 1. Transactions?
+            # 2. If it's the last child of a parent, parent effectively disappears (which is fine, it's just a string)
+            
+            # Helper to check transactions count
+            from src.database import Transaction
+            stmt = select(Transaction).where(Transaction.category_id == target_cat.id)
+            res = await session.execute(stmt)
+            txs = res.scalars().all()
+            count = len(txs)
+            
+            reassign_id = None
+            delete_txs = False
+            
+            if count > 0:
+                print(f"\n⚠️  Warning: This category has {count} transactions assigned to it.")
+                sub_action = await inquirer.select(
+                    message="How to handle these transactions?",
+                    choices=[
+                        Choice(value="reassign", name="Re-assign to another category"),
+                        Choice(value="delete", name="Delete transactions too"),
+                        Choice(value="cancel", name="Cancel Operation")
+                    ]
+                ).execute_async()
+                
+                if sub_action == "cancel": continue
+                
+                if sub_action == "delete":
+                    confirm_del = await inquirer.confirm(message=f"Are you sure you want to delete {count} transactions?").execute_async()
+                    if not confirm_del: continue
+                    delete_txs = True
+                    
+                elif sub_action == "reassign":
+                    # Filter out self
+                    other_cats = [c for c in cats if c.id != target_cat.id]
+                    if not other_cats:
+                        print("No other categories to reassign to!")
+                        continue
+                        
+                    rc_choices = [Choice(value=c.id, name=f"{c.parent_name} > {c.name}") for c in other_cats]
+                    reassign_id = await inquirer.fuzzy(
+                        message="Select New Category for transactions:",
+                        choices=rc_choices
+                    ).execute_async()
+                    
+                    if not reassign_id: continue
+            
+            # Final Confirm
+            confirm = await inquirer.confirm(message=f"Delete category '{target_cat.parent_name} > {target_cat.name}'?").execute_async()
+            if confirm:
+                success, msg = await delete_category(session, target_cat.id, reassign_category_id=reassign_id, delete_transactions=delete_txs)
+                print(f"\n{msg}\n")
+
+
+
+async def import_review_callback(tx_data, current_cat_id, confidence, current_type, reasoning, session):
+    """
+    Called for each transaction during import if review is enabled.
+    """
+    # Resolve category name
+    cat_name = "Uncategorized"
+    cat_str = ""
+    if current_cat_id:
+        from src.database import Category
+        res = await session.execute(select(Category).where(Category.id == current_cat_id))
+        c = res.scalar_one_or_none()
+        if c: 
+            cat_name = c.name
+            cat_str = f"{c.parent_name} > {c.name}"
+            
+    print(f"\n---------------------------------------------------")
+    print(f"Date: {tx_data['date']} | Amount: {tx_data['amount']}")
+    print(f"Desc: {tx_data['description']}")
+    print(f"AI Suggestion: {cat_name} ({confidence:.2f}) [{current_type}]")
+    if cat_str: print(f"Path: {cat_str}")
+    print(f"Reasoning: {reasoning}")
+    print(f"---------------------------------------------------")
+    
+    action = await inquirer.select(
+        message="Action:",
+        choices=[
+            Choice(value="accept", name="Accept & Verify"),
+            Choice(value="change", name="Change Category"),
+            Choice(value="skip", name="Skip Review (Accept as AI prediction)"),
+        ],
+        default="accept"
+    ).execute_async()
+    
+    if action == "accept":
+        return current_cat_id, True, current_type
+        
+    elif action == "skip":
+        return current_cat_id, False, current_type
+        
+    elif action == "change":
+        # Hierarchical Category Selection (similar to existing)
+        cats = await get_all_categories(session)
+        
+        # 1. Select Parent
+        parent_names = sorted(list(set(c.parent_name for c in cats if c.parent_name)))
+        parent_choices = [Choice(value=p, name=p) for p in parent_names]
+        parent_choices.append(Choice(value=None, name="Cancel (Keep AI)"))
+        
+        selected_parent = await inquirer.fuzzy(
+            message=f"Select Parent Category:",
+            choices=parent_choices,
+        ).execute_async()
+        
+        if selected_parent:
+            # 2. Select Child
+            child_cats = [c for c in cats if c.parent_name == selected_parent]
+            child_choices = [Choice(value=c.id, name=c.name) for c in child_cats]
+            child_choices.append(Choice(value=None, name="Back"))
+            
+            new_cat_id = await inquirer.fuzzy(
+                message=f"Select Sub-Category:",
+                choices=child_choices,
+            ).execute_async()
+            
+            if new_cat_id:
+                return new_cat_id, True, current_type
+        
+        # If cancelled or failed
+        return current_cat_id, False, current_type
+
+    return current_cat_id, False, current_type
+
 async def import_wizard(session):
     # 1. Select Bank
     # Hardcoded for now, could load from config
@@ -280,15 +493,20 @@ async def import_wizard(session):
         message="Associate with Account:",
         choices=choices
     ).execute_async()
+    
+    # 3.5 Option to review iteratively
+    do_interactive_review = await inquirer.confirm(message="Review each transaction as it is processed?").execute_async()
+    callback = import_review_callback if do_interactive_review else None
 
     print("\nProcessing... (This may take a moment for AI categorization)\n")
     # import logic
-    success, msg, new_txs = await process_import(session, bank, file_path, account_name) # No export path yet
+    success, msg, new_txs = await process_import(session, bank, file_path, account_name, review_callback=callback) # No export path yet
     
     if success:
         print(f"\n✅ Success: {msg}\n")
         
-        if new_txs:
+        # If we didn't do interactive review, maybe ask for bulk review?
+        if new_txs and not do_interactive_review:
             do_review = await inquirer.confirm(message="Review and Verify these transactions now?").execute_async()
             if do_review:
                 await review_transactions(session, new_txs)
@@ -352,6 +570,7 @@ async def interactive_main():
                 choices=[
                     "Import Transactions",
                     "Manage Transactions",
+                    "Manage Categories",
                     "Manage Accounts",
                     "Chat with your Data",
                     Choice(value=None, name="Exit")
@@ -368,6 +587,8 @@ async def interactive_main():
                 await import_wizard(session)
             elif action == "Manage Transactions":
                 await manage_transactions_menu(session)
+            elif action == "Manage Categories":
+                await manage_categories_menu(session)
             elif action == "Chat with your Data":
                 await chat_wizard(session)
 

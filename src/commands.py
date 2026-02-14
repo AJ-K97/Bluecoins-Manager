@@ -1,7 +1,7 @@
 from sqlalchemy import select, update, delete
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
-from src.database import Account, Category, MappingRule, Transaction, AsyncSessionLocal, AIMemory
+from src.database import Account, Category, Transaction, AsyncSessionLocal, AIMemory
 from src.parser import BankParser
 from src.ai import CategorizerAI
 
@@ -34,27 +34,81 @@ async def get_all_accounts(session):
     return result.scalars().all()
 
 async def get_all_categories(session):
-    result = await session.execute(select(Category).order_by(Category.name))
+    result = await session.execute(select(Category).order_by(Category.parent_name, Category.name))
     return result.scalars().all()
 
-async def process_import(session, bank_name, file_path, account_name, output_path=None):
+async def add_category(session, name, parent_name, type):
+    # Check if exists
+    stmt = select(Category).where(
+        Category.name == name, 
+        Category.parent_name == parent_name,
+        Category.type == type
+    )
+    result = await session.execute(stmt)
+    if result.scalar_one_or_none():
+        return False, f"Category '{parent_name} > {name}' already exists."
+
+    new_cat = Category(name=name, parent_name=parent_name, type=type)
+    session.add(new_cat)
+    try:
+        await session.commit()
+        return True, f"Category '{parent_name} > {name}' added."
+    except Exception as e:
+        await session.rollback()
+        return False, f"Error adding category: {e}"
+
+async def delete_category(session, category_id, reassign_category_id=None, delete_transactions=False):
+    # Fetch Category
+    stmt = select(Category).where(Category.id == category_id)
+    result = await session.execute(stmt)
+    category = result.scalar_one_or_none()
+    
+    if not category:
+        return False, "Category not found."
+
+    # Check for transactions
+    tx_stmt = select(Transaction).where(Transaction.category_id == category_id)
+    tx_result = await session.execute(tx_stmt)
+    transactions = tx_result.scalars().all()
+    
+    count = len(transactions)
+    
+    if count > 0:
+        if delete_transactions:
+            # Delete transactions
+            await session.execute(delete(Transaction).where(Transaction.category_id == category_id))
+        elif reassign_category_id:
+            # Reassign
+            await session.execute(
+                update(Transaction).where(Transaction.category_id == category_id).values(category_id=reassign_category_id, is_verified=True)
+            )
+        else:
+             return False, f"Category has {count} transactions. Please specify reassign_id or delete_transactions=True."
+
+    await session.delete(category)
+    try:
+        await session.commit()
+        return True, f"Category '{category.parent_name} > {category.name}' deleted."
+    except Exception as e:
+        await session.rollback()
+        return False, f"Error deleting category: {e}"
+
+
+async def process_import(session, bank_name, file_path, account_name, output_path=None, review_callback=None):
     # Check Account
     result = await session.execute(select(Account).where(Account.name == account_name))
     account = result.scalar_one_or_none()
     if not account:
-        return False, f"Account '{account_name}' not found."
+        return False, f"Account '{account_name}' not found.", []
 
     # Parse
     parser = BankParser()
     try:
         transactions = parser.parse(bank_name, file_path)
     except Exception as e:
-        return False, f"Error parsing file: {e}"
+        return False, f"Error parsing file: {e}", []
 
-    # Load Mapping Rules
-    mappings_result = await session.execute(select(MappingRule))
-    rules = mappings_result.scalars().all()
-    rule_map = {r.keyword: r.category_id for r in rules}
+
     
     # Initialize AI
     ai = CategorizerAI()
@@ -62,12 +116,12 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
     new_txs = []
     skipped = 0
     
-    for tx in transactions:
+    for tx_data in transactions:
         # Check duplicate
         stmt = select(Transaction).where(
-            Transaction.date == tx["date"],
-            Transaction.amount == tx["amount"],
-            Transaction.description == tx["description"],
+            Transaction.date == tx_data["date"],
+            Transaction.amount == tx_data["amount"],
+            Transaction.description == tx_data["description"],
             Transaction.account_id == account.id
         )
         existing = await session.execute(stmt)
@@ -75,42 +129,51 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
             skipped += 1
             continue
         
-        cat_id = rule_map.get(tx["description"])
-        confidence = 1.0 if cat_id else 0.0
-        reasoning = "Matched via Mapping Rule" if cat_id else None
-        tx_type = tx["type"] # Default from parser
+        cat_id = None
+        confidence = 0.0
+        reasoning = None
+        tx_type = tx_data["type"] # Default from parser
+        is_verified = False
         
         # AI Suggestion
-        if not cat_id:
-            print(f"Resolving '{tx['description']}' with AI...")
-            cat_id, confidence, reasoning, suggested_type = await ai.suggest_category(tx["description"], session)
-            if suggested_type:
-                tx_type = suggested_type
+        print(f"Resolving '{tx_data['description']}' with AI...")
+        cat_id, confidence, reasoning, suggested_type = await ai.suggest_category(tx_data["description"], session)
+        if suggested_type:
+            tx_type = suggested_type
         
+        # Review Callback
+        if review_callback:
+            # We pass the raw data and AI suggestion. 
+            # Callback should return (final_cat_id, verified_bool)
+            # It might also modify tx_type, but let's keep it simple for now or return a dict.
+            # Let's assume it returns (cat_id, is_verified, tx_type)
+            cat_id, is_verified, tx_type = await review_callback(tx_data, cat_id, confidence, tx_type, reasoning, session)
+
         new_tx = Transaction(
-            date=tx["date"],
-            description=tx["description"],
-            amount=tx["amount"],
+            date=tx_data["date"],
+            description=tx_data["description"],
+            amount=tx_data["amount"],
             type=tx_type,
             account_id=account.id,
             category_id=cat_id,
             confidence_score=confidence,
             # ai_reasoning=reasoning, # DEPRECATED
-            raw_csv_row=tx["raw_csv_row"],
-            is_verified=False # Always false initially, require review
+            raw_csv_row=tx_data["raw_csv_row"],
+            is_verified=is_verified
         )
         session.add(new_tx)
         await session.flush() # Get ID
         
         # Create Memory Entry
-        words = tx["description"].split()
+        words = tx_data["description"].split()
         pattern_key = words[0].upper() if words else "UNKNOWN"
         
         memory = AIMemory(
             transaction_id=new_tx.id,
             pattern_key=pattern_key,
             ai_suggested_category_id=cat_id,
-            ai_reasoning=reasoning
+            ai_reasoning=reasoning,
+            user_selected_category_id=cat_id if is_verified else None # If verified, we record it
         )
         session.add(memory)
         new_txs.append(new_tx)
