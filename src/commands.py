@@ -76,11 +76,12 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
             continue
         
         cat_id = rule_map.get(tx["description"])
+        confidence = 1.0 if cat_id else 0.0
         
         # AI Suggestion
         if not cat_id:
             print(f"Resolving '{tx['description']}' with AI...")
-            cat_id = await ai.suggest_category(tx["description"], session)
+            cat_id, confidence = await ai.suggest_category(tx["description"], session)
         
         new_tx = Transaction(
             date=tx["date"],
@@ -89,6 +90,7 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
             type=tx["type"],
             account_id=account.id,
             category_id=cat_id,
+            confidence_score=confidence,
             raw_csv_row=tx["raw_csv_row"]
         )
         session.add(new_tx)

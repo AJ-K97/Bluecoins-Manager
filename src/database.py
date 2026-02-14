@@ -54,6 +54,7 @@ class Transaction(Base):
     # Metadata
     raw_csv_row = Column(Text) # Store original row for debugging
     is_verified = Column(Boolean, default=False) # True if user confirmed category
+    confidence_score = Column(Float, nullable=True) # AI Confidence (0.0 - 1.0)
 
 class MappingRule(Base):
     """

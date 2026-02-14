@@ -51,10 +51,29 @@ class CategorizerAI:
                     history_lines.append(f"- '{t.description}' -> Category ID {t.category_id}")
                 history_str = "\n".join(history_lines)
 
-        # 3. Construct Prompt
+        # 3. Web Search Context
+        search_context = "No information found."
+        try:
+            from duckduckgo_search import DDGS
+            with DDGS() as ddgs:
+                # Search for the description (usually Payee)
+                # Cleaning description might help (remove dates/numbers if noisy)
+                query = description
+                results = list(ddgs.text(query, max_results=2))
+                if results:
+                    search_context = "\n".join([f"- {r['param1']}: {r['body']}" for r in results])
+        except ImportError:
+            search_context = "Web search module not installed."
+        except Exception as e:
+            search_context = f"Web search failed: {e}"
+
+        # 4. Construct Prompt
         prompt = f"""
 You are a financial assistant.
 Categorize this transaction: '{description}'
+
+Web Search Context (Background info about payee):
+{search_context}
 
 Available Categories:
 {cat_str}
@@ -63,10 +82,8 @@ Similar Past Transactions:
 {history_str}
 
 Task:
-Return ONLY the ID of the best matching category from the list above.
-If fuzzy match with past transaction is strong, use that.
-If no good match, default to a general category ID or return 0.
-Reply with just the number.
+Return ONLY the ID of the best matching category and a confidence score (0.0 to 1.0).
+Format: "ID, Confidence" (e.g. "123, 0.95")
 """
         
         try:
@@ -75,12 +92,28 @@ Reply with just the number.
             ])
             content = response['message']['content'].strip()
             
-            # Extract first number
-            match = re.search(r'\d+', content)
+            # Parsing "ID, Confidence"
+            import re
+            valid_ids = {c.id for c in categories}
+            
+            # Try to match: digits, then maybe comma, then float
+            match = re.search(r'(\d+)\s*,\s*([0-1]?\.?\d+)', content)
+            
             if match:
-                return int(match.group())
-            return None
+                suggested_id = int(match.group(1))
+                confidence = float(match.group(2))
+                if suggested_id in valid_ids:
+                    return suggested_id, confidence
+            
+            # Fallback for just ID
+            match_id = re.search(r'(\d+)', content)
+            if match_id:
+                 suggested_id = int(match_id.group(1))
+                 if suggested_id in valid_ids:
+                     return suggested_id, 0.5 # Default confidence if not provided
+                     
+            return None, 0.0
             
         except Exception as e:
             print(f"AI Suggestion Error: {e}")
-            return None
+            return None, 0.0

@@ -8,3 +8,4 @@ greenlet # required for async sqlalchemy
 pandas
 alembic # optional but good for migrations
 InquirerPy
+duckduckgo-search
