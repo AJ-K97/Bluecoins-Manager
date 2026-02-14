@@ -76,6 +76,15 @@ class AIMemory(Base):
     
     transaction = relationship("Transaction", back_populates="memory_entries")
 
+class AIGlobalMemory(Base):
+    __tablename__ = "ai_global_memory"
+
+    id = Column(Integer, primary_key=True, index=True)
+    instruction = Column(Text, nullable=False)
+    source = Column(String, default="user_review")
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 # Add back_populates to Transaction
 Transaction.memory_entries = relationship("AIMemory", back_populates="transaction", cascade="all, delete-orphan")
 

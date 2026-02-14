@@ -1,7 +1,7 @@
 import ollama
 import re
 from sqlalchemy import select
-from src.database import Category, Transaction, AIMemory
+from src.database import Category, Transaction, AIMemory, AIGlobalMemory
 
 class CategorizerAI:
     def __init__(self, model="llama3.1:8b"):
@@ -12,7 +12,59 @@ class CategorizerAI:
         self.model = model
         self.client = ollama.AsyncClient()
 
-    async def suggest_category(self, description, session):
+    async def _chat_once(self, prompt):
+        response = await self.client.chat(model=self.model, messages=[
+            {'role': 'user', 'content': prompt}
+        ])
+        return response['message']['content'].strip()
+
+    def _parse_json_payload(self, content):
+        try:
+            import json
+            cleaned = content.replace("```json", "").replace("```", "").strip()
+            match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+        except Exception:
+            pass
+
+        data = {}
+        id_match = re.search(r'["\']id["\']:\s*(\d+|null|None)', content, re.IGNORECASE)
+        conf_match = re.search(r'["\']confidence["\']:\s*([0-1]?\.?\d+)', content)
+        type_match = re.search(r'["\']type["\']:\s*["\'](expense|income|transfer)["\']', content, re.IGNORECASE)
+        reason_match = re.search(r'["\']reasoning["\']:\s*["\'](.*?)["\']', content, re.DOTALL)
+
+        if id_match:
+            raw_id = id_match.group(1)
+            if raw_id.lower() not in ['null', 'none']:
+                data["id"] = int(raw_id)
+            else:
+                data["id"] = None
+        if conf_match:
+            data["confidence"] = float(conf_match.group(1))
+        if type_match:
+            data["type"] = type_match.group(1).lower()
+        if reason_match:
+            data["reasoning"] = reason_match.group(1).strip()
+        return data if data else None
+
+    async def _chat_json_with_repair(self, prompt):
+        content = await self._chat_once(prompt)
+        data = self._parse_json_payload(content)
+        if data is not None:
+            return data, content
+
+        repair_prompt = f"""
+The following response is malformed. Convert it to strict JSON only.
+Required keys: id (integer or null), type ("expense"|"income"|"transfer"), confidence (0.0-1.0), reasoning (string).
+Text:
+{content}
+"""
+        repaired_content = await self._chat_once(repair_prompt)
+        repaired_data = self._parse_json_payload(repaired_content)
+        return repaired_data, repaired_content
+
+    async def suggest_category(self, description, session, extra_instruction=None):
         """
         Suggests category and type for the transaction.
         Returns (category_id, confidence, reasoning, type)
@@ -22,19 +74,20 @@ class CategorizerAI:
         categories = result.scalars().all()
         if not categories:
             return None, 0.0, "No categories found.", "expense"
-            
+
+        cat_by_id = {c.id: c for c in categories}
         cat_lines = []
         for c in sorted(categories, key=lambda x: (x.parent_name or "", x.name)):
             parent = c.parent_name if c.parent_name else "No Parent"
             cat_lines.append(f"ID {c.id}: {parent} > {c.name} ({c.type})")
-        
+
         cat_str = "\n".join(cat_lines)
-        
+
         # 2. Fetch Memory (Reflections & Past Decisions)
         words = description.split()
         search_term = words[0] if words else ""
         history_str = "None"
-        
+
         if len(search_term) > 2:
             # Join Transaction with AIMemory to get reflections
             stmt = select(Transaction, AIMemory).outerjoin(AIMemory, Transaction.id == AIMemory.transaction_id).where(
@@ -61,40 +114,42 @@ class CategorizerAI:
                 
                 history_str = "\n".join(history_lines)
 
+        # 2.5 Fetch Global User Coaching/Rules
+        rule_stmt = select(AIGlobalMemory).where(AIGlobalMemory.is_active.is_(True)).order_by(AIGlobalMemory.created_at.desc()).limit(50)
+        rule_res = await session.execute(rule_stmt)
+        global_rules = rule_res.scalars().all()
+        global_rules_list = [r.instruction for r in global_rules]
+        global_rules_str = "None"
+        if global_rules:
+            global_rules_str = "\n".join([f"- {rule}" for rule in global_rules_list])
+        if extra_instruction and extra_instruction not in global_rules_list:
+            if global_rules_str == "None":
+                global_rules_str = f"- {extra_instruction}"
+            else:
+                global_rules_str += f"\n- {extra_instruction}"
+
         # 3. Web Search Context
-        # Clean description for better search/AI context
-        # Remove dates, times, long numeric codes using approx regex
-        # 3. Web Search Context
-        # Clean description for better search/AI context
-        # Remove dates (DDMMMYY, DD/MM/YYYY etc approx)
         clean_desc = re.sub(r'\d{2}[A-Z]{3}\d{2}', '', description) # 28JAN26
-        # Remove times
         clean_desc = re.sub(r'\d{2}:\d{2}:\d{2}', '', clean_desc) # 23:30:46
-        
-        # Aggressive Cleaning: Remove card info, long codes, banking noise
-        # 4-digit numbers (often card ending)
         clean_desc = re.sub(r'\b\d{4}\b', '', clean_desc)
-        # Long alphanumeric codes (6+ chars)
         clean_desc = re.sub(r'\b[A-Z0-9]{6,}\b', '', clean_desc)
-        # Specific banking keywords and variations
         clean_desc = re.sub(r'\b(VISA|AUD|ATMA\d*|EFTPOS|DEBIT|CREDIT)\b', '', clean_desc, flags=re.IGNORECASE)
-        
         clean_desc = re.sub(r'\s+', ' ', clean_desc).strip()
-        
+
         search_context = "No information found."
         try:
             from duckduckgo_search import DDGS
             with DDGS() as ddgs:
                 results = list(ddgs.text(clean_desc, max_results=2))
                 if results:
-                    search_context = "\n".join([f"- {r['param1']}: {r['body']}" for r in results])
+                    search_context = "\n".join([f"- {r.get('title', 'Unknown')}: {r.get('body', '')}" for r in results])
         except Exception as e:
             search_context = f"Web search failed: {e}"
 
         # 4. Construct Prompt
         prompt = f"""
 You are a financial assistant.
-Categorize this transaction: '{description}'
+Categorize this transaction: "{description}"
 cleaned_description: '{clean_desc}'
 
 Web Search Context:
@@ -106,94 +161,60 @@ Available Categories (List):
 Memory Bank (Similar Past Transactions & Reflections):
 {history_str}
 
-General Rules & ID hints:
-- "Salary" -> Income > Salary (Type: income)
-- "Transfer" -> Transfer > Transfer (Type: transfer)
+Global User Rulebook (persistent coaching):
+{global_rules_str}
 
-Reflections instructions:
+Rules:
 - If you see a "LEARNING/REFLECTION", you MUST apply that logic.
-- Do NOT hallucinate "Water" or "Utilities" for ordinary shops.
-- Use "Web Search Context" to identify the merchant's business type.
-- Ignore "ATM", "VISA", "EFTPOS" keywords. Focus on the merchant.
-- Ignore legal prefixes like "THE TRUSTEE FOR", "PTY LTD", "TRUST" when identifying the Payee. "THE TRUSTEE FOR BCF" -> Payee is "BCF".
+- The category decision must be based on merchant/payee intent, NOT location.
+- Location can be ignored if present; do not use it to decide category.
+- Ignore banking noise like ATM/VISA/EFTPOS/card suffixes and legal prefixes.
+- You MUST choose id from the provided category list only.
+- If transaction is transfer/internal transfer/osko between accounts, set type to "transfer" and id to null.
+- Do not invent categories.
 
 Task:
-1. Identify the **Payee** (Merchant/Person) and **Location** (if available) from the description.
-2. Determine if it is a Transfer (e.g. "Transfer", "Internal Transfer", "Osko"). 
-   - **CRITICAL**: A transaction is NOT a transfer if it is a purchase from a business.
-   - Presence of a **Location** (e.g. Canning Vale) does NOT make it a Transfer.
-   - If the Payee is a known entity/brand, it is likely a PURCHASE.
-3. Determine the category based on the Payee/Type.
-4. Return a JSON object with:
-- "payee": The extracted merchant/payee name.
-- "location": The extracted location (or null).
-- "reasoning": Concise explanation. Mention why you ruled out others if unsure.
-- "id": The EXACT Category ID from the list above. 
-    - Verify the ID exists in the specific "Available Categories" list provided.
-    - If it is a Transfer, use the Transfer category ID (usually 31 or similar).
-    - If you think it is "App/Subscription", look for ID under "Entertainment".
-    - If you think it is "Eating Out" or "Food", look for "Food" under "Entertainment".
-- "confidence": score (0.0 - 1.0)
+Return JSON object only with:
+- "id": exact category ID from list, or null for transfer.
 - "type": "expense", "income", or "transfer"
+- "confidence": score (0.0 - 1.0)
+- "reasoning": concise reasoning
 
 JSON ONLY.
 """
-        
+
         try:
-            response = await self.client.chat(model=self.model, messages=[
-                {'role': 'user', 'content': prompt}
-            ])
-            content = response['message']['content'].strip()
-            
-            # JSON Parsing with fallback
-            data = {}
-            try:
-                import json
-                content = content.replace("```json", "").replace("```", "").strip()
-                match = re.search(r'\{.*\}', content, re.DOTALL)
-                if match:
-                    data = json.loads(match.group())
-                else:
-                    raise ValueError("No JSON block")
-            except Exception:
-                # Regex Fallback
-                id_match = re.search(r'["\']id["\']:\s*(\d+|null|None)', content, re.IGNORECASE)
-                conf_match = re.search(r'["\']confidence["\']:\s*([0-1]?\.?\d+)', content)
-                type_match = re.search(r'["\']type["\']:\s*["\'](expense|income|transfer)["\']', content, re.IGNORECASE)
-                reason_match = re.search(r'["\']reasoning["\']:\s*["\'](.*?)["\']', content)
-                
-                if id_match and id_match.group(1).lower() not in ['null', 'none']:
-                    data["id"] = int(id_match.group(1))
-                if conf_match:
-                    data["confidence"] = float(conf_match.group(1))
-                if type_match:
-                    data["type"] = type_match.group(1).lower()
-                if reason_match:
-                    data["reasoning"] = reason_match.group(1)
+            data, _raw_content = await self._chat_json_with_repair(prompt)
+            if data is None:
+                return None, 0.0, "Unable to parse AI response.", "expense"
 
             suggested_id = data.get("id")
             if suggested_id is not None:
                 suggested_id = int(suggested_id)
-                
+
             confidence = float(data.get("confidence", 0.0))
-            
+            confidence = max(0.0, min(1.0, confidence))
+
             reasoning = data.get("reasoning", "No reasoning.")
-            if isinstance(reasoning, (dict, list)):
-                import json # Ensure json is available
-                reasoning = json.dumps(reasoning)
-            else:
-                reasoning = str(reasoning)
-                
-            tx_type = data.get("type", "expense")
-            
-            # Validation
-            if suggested_id:
-                valid_ids = {c.id for c in categories}
-                if suggested_id not in valid_ids:
-                    return None, 0.0, f"Invalid ID {suggested_id}", tx_type
-            
+            reasoning = str(reasoning)
+
+            tx_type = str(data.get("type", "expense")).lower()
+            if tx_type not in {"expense", "income", "transfer"}:
+                tx_type = "expense"
+
+            if tx_type == "transfer":
+                return None, confidence, reasoning, "transfer"
+
+            if suggested_id is not None:
+                if suggested_id not in cat_by_id:
+                    return None, 0.0, f"{reasoning} [Invalid ID {suggested_id}]", tx_type
+
+                cat = cat_by_id[suggested_id]
+                if cat.type != tx_type:
+                    return None, 0.0, f"{reasoning} [Type/category mismatch: {tx_type} vs {cat.type}]", tx_type
+
             return suggested_id, confidence, reasoning, tx_type
-            
+
         except Exception as e:
             print(f"AI Error: {e}")
             return None, 0.0, f"Error: {e}", "expense"

@@ -1,4 +1,5 @@
 import os
+import textwrap
 
 from datetime import datetime
 from sqlalchemy import select
@@ -9,8 +10,10 @@ from src.commands import (
     list_accounts, add_account, delete_account, process_import, get_all_accounts,
     get_transactions, update_transaction_category, delete_transaction, export_to_bluecoins_csv,
     get_all_categories, mark_transaction_verified, update_transaction_amount,
-    add_category, delete_category
+    add_category, delete_category, get_category_display_from_values, add_global_memory_instruction,
+    get_global_memory_entries, set_global_memory_active, delete_global_memory_instruction
 )
+from src.ai import CategorizerAI
 
 from src.tui import TransactionReviewApp
 
@@ -389,86 +392,199 @@ async def manage_categories_menu(session):
                 print(f"\n{msg}\n")
 
 
+async def manage_global_rulebook_menu(session):
+    while True:
+        action = await inquirer.select(
+            message="Manage AI Rulebook:",
+            choices=[
+                "List Rules",
+                "Add Rule",
+                "Disable Rule",
+                "Enable Rule",
+                "Delete Rule",
+                Choice(value=None, name="Back to Main Menu")
+            ]
+        ).execute_async()
+
+        if not action:
+            break
+
+        if action == "List Rules":
+            rules = await get_global_memory_entries(session, include_inactive=True, limit=500)
+            if not rules:
+                print("No global rules found.")
+                continue
+            print("\nGlobal AI Rulebook:")
+            for r in rules:
+                status = "ACTIVE" if r.is_active else "INACTIVE"
+                created = r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else "-"
+                print(f"[{status}] #{r.id} ({created}) [{r.source}] {r.instruction}")
+            print("")
+
+        elif action == "Add Rule":
+            text = await inquirer.text(message="Rule text to persist:").execute_async()
+            ok, msg = await add_global_memory_instruction(session, text, source="manual_rulebook")
+            await session.commit()
+            print(f"\n{msg}\n")
+
+        elif action in {"Disable Rule", "Enable Rule"}:
+            target_active = action == "Enable Rule"
+            rules = await get_global_memory_entries(session, include_inactive=True, limit=500)
+            if not rules:
+                print("No rules available.")
+                continue
+            filtered = [r for r in rules if r.is_active != target_active]
+            if not filtered:
+                state_name = "inactive" if target_active else "active"
+                print(f"No {state_name} rules found to modify.")
+                continue
+
+            choices = [
+                Choice(
+                    value=r.id,
+                    name=f"#{r.id} [{r.source}] {r.instruction[:90]}"
+                ) for r in filtered
+            ]
+            choices.append(Choice(value=None, name="Cancel"))
+            selected_id = await inquirer.fuzzy(
+                message=f"Select rule to {'enable' if target_active else 'disable'}:",
+                choices=choices
+            ).execute_async()
+            if selected_id:
+                ok, msg = await set_global_memory_active(session, selected_id, target_active)
+                print(f"\n{msg}\n")
+
+        elif action == "Delete Rule":
+            rules = await get_global_memory_entries(session, include_inactive=True, limit=500)
+            if not rules:
+                print("No rules available.")
+                continue
+            choices = [
+                Choice(
+                    value=r.id,
+                    name=f"#{r.id} [{'ACTIVE' if r.is_active else 'INACTIVE'}] {r.instruction[:90]}"
+                ) for r in rules
+            ]
+            choices.append(Choice(value=None, name="Cancel"))
+            selected_id = await inquirer.fuzzy(
+                message="Select rule to delete:",
+                choices=choices
+            ).execute_async()
+            if selected_id:
+                confirm = await inquirer.confirm(message=f"Delete rule #{selected_id}?").execute_async()
+                if confirm:
+                    ok, msg = await delete_global_memory_instruction(session, selected_id)
+                    print(f"\n{msg}\n")
+
+
 
 async def import_review_callback(tx_data, current_cat_id, confidence, current_type, reasoning, session):
     """
     Called for each transaction during import if review is enabled.
     """
-    # Resolve category name
-    cat_name = "Uncategorized"
-    cat_str = ""
-    if current_cat_id:
-        from src.database import Category
-        res = await session.execute(select(Category).where(Category.id == current_cat_id))
-        c = res.scalar_one_or_none()
-        if c: 
-            cat_name = c.name
-            cat_str = f"{c.parent_name} > {c.name}"
-            
-    # Determine Type Display (especially for transfers)
-    type_disp = current_type.upper()
-    if current_type == "transfer":
-        if tx_data['amount'] < 0:
-            type_disp = "TRANSFER OUT"
-        else:
-            type_disp = "TRANSFER IN"
-            
-    print(f"\n---------------------------------------------------")
-    print(f"Date: {tx_data['date']} | Amount: {tx_data['amount']}")
-    print(f"Desc: {tx_data['description']}")
-    print(f"AI Suggestion: {cat_name} ({confidence:.2f}) [{type_disp}]")
-    if cat_str: print(f"Path: {cat_str}")
-    print(f"Reasoning: {reasoning}")
-    print(f"---------------------------------------------------")
-    
-    action = await inquirer.select(
-        message="Action:",
-        choices=[
-            Choice(value="accept", name="Accept & Verify"),
-            Choice(value="change", name="Change Category"),
-            Choice(value="skip", name="Skip Review (Accept as AI prediction)"),
-        ],
-        default="accept"
-    ).execute_async()
-    
-    if action == "accept":
-        return current_cat_id, True, current_type
-        
-    elif action == "skip":
-        return current_cat_id, False, current_type
-        
-    elif action == "change":
-        # Hierarchical Category Selection (similar to existing)
-        cats = await get_all_categories(session)
-        
-        # 1. Select Parent
-        parent_names = sorted(list(set(c.parent_name for c in cats if c.parent_name)))
-        parent_choices = [Choice(value=p, name=p) for p in parent_names]
-        parent_choices.append(Choice(value=None, name="Cancel (Keep AI)"))
-        
-        selected_parent = await inquirer.fuzzy(
-            message=f"Select Parent Category:",
-            choices=parent_choices,
-        ).execute_async()
-        
-        if selected_parent:
-            # 2. Select Child
-            child_cats = [c for c in cats if c.parent_name == selected_parent]
-            child_choices = [Choice(value=c.id, name=c.name) for c in child_cats]
-            child_choices.append(Choice(value=None, name="Back"))
-            
-            new_cat_id = await inquirer.fuzzy(
-                message=f"Select Sub-Category:",
-                choices=child_choices,
-            ).execute_async()
-            
-            if new_cat_id:
-                return new_cat_id, True, current_type
-        
-        # If cancelled or failed
-        return current_cat_id, False, current_type
+    def render_box(lines, width=88):
+        border = "+" + "-" * (width - 2) + "+"
+        print(border)
+        for line in lines:
+            wrapped = textwrap.wrap(str(line), width=width - 4) or [""]
+            for part in wrapped:
+                print(f"| {part:<{width - 4}} |")
+        print(border)
 
-    return current_cat_id, False, current_type
+    ai = CategorizerAI()
+    effective_cat_id = current_cat_id
+    effective_type = current_type
+    effective_confidence = confidence
+    effective_reasoning = reasoning
+
+    while True:
+        if effective_type == "transfer":
+            effective_cat_id = None
+
+        parent_name, cat_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
+
+        type_disp = effective_type.upper()
+        if effective_type == "transfer":
+            type_disp = "TRANSFER OUT" if tx_data["amount"] < 0 else "TRANSFER IN"
+
+        render_box([
+            f"Date: {tx_data['date']}    Amount: {tx_data['amount']}",
+            f"Type: {type_disp}",
+            f"Description: {tx_data['description']}",
+            f"AI Suggestion: {parent_name} > {cat_name}",
+            f"Confidence: {effective_confidence:.2f}",
+            f"Reasoning: {effective_reasoning}"
+        ])
+
+        action = await inquirer.select(
+            message="Action:",
+            choices=[
+                Choice(value="accept", name="Accept & Verify"),
+                Choice(value="change", name="Change Category"),
+                Choice(value="refresh", name="Refresh LLM Reasoning"),
+                Choice(value="coach", name="Coach Model"),
+                Choice(value="skip", name="Skip Review (Accept as AI prediction)"),
+            ],
+            default="accept"
+        ).execute_async()
+
+        if action == "accept":
+            return effective_cat_id, True, effective_type
+
+        if action == "skip":
+            return effective_cat_id, False, effective_type
+
+        if action == "change":
+            cats = await get_all_categories(session)
+
+            parent_names = sorted(list(set(c.parent_name for c in cats if c.parent_name)))
+            parent_choices = [Choice(value=p, name=p) for p in parent_names]
+            parent_choices.append(Choice(value=None, name="Cancel (Keep AI)"))
+
+            selected_parent = await inquirer.fuzzy(
+                message="Select Parent Category:",
+                choices=parent_choices,
+            ).execute_async()
+
+            if selected_parent:
+                child_cats = [c for c in cats if c.parent_name == selected_parent]
+                child_choices = [Choice(value=c, name=c.name) for c in child_cats]
+                child_choices.append(Choice(value=None, name="Back"))
+
+                selected_cat = await inquirer.fuzzy(
+                    message="Select Sub-Category:",
+                    choices=child_choices,
+                ).execute_async()
+
+                if selected_cat:
+                    effective_cat_id = selected_cat.id
+                    effective_type = selected_cat.type
+                    effective_reasoning = "User manually selected category during review."
+                    effective_confidence = 1.0
+            continue
+
+        if action == "refresh":
+            new_cat_id, new_conf, new_reason, new_type = await ai.suggest_category(tx_data["description"], session)
+            effective_cat_id = new_cat_id
+            effective_confidence = new_conf
+            effective_reasoning = new_reason
+            effective_type = new_type or effective_type
+            continue
+
+        if action == "coach":
+            coaching_text = await inquirer.text(
+                message="Add coaching for model memory (global rulebook):"
+            ).execute_async()
+            if coaching_text and coaching_text.strip():
+                await add_global_memory_instruction(session, coaching_text.strip(), source="review_coaching")
+                new_cat_id, new_conf, new_reason, new_type = await ai.suggest_category(
+                    tx_data["description"], session, extra_instruction=coaching_text.strip()
+                )
+                effective_cat_id = new_cat_id
+                effective_confidence = new_conf
+                effective_reasoning = new_reason
+                effective_type = new_type or effective_type
+            continue
 
 async def import_wizard(session):
     # 1. Select Bank
@@ -580,6 +696,7 @@ async def interactive_main():
                     "Manage Transactions",
                     "Manage Categories",
                     "Manage Accounts",
+                    "Manage AI Rulebook",
                     "Chat with your Data",
                     Choice(value=None, name="Exit")
                 ],
@@ -597,6 +714,8 @@ async def interactive_main():
                 await manage_transactions_menu(session)
             elif action == "Manage Categories":
                 await manage_categories_menu(session)
+            elif action == "Manage AI Rulebook":
+                await manage_global_rulebook_menu(session)
             elif action == "Chat with your Data":
                 await chat_wizard(session)
 

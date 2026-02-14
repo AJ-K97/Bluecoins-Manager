@@ -7,6 +7,7 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.formatted_text import to_formatted_text
 from prompt_toolkit.styles import Style
+from src.commands import get_transaction_category_display
 
 class TransactionReviewApp:
     def __init__(self, transactions, session, update_callback=None):
@@ -51,11 +52,8 @@ class TransactionReviewApp:
             status_text = "✅" if tx.is_verified else "🤖" # User verified vs AI/Unverified
             
             cat_str = "Uncategorized"
-            if tx.category:
-                if tx.category.parent_name:
-                    cat_str = f"{tx.category.parent_name} > {tx.category.name}"
-                else:
-                    cat_str = tx.category.name
+            parent_name, cat_name = get_transaction_category_display(tx)
+            cat_str = f"{parent_name} > {cat_name}"
             
             conf_str = ""
             if tx.confidence_score is not None and not tx.is_verified:

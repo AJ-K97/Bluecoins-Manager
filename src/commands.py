@@ -1,7 +1,8 @@
+import csv
 from sqlalchemy import select, update, delete
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
-from src.database import Account, Category, Transaction, AsyncSessionLocal, AIMemory
+from src.database import Account, Category, Transaction, AsyncSessionLocal, AIMemory, AIGlobalMemory
 from src.parser import BankParser
 from src.ai import CategorizerAI
 
@@ -36,6 +37,63 @@ async def get_all_accounts(session):
 async def get_all_categories(session):
     result = await session.execute(select(Category).order_by(Category.parent_name, Category.name))
     return result.scalars().all()
+
+def get_transaction_category_display(tx):
+    if tx.type == "transfer" and tx.category_id is None:
+        return "(Transfer)", "(Transfer)"
+    if tx.category:
+        parent_name = tx.category.parent_name or "Uncategorized"
+        return parent_name, tx.category.name
+    return "Uncategorized", "Uncategorized"
+
+async def get_category_display_from_values(session, tx_type, category_id):
+    if tx_type == "transfer" and category_id is None:
+        return "(Transfer)", "(Transfer)"
+    if not category_id:
+        return "Uncategorized", "Uncategorized"
+
+    res = await session.execute(select(Category).where(Category.id == category_id))
+    cat = res.scalar_one_or_none()
+    if not cat:
+        return "Uncategorized", "Uncategorized"
+    return cat.parent_name or "Uncategorized", cat.name
+
+async def add_global_memory_instruction(session, instruction, source="user_review"):
+    text = (instruction or "").strip()
+    if not text:
+        return False, "Instruction is empty."
+
+    session.add(AIGlobalMemory(instruction=text, source=source, is_active=True))
+    await session.flush()
+    return True, "Saved global instruction."
+
+async def get_global_memory_entries(session, include_inactive=True, limit=200):
+    stmt = select(AIGlobalMemory).order_by(AIGlobalMemory.created_at.desc())
+    if not include_inactive:
+        stmt = stmt.where(AIGlobalMemory.is_active.is_(True))
+    if limit:
+        stmt = stmt.limit(limit)
+    result = await session.execute(stmt)
+    return result.scalars().all()
+
+async def set_global_memory_active(session, entry_id, is_active):
+    res = await session.execute(select(AIGlobalMemory).where(AIGlobalMemory.id == entry_id))
+    row = res.scalar_one_or_none()
+    if not row:
+        return False, "Rule not found."
+    row.is_active = bool(is_active)
+    session.add(row)
+    await session.commit()
+    return True, "Rule updated."
+
+async def delete_global_memory_instruction(session, entry_id):
+    res = await session.execute(select(AIGlobalMemory).where(AIGlobalMemory.id == entry_id))
+    row = res.scalar_one_or_none()
+    if not row:
+        return False, "Rule not found."
+    await session.delete(row)
+    await session.commit()
+    return True, "Rule deleted."
 
 async def add_category(session, name, parent_name, type):
     # Check if exists
@@ -140,6 +198,8 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
         cat_id, confidence, reasoning, suggested_type = await ai.suggest_category(tx_data["description"], session)
         if suggested_type:
             tx_type = suggested_type
+        if tx_type == "transfer":
+            cat_id = None
         
         # Review Callback
         if review_callback:
@@ -148,6 +208,8 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
             # It might also modify tx_type, but let's keep it simple for now or return a dict.
             # Let's assume it returns (cat_id, is_verified, tx_type)
             cat_id, is_verified, tx_type = await review_callback(tx_data, cat_id, confidence, tx_type, reasoning, session)
+            if tx_type == "transfer":
+                cat_id = None
 
         new_tx = Transaction(
             date=tx_data["date"],
@@ -171,7 +233,7 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
         memory = AIMemory(
             transaction_id=new_tx.id,
             pattern_key=pattern_key,
-            ai_suggested_category_id=cat_id,
+            ai_suggested_category_id=cat_id if tx_type != "transfer" else None,
             ai_reasoning=reasoning,
             user_selected_category_id=cat_id if is_verified else None # If verified, we record it
         )
@@ -324,8 +386,7 @@ def export_to_bluecoins_csv(transactions, output_path):
             writer.writerow(["Type", "Date", "Item or Payee", "Amount", "Parent Category", "Category", "Account Type", "Account", "Notes", "Label", "Status", "Split"])
             
             for tx in transactions:
-                cat_name = tx.category.name if tx.category else ""
-                parent_name = tx.category.parent_name if tx.category else ""
+                parent_name, cat_name = get_transaction_category_display(tx)
                 
                 # Account name might not be loaded if we didn't join Account? 
                 # Transaction.account_id is there, but we need Account name.
@@ -349,7 +410,7 @@ def export_to_bluecoins_csv(transactions, output_path):
                 acc_name = tx.account.name if tx.account else "Unknown"
 
                 writer.writerow([
-                    "Expense" if tx.type == "expense" else "Income",
+                    "Transfer" if tx.type == "transfer" else ("Expense" if tx.type == "expense" else "Income"),
                     tx.date.strftime("%m/%d/%Y"),
                     tx.description,
                     str(tx.amount),

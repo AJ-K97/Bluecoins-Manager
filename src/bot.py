@@ -87,13 +87,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     continue
                 
                 # Categorize
-                cat_id = await ai.suggest_category(tx["description"], session)
+                cat_id, confidence, reasoning, suggested_type = await ai.suggest_category(tx["description"], session)
+                tx_type = suggested_type or tx["type"]
+                if tx_type == "transfer":
+                    cat_id = None
                 
                 new_tx = Transaction(
                     date=tx["date"],
                     description=tx["description"],
                     amount=tx["amount"],
-                    type=tx["type"],
+                    type=tx_type,
                     account_id=account.id,
                     category_id=cat_id,
                     raw_csv_row=tx["raw_csv_row"]
