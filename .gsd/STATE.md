@@ -1,12 +1,13 @@
 # Project State
 
 ## Current Position
-- **Phase**: Phase 5 (Centralized Persistence)
-- **Status**: Verified Complete
-- **Goal**: Harden existing Postgres instance.
+- **Phase**: Phase 6 (Advanced Ingestion)
+- **Status**: Planned
+- **Goal**: Integrate PDF parsing capabilities using `pypdf`.
 
-## Last Session Summary
-Phase 5 complete. Alembic migrations and backup system installed.
+## Plans
+- **6.1**: Core PDF Ingestion (pypdf + regex)
+- **6.2**: Noise Cleaning & Auto-detection
 
 ## Next Steps
-1. Proceed to Phase 6 (Advanced Ingestion - PDF)
+1. Execute Phase 6 Plans
