@@ -112,4 +112,10 @@ python3 main.py db list-tables
 
 # Reset only specific tables (dependency-checked)
 python3 main.py db reset --tables ai_memory llm_finetune_examples
+
+# Queue operations (conservative auto-categorization policy)
+python3 main.py queue list
+python3 main.py queue stats
+python3 main.py queue recalc --since 2026-01-01
+python3 main.py queue review
 ```

@@ -13,7 +13,8 @@ from src.commands import (
     add_category, delete_category, get_category_display_from_values, add_global_memory_instruction,
     get_global_memory_entries, set_global_memory_active, delete_global_memory_instruction,
     reset_database, seed_reference_data, format_category_obj_label, format_category_label,
-    get_resettable_table_names, get_table_row_counts, reset_selected_tables
+    get_resettable_table_names, get_table_row_counts, reset_selected_tables,
+    get_queue_transactions, get_queue_stats,
 )
 from src.ai import CategorizerAI
 
@@ -193,6 +194,7 @@ async def manage_transactions_menu(session):
             message="Manage Transactions:",
             choices=[
                 "View / Edit Recent Transactions",
+                "Review Queue",
                 "Export to CSV",
                 Choice(value=None, name="Back to Main Menu")
             ]
@@ -227,6 +229,8 @@ async def manage_transactions_menu(session):
             
             success, msg = export_to_bluecoins_csv(txs, output_path)
             print(f"\n{msg}\n")
+        elif action == "Review Queue":
+            await review_queue_menu(session, account_id=account_id)
             
         elif action == "View / Edit Recent Transactions":
             # Fetch last 50
@@ -281,6 +285,64 @@ async def manage_transactions_menu(session):
                 if confirm:
                     await delete_transaction(session, selected_tx.id)
                     print("Deleted.")
+
+
+async def review_queue_menu(session, account_id=None):
+    while True:
+        rows = await get_queue_transactions(session, account_id=account_id, limit=200)
+        if not rows:
+            print("No transactions pending review in queue.")
+            return
+
+        choices = []
+        for tx in rows:
+            cat_name = format_category_obj_label(tx.category) if tx.category else "Uncategorized > Uncategorized [unknown]"
+            label = (
+                f"[{tx.decision_state}/{tx.review_bucket}] p{tx.review_priority or 0} "
+                f"{tx.date.strftime('%Y-%m-%d')} | {tx.description[:24]:<24} | {tx.amount:>8.2f} | {cat_name}"
+            )
+            choices.append(Choice(value=tx, name=label))
+        choices.append(Choice(value=None, name="Back"))
+
+        selected_tx = await inquirer.select(
+            message="Review Queue: Select Transaction",
+            choices=choices,
+        ).execute_async()
+        if not selected_tx:
+            return
+
+        tx_action = await inquirer.select(
+            message=f"Queue action for '{selected_tx.description}':",
+            choices=[
+                "Accept & Verify",
+                "Change Category",
+                "Delete Transaction",
+                Choice(value=None, name="Cancel"),
+            ],
+        ).execute_async()
+
+        if tx_action == "Accept & Verify":
+            await mark_transaction_verified(session, selected_tx.id)
+            print("Verified!")
+            continue
+
+        if tx_action == "Change Category":
+            selected_cat = await choose_category_tree(
+                session,
+                prompt_prefix="Queue: Select New Category",
+                default_type=selected_tx.type if selected_tx.type in {"income", "expense"} else None,
+            )
+            if selected_cat:
+                await update_transaction_category(session, selected_tx.id, selected_cat.id)
+                print("Updated and verified.")
+            continue
+
+        if tx_action == "Delete Transaction":
+            confirm = await inquirer.confirm(message="Are you sure?").execute_async()
+            if confirm:
+                await delete_transaction(session, selected_tx.id)
+                print("Deleted.")
+            continue
 
 
 async def manage_categories_menu(session):

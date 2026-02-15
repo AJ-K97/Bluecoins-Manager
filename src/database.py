@@ -55,6 +55,10 @@ class Transaction(Base):
     raw_csv_row = Column(Text) # Store original row for debugging
     is_verified = Column(Boolean, default=False) # True if user confirmed category
     confidence_score = Column(Float, nullable=True) # AI Confidence (0.0 - 1.0)
+    decision_state = Column(String, index=True, nullable=True)  # auto_approved|needs_review|force_review
+    decision_reason = Column(Text, nullable=True)
+    review_priority = Column(Integer, index=True, nullable=True)
+    review_bucket = Column(String, index=True, nullable=True)
     # ai_reasoning = Column(Text, nullable=True) # DEPRECATED: Moved to AIMemory table
 
 
@@ -71,6 +75,9 @@ class AIMemory(Base):
     
     ai_reasoning = Column(Text, nullable=True) # Initial reasoning
     reflection = Column(Text, nullable=True) # Post-correction analysis
+    policy_version = Column(String, nullable=True)
+    threshold_used = Column(Float, nullable=True)
+    conflict_flags_json = Column(Text, nullable=True)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     

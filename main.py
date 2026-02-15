@@ -2,9 +2,10 @@ import argparse
 import asyncio
 import csv
 import os
+from datetime import datetime
 from sqlalchemy.exc import IntegrityError
 from src.database import init_db, AsyncSessionLocal
-from src.interactive import interactive_main
+from src.interactive import interactive_main, review_queue_menu
 from src.commands import (
     list_accounts,
     add_account,
@@ -13,6 +14,10 @@ from src.commands import (
     rebuild_category_understanding,
     get_resettable_table_names,
     reset_selected_tables,
+    get_queue_transactions,
+    get_queue_stats,
+    recalc_queue_decisions,
+    format_category_obj_label,
 )
 from src.local_llm import LocalLLMPipeline
 
@@ -104,6 +109,44 @@ async def db_command(args):
             print(msg)
 
 
+async def queue_command(args):
+    async with AsyncSessionLocal() as session:
+        if args.queue_action == "list":
+            states = args.state if args.state else None
+            rows = await get_queue_transactions(
+                session,
+                states=states,
+                bucket=args.bucket,
+                account_id=args.account_id,
+                limit=args.limit,
+            )
+            if not rows:
+                print("Queue is empty for selected filters.")
+                return
+            for tx in rows:
+                cat = format_category_obj_label(tx.category) if tx.category else "Uncategorized > Uncategorized [unknown]"
+                print(
+                    f"#{tx.id} [{tx.decision_state}] [{tx.review_bucket}] "
+                    f"prio={tx.review_priority} conf={tx.confidence_score or 0.0:.2f} "
+                    f"{tx.date.strftime('%Y-%m-%d')} {tx.amount:.2f} | {tx.description} | {cat}"
+                )
+                if tx.decision_reason:
+                    print(f"  reason: {tx.decision_reason}")
+        elif args.queue_action == "stats":
+            rows = await get_queue_stats(session)
+            if not rows:
+                print("No queue stats available.")
+                return
+            for state, bucket, count in rows:
+                print(f"{state or 'none':<14} {bucket or 'none':<16} {count}")
+        elif args.queue_action == "recalc":
+            since = datetime.strptime(args.since, "%Y-%m-%d") if args.since else None
+            updated = await recalc_queue_decisions(session, since=since)
+            print(f"Recalculated queue decision metadata for {updated} transactions.")
+        elif args.queue_action == "review":
+            await review_queue_menu(session)
+
+
 async def main():
     parser = argparse.ArgumentParser(description="Financial CLI V2")
     subparsers = parser.add_subparsers(dest="command")
@@ -170,6 +213,23 @@ async def main():
         help="Table names to reset. Use `python3 main.py db list-tables` to view options.",
     )
 
+    # Review queue
+    queue_parser = subparsers.add_parser("queue")
+    queue_subparsers = queue_parser.add_subparsers(dest="queue_action", required=True)
+
+    queue_list = queue_subparsers.add_parser("list")
+    queue_list.add_argument("--state", nargs="+", choices=["needs_review", "force_review", "auto_approved"])
+    queue_list.add_argument("--bucket")
+    queue_list.add_argument("--account-id", type=int)
+    queue_list.add_argument("--limit", type=int, default=100)
+
+    queue_stats = queue_subparsers.add_parser("stats")
+
+    queue_recalc = queue_subparsers.add_parser("recalc")
+    queue_recalc.add_argument("--since", help="YYYY-MM-DD")
+
+    queue_review = queue_subparsers.add_parser("review")
+
     args = parser.parse_args()
     
     await init_db()
@@ -185,6 +245,8 @@ async def main():
         await llm_command(args)
     elif args.command == "db":
         await db_command(args)
+    elif args.command == "queue":
+        await queue_command(args)
     else:
         parser.print_help()
 

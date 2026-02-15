@@ -142,6 +142,7 @@ Daily:
 2. Review and verify categories.
 3. Run `python3 main.py llm reindex`.
 4. Use `llm ask` for analysis and decision support.
+5. Process queue (`python3 main.py queue review`) for `needs_review` and `force_review` items.
 
 Weekly or monthly:
 1. Run `export-finetune`.
@@ -193,6 +194,10 @@ Avoid:
 - If you switch embedding model, reindex to keep vector space consistent.
 - If no context is indexed, answers will be limited; run `llm reindex` first.
 - For quality, prioritize transaction verification because this drives better fine-tune examples.
+- Conservative queue policy is active:
+  - auto-approve only when confidence >= 0.97 and no conflicts.
+  - 0.70-0.9699 goes to `needs_review`.
+  - below 0.70 or any conflict goes to `force_review`.
 
 ## 9) Key Files
 

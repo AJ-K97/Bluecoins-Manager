@@ -22,6 +22,11 @@ from src.database import (
 from src.parser import BankParser
 from src.ai import CategorizerAI
 from src.patterns import extract_pattern_key
+from src.policy import (
+    AUTO_APPROVE_MIN,
+    POLICY_VERSION,
+    evaluate_decision_policy,
+)
 
 async def list_accounts(session):
     result = await session.execute(select(Account))
@@ -455,6 +460,21 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
         ai_suggested_cat_id = cat_id if tx_type != "transfer" else None
         ai_suggested_reasoning = reasoning
         
+        conflict_flags = []
+        if tx_type != "transfer" and cat_id is None:
+            conflict_flags.append("invalid_category_id")
+        if tx_type == "transfer" and cat_id is not None:
+            conflict_flags.append("transfer_ambiguous")
+        if tx_type != "transfer" and cat_id is not None:
+            cat_match = await session.execute(select(Category).where(Category.id == cat_id))
+            selected_cat = cat_match.scalar_one_or_none()
+            if not selected_cat:
+                conflict_flags.append("invalid_category_id")
+            elif selected_cat.type != tx_type:
+                conflict_flags.append("type_category_mismatch")
+
+        decision = evaluate_decision_policy(confidence, conflict_flags)
+
         # Review Callback
         if review_callback:
             # We pass the raw data and AI suggestion. 
@@ -465,6 +485,23 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
             )
             if tx_type == "transfer":
                 cat_id = None
+        else:
+            is_verified = decision.can_auto_verify
+
+        final_flags = []
+        if tx_type != "transfer" and cat_id is None:
+            final_flags.append("invalid_category_id")
+        if tx_type == "transfer" and cat_id is not None:
+            final_flags.append("transfer_ambiguous")
+        if tx_type != "transfer" and cat_id is not None:
+            cat_match = await session.execute(select(Category).where(Category.id == cat_id))
+            selected_cat = cat_match.scalar_one_or_none()
+            if not selected_cat:
+                final_flags.append("invalid_category_id")
+            elif selected_cat.type != tx_type:
+                final_flags.append("type_category_mismatch")
+
+        decision = evaluate_decision_policy(confidence, final_flags)
 
         new_tx = Transaction(
             date=tx_data["date"],
@@ -476,7 +513,11 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
             confidence_score=confidence,
             # ai_reasoning=reasoning, # DEPRECATED
             raw_csv_row=tx_data["raw_csv_row"],
-            is_verified=is_verified
+            is_verified=is_verified,
+            decision_state=decision.state,
+            decision_reason=decision.reason,
+            review_priority=100 if is_verified else decision.priority,
+            review_bucket=decision.bucket,
         )
         session.add(new_tx)
         await session.flush() # Get ID
@@ -491,7 +532,10 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
             pattern_key=pattern_key,
             ai_suggested_category_id=ai_suggested_cat_id,
             ai_reasoning=reasoning or ai_suggested_reasoning,
-            user_selected_category_id=cat_id if is_verified else None # If verified, we record it
+            user_selected_category_id=cat_id if is_verified else None, # If verified, we record it
+            policy_version=POLICY_VERSION,
+            threshold_used=AUTO_APPROVE_MIN,
+            conflict_flags_json=json.dumps(final_flags, ensure_ascii=True),
         )
         session.add(memory)
         new_txs.append(new_tx)
@@ -534,6 +578,81 @@ async def get_transactions(session, account_id=None, start_date=None, end_date=N
     result = await session.execute(stmt)
     return result.scalars().all()
 
+
+async def get_queue_transactions(
+    session,
+    states=None,
+    bucket=None,
+    account_id=None,
+    limit=100,
+):
+    target_states = states or ["needs_review", "force_review"]
+    stmt = select(Transaction).options(
+        selectinload(Transaction.category),
+        selectinload(Transaction.account),
+        selectinload(Transaction.memory_entries),
+    ).where(
+        Transaction.is_verified.is_(False),
+        Transaction.decision_state.in_(target_states),
+    ).order_by(
+        Transaction.review_priority.asc().nullslast(),
+        Transaction.date.desc(),
+    )
+
+    if bucket:
+        stmt = stmt.where(Transaction.review_bucket == bucket)
+    if account_id:
+        stmt = stmt.where(Transaction.account_id == account_id)
+    if limit:
+        stmt = stmt.limit(limit)
+
+    result = await session.execute(stmt)
+    return result.scalars().all()
+
+
+async def get_queue_stats(session):
+    stmt = (
+        select(
+            Transaction.decision_state,
+            Transaction.review_bucket,
+            func.count().label("count"),
+        )
+        .where(Transaction.is_verified.is_(False))
+        .group_by(Transaction.decision_state, Transaction.review_bucket)
+        .order_by(Transaction.decision_state.asc(), Transaction.review_bucket.asc())
+    )
+    result = await session.execute(stmt)
+    return result.all()
+
+
+async def recalc_queue_decisions(session, since=None):
+    stmt = select(Transaction).options(selectinload(Transaction.category))
+    if since:
+        stmt = stmt.where(Transaction.date >= since)
+    result = await session.execute(stmt)
+    txs = result.scalars().all()
+
+    updated = 0
+    for tx in txs:
+        flags = []
+        if tx.type != "transfer" and tx.category_id is None:
+            flags.append("invalid_category_id")
+        if tx.category and tx.type != tx.category.type:
+            flags.append("type_category_mismatch")
+
+        decision = evaluate_decision_policy(tx.confidence_score or 0.0, flags)
+        tx.decision_state = decision.state
+        tx.review_bucket = decision.bucket
+        tx.review_priority = decision.priority
+        tx.decision_reason = decision.reason
+        if tx.is_verified:
+            tx.review_priority = 100
+        session.add(tx)
+        updated += 1
+
+    await session.commit()
+    return updated
+
 async def update_transaction_category(session, tx_id, category_id):
     # Fetch existing transaction and memory
     stmt = select(Transaction).where(Transaction.id == tx_id)
@@ -564,6 +683,9 @@ async def update_transaction_category(session, tx_id, category_id):
     if selected_category:
         tx.type = selected_category.type
     tx.is_verified = True
+    tx.review_priority = 100
+    if not tx.decision_state:
+        tx.decision_state = "needs_review"
     session.add(tx)
     
     # Handle Reflection if changed
@@ -634,6 +756,9 @@ async def mark_transaction_verified(session, tx_id):
     
     if tx:
         tx.is_verified = True
+        tx.review_priority = 100
+        if not tx.decision_state:
+            tx.decision_state = "needs_review"
         session.add(tx)
         
         # Update Memory
