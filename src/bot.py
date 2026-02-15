@@ -1,12 +1,18 @@
 import os
 import logging
 import asyncio
+from datetime import datetime
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler, CallbackQueryHandler
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import select, func
 from src.database import init_db, Account, Transaction, AsyncSessionLocal
 from src.parser import BankParser
 from src.ai import CategorizerAI
+from src.commands import list_accounts, get_queue_stats, add_transaction
+
+# States
+INPUT_DETAILS, SELECT_ACCOUNT = range(2)
 
 # Enable logging
 logging.basicConfig(
@@ -17,9 +23,102 @@ logging.basicConfig(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Hello! I am your Bluecoins Manager Bot.\n"
-        "Send me a bank CSV file (e.g., 'HSBC_Statement.csv') to process transactions.\n"
-        "Make sure the filename contains the bank name (HSBC, Wise)."
+        "Commands:\n"
+        "/accounts - List accounts\n"
+        "/stats - Show review queue stats\n"
+        "/add - Add a manual transaction\n"
+        "Or send a CSV file to import."
     )
+
+async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async with AsyncSessionLocal() as session:
+        accounts = await list_accounts(session)
+        if not accounts:
+            await update.message.reply_text("No accounts found.")
+            return
+            
+        msg = "Accounts:\n"
+        for acc in accounts:
+            msg += f"- {acc.name} ({acc.institution})\n"
+        await update.message.reply_text(msg)
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async with AsyncSessionLocal() as session:
+        rows = await get_queue_stats(session)
+        if not rows:
+            await update.message.reply_text("Queue is empty/No stats.")
+            return
+            
+        msg = "Review Queue Stats:\n"
+        msg += f"{'State':<15} {'Bucket':<10} {'Count'}\n"
+        msg += "-" * 35 + "\n"
+        for state, bucket, count in rows:
+             msg += f"{state or 'none':<15} {bucket or 'none':<10} {count}\n"
+        await update.message.reply_text(f"```\n{msg}\n```", parse_mode="MarkdownV2")
+
+async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Please enter the transaction details in format:\n"
+        "`Amount Description`\n"
+        "Example: `50.00 Lunch at Cafe`",
+        parse_mode="Markdown"
+    )
+    return INPUT_DETAILS
+
+async def receive_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    parts = text.split(" ", 1)
+    if len(parts) < 2:
+         await update.message.reply_text("Invalid format. Please use: `Amount Description`")
+         return INPUT_DETAILS
+    
+    amount_str, desc = parts
+    try:
+        amount = float(amount_str)
+    except ValueError:
+        await update.message.reply_text("Invalid amount. Please use a number.")
+        return INPUT_DETAILS
+        
+    context.user_data["add_amount"] = amount
+    context.user_data["add_desc"] = desc
+    
+    # Get Accounts
+    async with AsyncSessionLocal() as session:
+        accounts = await list_accounts(session)
+        if not accounts:
+            await update.message.reply_text("No accounts found. Add one via CLI first.")
+            return ConversationHandler.END
+            
+        keyboard = []
+        for acc in accounts:
+            keyboard.append([InlineKeyboardButton(acc.name, callback_data=f"acc_{acc.name}")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(f"Transaction: {amount} for '{desc}'.\nSelect Account:", reply_markup=reply_markup)
+        return SELECT_ACCOUNT
+
+async def select_account_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    if not data.startswith("acc_"):
+        await query.edit_message_text("Invalid selection.")
+        return ConversationHandler.END
+        
+    account_name = data[4:] # remove acc_
+    amount = context.user_data.get("add_amount")
+    desc = context.user_data.get("add_desc")
+    
+    async with AsyncSessionLocal() as session:
+        success, msg, tx = await add_transaction(session, datetime.now(), amount, desc, account_name)
+        await query.edit_message_text(f"✅ {msg}")
+        
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Operation cancelled.")
+    return ConversationHandler.END
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = update.message.document
@@ -135,6 +234,19 @@ if __name__ == '__main__':
     app = ApplicationBuilder().token(token).build()
     
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("accounts", accounts_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("add", start_add)],
+        states={
+            INPUT_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_details)],
+            SELECT_ACCOUNT: [CallbackQueryHandler(select_account_callback)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(conv_handler)
+    
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
     app.run_polling()
