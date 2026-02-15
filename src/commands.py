@@ -657,7 +657,7 @@ async def recalc_queue_decisions(session, since=None):
     await session.commit()
     return updated
 
-async def update_transaction_category(session, tx_id, category_id):
+async def update_transaction_category(session, tx_id, category_id=None, set_transfer=False):
     # Fetch existing transaction and memory
     stmt = select(Transaction).where(Transaction.id == tx_id)
     result = await session.execute(stmt)
@@ -673,18 +673,25 @@ async def update_transaction_category(session, tx_id, category_id):
     
     # Check for change
     old_cat_id = tx.category_id
+    old_type = tx.type
     
     selected_category = None
-    if category_id:
+    if set_transfer:
+        category_id = None
+    elif category_id:
         cat_stmt = select(Category).where(Category.id == category_id)
         cat_res = await session.execute(cat_stmt)
         selected_category = cat_res.scalar_one_or_none()
         if not selected_category:
             return False, "Selected category not found."
+    else:
+        return False, "No category selected."
 
     # Update Transaction
     tx.category_id = category_id
-    if selected_category:
+    if set_transfer:
+        tx.type = "transfer"
+    elif selected_category:
         tx.type = selected_category.type
     tx.is_verified = True
     tx.review_priority = 100
@@ -696,18 +703,22 @@ async def update_transaction_category(session, tx_id, category_id):
     if old_cat_id != category_id:
         # Get names
         old_cat_name = "None"
-        if old_cat_id:
-             r = await session.execute(select(Category).where(Category.id == old_cat_id))
-             c = r.scalar_one_or_none()
-             if c:
-                 old_cat_name = format_category_obj_label(c)
+        if old_type == "transfer" and old_cat_id is None:
+            old_cat_name = "(Transfer) > (Transfer) [transfer]"
+        elif old_cat_id:
+            r = await session.execute(select(Category).where(Category.id == old_cat_id))
+            c = r.scalar_one_or_none()
+            if c:
+                old_cat_name = format_category_obj_label(c)
              
         new_cat_name = "None"
-        if category_id:
-             r = await session.execute(select(Category).where(Category.id == category_id))
-             c = r.scalar_one_or_none()
-             if c:
-                 new_cat_name = format_category_obj_label(c)
+        if set_transfer:
+            new_cat_name = "(Transfer) > (Transfer) [transfer]"
+        elif category_id:
+            r = await session.execute(select(Category).where(Category.id == category_id))
+            c = r.scalar_one_or_none()
+            if c:
+                new_cat_name = format_category_obj_label(c)
         
         # Get Reasoning from memory
         prev_reasoning = memory.ai_reasoning if memory else "Unknown"

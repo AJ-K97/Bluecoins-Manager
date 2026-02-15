@@ -14,6 +14,7 @@ from src.commands import (
     add_category, delete_category, get_category_display_from_values, add_global_memory_instruction,
     get_global_memory_entries, set_global_memory_active, delete_global_memory_instruction,
     reset_database, seed_reference_data, format_category_obj_label, format_category_label,
+    get_transaction_category_display,
     get_resettable_table_names, get_table_row_counts, reset_selected_tables,
     get_queue_transactions, get_queue_stats,
 )
@@ -34,6 +35,9 @@ def _group_categories_by_type_and_parent(categories):
     return grouped
 
 
+TRANSFER_CHOICE = "__transfer_no_category__"
+
+
 async def choose_category_tree(session, prompt_prefix="Select Category", default_type=None, restrict_to_default_type=False):
     cats = await get_all_categories(session)
     if not cats:
@@ -48,10 +52,17 @@ async def choose_category_tree(session, prompt_prefix="Select Category", default
 
     selected_type = await inquirer.select(
         message=f"{prompt_prefix}: Select Type",
-        choices=[Choice(value=t, name=t.upper()) for t in available_types] + [Choice(value=None, name="Cancel")],
+        choices=[
+            Choice(value=t, name=t.upper()) for t in available_types
+        ] + [
+            Choice(value=TRANSFER_CHOICE, name="TRANSFER (no category)"),
+            Choice(value=None, name="Cancel"),
+        ],
     ).execute_async()
     if not selected_type:
         return None
+    if selected_type == TRANSFER_CHOICE:
+        return TRANSFER_CHOICE
 
     tree_choices = []
     parent_names = sorted(grouped[selected_type].keys())
@@ -125,7 +136,10 @@ async def review_transactions(session, transactions):
                 default_type=tx.type if tx.type in {"income", "expense"} else None,
                 restrict_to_default_type=True,
             )
-            if selected_cat:
+            if selected_cat == TRANSFER_CHOICE:
+                await update_transaction_category(session, tx.id, category_id=None, set_transfer=True)
+                await session.refresh(tx, ['category'])
+            elif selected_cat:
                 await update_transaction_category(session, tx.id, selected_cat.id)
                 await session.refresh(tx, ['category'])
                 
@@ -246,7 +260,9 @@ async def manage_transactions_menu(session):
             choices = []
             for t in txs[:50]: 
                 status = "✅" if t.is_verified else "  "
-                cat_name = format_category_obj_label(t.category) if t.category else "Uncategorized > Uncategorized [unknown]"
+                parent_name, cat_name = get_transaction_category_display(t)
+                cat_type = t.category.type if t.category else t.type
+                cat_name = format_category_label(parent_name, cat_name, cat_type)
                 label = f"{status} {t.date.strftime('%Y-%m-%d')} | {t.description[:20]:<20} | {t.amount:>8.2f} | {cat_name}"
                 choices.append(Choice(value=t, name=label))
             choices.append(Choice(value=None, name="Back"))
@@ -276,7 +292,10 @@ async def manage_transactions_menu(session):
                     default_type=selected_tx.type if selected_tx.type in {"income", "expense"} else None,
                     restrict_to_default_type=True,
                 )
-                if selected_cat:
+                if selected_cat == TRANSFER_CHOICE:
+                    await update_transaction_category(session, selected_tx.id, category_id=None, set_transfer=True)
+                    print("Updated!")
+                elif selected_cat:
                     await update_transaction_category(session, selected_tx.id, selected_cat.id)
                     print("Updated!")
             
@@ -300,7 +319,9 @@ async def review_queue_menu(session, account_id=None):
 
         choices = []
         for tx in rows:
-            cat_name = format_category_obj_label(tx.category) if tx.category else "Uncategorized > Uncategorized [unknown]"
+            parent_name, cat_name = get_transaction_category_display(tx)
+            cat_type = tx.category.type if tx.category else tx.type
+            cat_name = format_category_label(parent_name, cat_name, cat_type)
             label = (
                 f"[{tx.decision_state}/{tx.review_bucket}] p{tx.review_priority or 0} "
                 f"{tx.date.strftime('%Y-%m-%d')} | {tx.description[:24]:<24} | {tx.amount:>8.2f} | {cat_name}"
@@ -337,7 +358,10 @@ async def review_queue_menu(session, account_id=None):
                 default_type=selected_tx.type if selected_tx.type in {"income", "expense"} else None,
                 restrict_to_default_type=True,
             )
-            if selected_cat:
+            if selected_cat == TRANSFER_CHOICE:
+                await update_transaction_category(session, selected_tx.id, category_id=None, set_transfer=True)
+                print("Updated and verified.")
+            elif selected_cat:
                 await update_transaction_category(session, selected_tx.id, selected_cat.id)
                 print("Updated and verified.")
             continue
@@ -774,7 +798,27 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
                 default_type=locked_expected_type or (effective_type if effective_type in {"income", "expense"} else None),
                 restrict_to_default_type=bool(locked_expected_type),
             )
-            if selected_cat:
+            if selected_cat == TRANSFER_CHOICE:
+                old_parent, old_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
+                old_label = format_category_label(old_parent, old_name, effective_type)
+                effective_cat_id = None
+                effective_type = "transfer"
+                new_label = "(Transfer) > (Transfer) [transfer]"
+                prior_reasoning = effective_reasoning or "No prior reasoning."
+                reflection = await ai.generate_reflection(
+                    tx_data["description"],
+                    old_label,
+                    new_label,
+                    prior_reasoning
+                )
+                effective_reasoning = (
+                    f"Manual override during review: changed from {old_label} to {new_label}. "
+                    f"Reflection: {reflection}"
+                )
+                effective_confidence = 1.0
+                if old_label != new_label:
+                    change_log.append(f"manual override {old_label} -> {new_label}")
+            elif selected_cat:
                 old_parent, old_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
                 old_label = format_category_label(old_parent, old_name, effective_type)
                 effective_cat_id = selected_cat.id
