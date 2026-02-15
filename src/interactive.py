@@ -4,6 +4,7 @@ import textwrap
 from datetime import datetime
 from sqlalchemy import select
 from InquirerPy import inquirer
+from InquirerPy.separator import Separator
 from InquirerPy.base.control import Choice
 from src.database import init_db, AsyncSessionLocal
 from src.commands import (
@@ -50,22 +51,21 @@ async def choose_category_tree(session, prompt_prefix="Select Category", default
     if not selected_type:
         return None
 
+    tree_choices = []
     parent_names = sorted(grouped[selected_type].keys())
-    selected_parent = await inquirer.fuzzy(
-        message=f"{prompt_prefix}: Select Parent ({selected_type})",
-        choices=[Choice(value=p, name=f"{p} [{selected_type}]") for p in parent_names] + [Choice(value=None, name="Back")],
-    ).execute_async()
-    if not selected_parent:
-        return None
+    for parent in parent_names:
+        # Parent rows are non-selectable separators; only sub-categories can be selected.
+        tree_choices.append(Separator(f"📁 {parent}"))
+        children = grouped[selected_type][parent]
+        for idx, child in enumerate(children):
+            branch = "└─" if idx == len(children) - 1 else "├─"
+            tree_choices.append(Choice(value=child, name=f"  {branch} {child.name}"))
 
-    child_choices = [
-        Choice(value=c, name=f"{c.name} [{selected_type}]")
-        for c in grouped[selected_type][selected_parent]
-    ]
-    child_choices.append(Choice(value=None, name="Back"))
-    return await inquirer.fuzzy(
-        message=f"{prompt_prefix}: Select Sub-Category ({selected_type} > {selected_parent})",
-        choices=child_choices,
+    tree_choices.append(Choice(value=None, name="Back"))
+
+    return await inquirer.select(
+        message=f"{prompt_prefix}: Select Sub-Category ({selected_type.upper()})",
+        choices=tree_choices,
     ).execute_async()
 
 
