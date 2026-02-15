@@ -2,12 +2,11 @@
 
 ## Current Position
 - **Phase**: Phase 6 (Advanced Ingestion)
-- **Status**: Planned
-- **Goal**: Integrate PDF parsing capabilities using `pypdf`.
+- **Status**: Verified Complete
+- **Goal**: Support PDF bank statements.
 
-## Plans
-- **6.1**: Core PDF Ingestion (pypdf + regex)
-- **6.2**: Noise Cleaning & Auto-detection
+## Last Session Summary
+Phase 6 complete. PDF parsing with `pypdf` and regex support enabled.
 
 ## Next Steps
-1. Execute Phase 6 Plans
+1. Proceed to Phase 7 (Refinement & Verification)

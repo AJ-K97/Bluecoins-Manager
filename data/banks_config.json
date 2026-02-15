@@ -11,7 +11,8 @@
             "description_column": "Description",
             "amount_column": "Amount",
             "type_determination": "amount_sign",
-            "negate_amounts": true
+            "negate_amounts": true,
+            "pdf_regex": "^(\\d{2} [A-Za-z]{3} \\d{4})\\s+(.+?)\\s+(-?[\\d,]+\\.\\d{2})$"
         },
         "Wise": {
             "date_column": "Created on",
