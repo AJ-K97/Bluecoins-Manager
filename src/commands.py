@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+from datetime import datetime
 from collections import Counter
 from sqlalchemy import select, update, delete, func
 from sqlalchemy.orm import selectinload
@@ -796,6 +797,94 @@ async def delete_transaction(session, tx_id):
     await session.execute(stmt)
     await session.commit()
     return True, "Transaction deleted."
+
+async def add_transaction(session, date, amount, description, account_name, category_id=None):
+    # 1. Resolve Account
+    stmt = select(Account).where(Account.name == account_name)
+    result = await session.execute(stmt)
+    account = result.scalar_one_or_none()
+    if not account:
+        return False, f"Account '{account_name}' not found.", None
+
+    # 2. Parse Date
+    if isinstance(date, str):
+        try:
+             # Try YYYY-MM-DD
+             tx_date = datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+             return False, "Invalid date format. Use YYYY-MM-DD.", None
+    else:
+        tx_date = date
+
+    # 3. AI Categorization or Validation
+    confidence = 1.0
+    is_verified = True
+    ai_reasoning = "Manual Entry"
+    tx_type = "expense"
+    decision_state = "auto_approved"
+    decision_reason = "Manual Entry"
+    
+    if category_id:
+        # Validate Category
+        cat_res = await session.execute(select(Category).where(Category.id == category_id))
+        category = cat_res.scalar_one_or_none()
+        if not category:
+             return False, "Invalid Category ID", None
+        tx_type = category.type
+    else:
+        # Auto-Categorize
+        ai = CategorizerAI()
+        cat_id, conf, reason, suggested_type = await ai.suggest_category(description, session)
+        category_id = cat_id
+        confidence = conf
+        ai_reasoning = reason
+        tx_type = suggested_type
+        
+        # Policy Check
+        conflict_flags = []
+        if tx_type != "transfer" and category_id is None:
+            conflict_flags.append("invalid_category_id")
+            
+        decision = evaluate_decision_policy(confidence, conflict_flags)
+        is_verified = decision.can_auto_verify
+        decision_state = decision.state
+        decision_reason = decision.reason
+
+    # 4. Create Transaction
+    new_tx = Transaction(
+        date=tx_date,
+        description=description,
+        amount=amount,
+        type=tx_type,
+        account_id=account.id,
+        category_id=category_id,
+        confidence_score=confidence,
+        is_verified=is_verified,
+        decision_state=decision_state,
+        decision_reason=decision_reason,
+        review_priority=100 if is_verified else 50,
+        raw_csv_row="MANUAL_ENTRY"
+    )
+    session.add(new_tx)
+    await session.flush()
+    
+    # 5. Create Memory (if AI used and unverified)
+    if not is_verified and category_id:
+         pattern_key = extract_pattern_key(description)
+         memory = AIMemory(
+             transaction_id=new_tx.id,
+             pattern_key=pattern_key,
+             ai_suggested_category_id=category_id,
+             ai_reasoning=ai_reasoning,
+             policy_version=POLICY_VERSION,
+             threshold_used=AUTO_APPROVE_MIN
+         )
+         session.add(memory)
+
+    await session.commit()
+    
+    status_msg = "Added" if is_verified else "Added (Needs Review)"
+    return True, f"{status_msg}: #{new_tx.id} {description} ({amount})", new_tx
 
 def export_to_bluecoins_csv(transactions, output_path):
     try:

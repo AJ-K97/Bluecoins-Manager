@@ -17,7 +17,9 @@ from src.commands import (
     get_queue_transactions,
     get_queue_stats,
     recalc_queue_decisions,
+    recalc_queue_decisions,
     format_category_obj_label,
+    add_transaction,
 )
 from src.local_llm import LocalLLMPipeline
 
@@ -41,6 +43,18 @@ async def account_command(args):
 async def convert_command(args):
     async with AsyncSessionLocal() as session:
         success, msg = await process_import(session, args.bank, args.input, args.account, args.output)
+        print(msg)
+
+
+async def add_tx_command(args):
+    async with AsyncSessionLocal() as session:
+        success, msg, tx = await add_transaction(
+            session,
+            date=args.date,
+            amount=args.amount,
+            description=args.desc,
+            account_name=args.account
+        )
         print(msg)
 
 
@@ -229,6 +243,13 @@ async def main():
     queue_recalc.add_argument("--since", help="YYYY-MM-DD")
 
     queue_review = queue_subparsers.add_parser("review")
+    
+    # Add Transaction
+    add_tx_parser = subparsers.add_parser("add-tx")
+    add_tx_parser.add_argument("--amount", type=float, required=True)
+    add_tx_parser.add_argument("--desc", required=True)
+    add_tx_parser.add_argument("--account", required=True)
+    add_tx_parser.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"), help="YYYY-MM-DD")
 
     args = parser.parse_args()
     
@@ -247,6 +268,8 @@ async def main():
         await db_command(args)
     elif args.command == "queue":
         await queue_command(args)
+    elif args.command == "add-tx":
+        await add_tx_command(args)
     else:
         parser.print_help()
 
