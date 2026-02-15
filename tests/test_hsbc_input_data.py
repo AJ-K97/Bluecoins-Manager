@@ -27,6 +27,15 @@ class HSBCInputDataTests(unittest.TestCase):
         self.assertEqual(extract_pattern_key(trustee_tx["description"]), "BCF")
         self.assertEqual(extract_pattern_key(corfield_tx["description"]), "CORFIELD FRESH IGA")
 
+    def test_type_uses_source_sign_even_when_amounts_are_negated(self):
+        # HSBC config negates amount for normalized storage, but transaction type
+        # should still come from original bank direction.
+        expense_tx = next(t for t in self.transactions if "CORFIELD FRESH IGA" in t["description"])
+        income_tx = next(t for t in self.transactions if "Aurizn Salary" in t["description"])
+
+        self.assertEqual(expense_tx["type"], "expense")
+        self.assertEqual(income_tx["type"], "income")
+
 
 if __name__ == "__main__":
     unittest.main()

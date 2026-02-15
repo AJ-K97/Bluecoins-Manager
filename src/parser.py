@@ -56,7 +56,8 @@ class BankParser:
                     # Amount Parsing
                     amount_str = clean_row[cfg["amount_column"]].replace(",", "")
                     try:
-                        amount = float(amount_str)
+                        raw_amount = float(amount_str)
+                        amount = raw_amount
                         if cfg.get("negate_amounts", False):
                             amount = -amount
                     except ValueError:
@@ -65,10 +66,8 @@ class BankParser:
                     # Type Determination
                     tx_type = "expense" # Default
                     if cfg.get("type_determination") == "amount_sign":
-                        # Positive usually means credit (income), negative debit (expense)
-                        # But wait, config says "amount_sign".
-                        # HSBC often has negative for expense.
-                        if amount > 0:
+                        # Determine direction from source sign before normalization/negation.
+                        if raw_amount > 0:
                             tx_type = "income"
                         else:
                             tx_type = "expense"
