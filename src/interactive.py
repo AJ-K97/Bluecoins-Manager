@@ -34,14 +34,16 @@ def _group_categories_by_type_and_parent(categories):
     return grouped
 
 
-async def choose_category_tree(session, prompt_prefix="Select Category", default_type=None):
+async def choose_category_tree(session, prompt_prefix="Select Category", default_type=None, restrict_to_default_type=False):
     cats = await get_all_categories(session)
     if not cats:
         return None
 
     grouped = _group_categories_by_type_and_parent(cats)
     available_types = sorted(grouped.keys())
-    if default_type and default_type in available_types:
+    if restrict_to_default_type and default_type and default_type in available_types:
+        available_types = [default_type]
+    elif default_type and default_type in available_types:
         available_types = [default_type] + [t for t in available_types if t != default_type]
 
     selected_type = await inquirer.select(
@@ -121,6 +123,7 @@ async def review_transactions(session, transactions):
                 session,
                 prompt_prefix=f"'{tx.description}'",
                 default_type=tx.type if tx.type in {"income", "expense"} else None,
+                restrict_to_default_type=True,
             )
             if selected_cat:
                 await update_transaction_category(session, tx.id, selected_cat.id)
@@ -271,6 +274,7 @@ async def manage_transactions_menu(session):
                     session,
                     prompt_prefix="Select New Category",
                     default_type=selected_tx.type if selected_tx.type in {"income", "expense"} else None,
+                    restrict_to_default_type=True,
                 )
                 if selected_cat:
                     await update_transaction_category(session, selected_tx.id, selected_cat.id)
@@ -331,6 +335,7 @@ async def review_queue_menu(session, account_id=None):
                 session,
                 prompt_prefix="Queue: Select New Category",
                 default_type=selected_tx.type if selected_tx.type in {"income", "expense"} else None,
+                restrict_to_default_type=True,
             )
             if selected_cat:
                 await update_transaction_category(session, selected_tx.id, selected_cat.id)
@@ -656,6 +661,13 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
     effective_reasoning = reasoning
     change_log = []
     discussion_history = []
+    locked_expected_type = tx_data["type"] if tx_data.get("type") in {"expense", "income"} else None
+    suggestion_candidates = await ai.suggest_category_candidates(
+        tx_data["description"],
+        session,
+        min_candidates=3,
+        expected_type=locked_expected_type,
+    )
 
     while True:
         if effective_type == "transfer":
@@ -668,19 +680,32 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
         if effective_type == "transfer":
             type_disp = "TRANSFER OUT" if tx_data["amount"] < 0 else "TRANSFER IN"
 
+        suggestion_lines = []
+        for idx, candidate in enumerate(suggestion_candidates[:5], start=1):
+            s_parent, s_name = await get_category_display_from_values(session, candidate["type"], candidate["id"])
+            s_label = format_category_label(s_parent, s_name, candidate["type"])
+            suggestion_lines.append(
+                f"  {idx}. {s_label} ({candidate['confidence']:.2f})"
+            )
+        if not suggestion_lines:
+            suggestion_lines = ["  No category suggestions available."]
+
         render_box([
             f"Date: {tx_data['date']}    Amount: {tx_data['amount']}",
             f"Type: {type_disp}",
             f"Description: {tx_data['description']}",
             f"AI Suggestion: {suggestion_label}",
             f"Confidence: {effective_confidence:.2f}",
-            f"Reasoning: {effective_reasoning}"
+            f"Reasoning: {effective_reasoning}",
+            "Suggested Categories:",
+            *suggestion_lines,
         ])
 
         action = await inquirer.select(
             message="Action:",
             choices=[
                 Choice(value="accept", name="Accept & Verify"),
+                Choice(value="pick_suggested", name="Pick from Suggested Categories"),
                 Choice(value="change", name="Change Category"),
                 Choice(value="refresh", name="Refresh LLM Reasoning"),
                 Choice(value="coach", name="Coach Model"),
@@ -708,11 +733,46 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
                     effective_reasoning = f"Review changes: {change_summary}"
             return effective_cat_id, False, effective_type, effective_confidence, effective_reasoning
 
+        if action == "pick_suggested":
+            if not suggestion_candidates:
+                print("No suggested categories available.")
+                continue
+
+            choices = []
+            for idx, candidate in enumerate(suggestion_candidates[:10], start=1):
+                s_parent, s_name = await get_category_display_from_values(session, candidate["type"], candidate["id"])
+                s_label = format_category_label(s_parent, s_name, candidate["type"])
+                choices.append(
+                    Choice(
+                        value=candidate,
+                        name=f"{idx}. {s_label} | conf={candidate['confidence']:.2f}",
+                    )
+                )
+            choices.append(Choice(value=None, name="Back"))
+
+            selected = await inquirer.select(
+                message="Select suggested category:",
+                choices=choices,
+            ).execute_async()
+            if selected:
+                old_parent, old_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
+                old_label = format_category_label(old_parent, old_name, effective_type)
+                effective_cat_id = selected["id"]
+                effective_type = selected["type"]
+                effective_confidence = selected["confidence"]
+                effective_reasoning = selected["reasoning"]
+                new_parent, new_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
+                new_label = format_category_label(new_parent, new_name, effective_type)
+                if old_label != new_label:
+                    change_log.append(f"suggested pick {old_label} -> {new_label}")
+            continue
+
         if action == "change":
             selected_cat = await choose_category_tree(
                 session,
                 prompt_prefix="Change Category",
-                default_type=effective_type if effective_type in {"income", "expense"} else None,
+                default_type=locked_expected_type or (effective_type if effective_type in {"income", "expense"} else None),
+                restrict_to_default_type=bool(locked_expected_type),
             )
             if selected_cat:
                 old_parent, old_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
@@ -739,11 +799,15 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
         if action == "refresh":
             old_parent, old_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
             old_label = format_category_label(old_parent, old_name, effective_type)
-            new_cat_id, new_conf, new_reason, new_type = await ai.suggest_category(tx_data["description"], session)
-            effective_cat_id = new_cat_id
-            effective_confidence = new_conf
-            effective_reasoning = new_reason
-            effective_type = new_type or effective_type
+            suggestion_candidates = await ai.suggest_category_candidates(
+                tx_data["description"], session, min_candidates=3, expected_type=locked_expected_type
+            )
+            if suggestion_candidates:
+                top = suggestion_candidates[0]
+                effective_cat_id = top["id"]
+                effective_confidence = top["confidence"]
+                effective_reasoning = top["reasoning"]
+                effective_type = top["type"] or effective_type
             new_parent, new_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
             new_label = format_category_label(new_parent, new_name, effective_type)
             if old_label != new_label:
@@ -756,15 +820,21 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
             ).execute_async()
             if coaching_text and coaching_text.strip():
                 await add_global_memory_instruction(session, coaching_text.strip(), source="review_coaching")
-                new_cat_id, new_conf, new_reason, new_type = await ai.suggest_category(
-                    tx_data["description"], session, extra_instruction=coaching_text.strip()
+                suggestion_candidates = await ai.suggest_category_candidates(
+                    tx_data["description"],
+                    session,
+                    min_candidates=3,
+                    extra_instruction=coaching_text.strip(),
+                    expected_type=locked_expected_type,
                 )
                 old_parent, old_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
                 old_label = format_category_label(old_parent, old_name, effective_type)
-                effective_cat_id = new_cat_id
-                effective_confidence = new_conf
-                effective_reasoning = new_reason
-                effective_type = new_type or effective_type
+                if suggestion_candidates:
+                    top = suggestion_candidates[0]
+                    effective_cat_id = top["id"]
+                    effective_confidence = top["confidence"]
+                    effective_reasoning = top["reasoning"]
+                    effective_type = top["type"] or effective_type
                 new_parent, new_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
                 new_label = format_category_label(new_parent, new_name, effective_type)
                 if old_label != new_label:
@@ -823,17 +893,21 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
                     old_parent, old_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
                     old_label = format_category_label(old_parent, old_name, effective_type)
 
-                    new_cat_id, new_conf, new_reason, new_type = await ai.suggest_category(
+                    suggestion_candidates = await ai.suggest_category_candidates(
                         tx_data["description"],
                         session,
-                        extra_instruction=conversation_instruction.strip()
+                        min_candidates=3,
+                        extra_instruction=conversation_instruction.strip(),
+                        expected_type=locked_expected_type,
                     )
-                    effective_cat_id = new_cat_id
-                    effective_confidence = new_conf
-                    effective_reasoning = (
-                        f"{new_reason} [Conversation guidance applied: {conversation_instruction.strip()}]"
-                    )
-                    effective_type = new_type or effective_type
+                    if suggestion_candidates:
+                        top = suggestion_candidates[0]
+                        effective_cat_id = top["id"]
+                        effective_confidence = top["confidence"]
+                        effective_reasoning = (
+                            f"{top['reasoning']} [Conversation guidance applied: {conversation_instruction.strip()}]"
+                        )
+                        effective_type = top["type"] or effective_type
 
                     new_parent, new_name = await get_category_display_from_values(session, effective_type, effective_cat_id)
                     new_label = format_category_label(new_parent, new_name, effective_type)

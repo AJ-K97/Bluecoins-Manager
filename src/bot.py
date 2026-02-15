@@ -87,7 +87,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     continue
                 
                 # Categorize
-                cat_id, confidence, reasoning, suggested_type = await ai.suggest_category(tx["description"], session)
+                cat_id, confidence, reasoning, suggested_type = await ai.suggest_category(
+                    tx["description"],
+                    session,
+                    expected_type=tx["type"] if tx["type"] in {"expense", "income"} else None,
+                )
                 tx_type = suggested_type or tx["type"]
                 if tx_type == "transfer":
                     cat_id = None

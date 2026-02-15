@@ -452,7 +452,11 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
         
         # AI Suggestion
         print(f"Resolving '{tx_data['description']}' with AI...")
-        cat_id, confidence, reasoning, suggested_type = await ai.suggest_category(tx_data["description"], session)
+        cat_id, confidence, reasoning, suggested_type = await ai.suggest_category(
+            tx_data["description"],
+            session,
+            expected_type=tx_data["type"] if tx_data["type"] in {"expense", "income"} else None,
+        )
         if suggested_type:
             tx_type = suggested_type
         if tx_type == "transfer":

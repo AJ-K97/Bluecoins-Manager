@@ -95,16 +95,37 @@ Text:
         repaired_data = self._parse_json_payload(repaired_content)
         return repaired_data, repaired_content
 
-    async def suggest_category(self, description, session, extra_instruction=None):
+    def _parse_candidates_payload(self, content):
+        try:
+            import json
+            cleaned = content.replace("```json", "").replace("```", "").strip()
+            match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+            if not match:
+                return None
+            payload = json.loads(match.group())
+            raw_candidates = payload.get("candidates")
+            if not isinstance(raw_candidates, list):
+                return None
+            return payload
+        except Exception:
+            return None
+
+    async def suggest_category_candidates(
+        self,
+        description,
+        session,
+        min_candidates=3,
+        extra_instruction=None,
+        expected_type=None,
+    ):
         """
-        Suggests category and type for the transaction.
-        Returns (category_id, confidence, reasoning, type)
+        Suggest multiple candidate categories and types for a transaction.
+        Returns list of dicts with keys: id, type, confidence, reasoning.
         """
-        # 1. Fetch available categories
         result = await session.execute(select(Category))
         categories = result.scalars().all()
         if not categories:
-            return None, 0.0, "No categories found.", "expense"
+            return []
 
         cat_by_id = {c.id: c for c in categories}
         cat_lines = []
@@ -114,20 +135,18 @@ Text:
 
         cat_str = "\n".join(cat_lines)
 
-        # 2. Fetch Memory (Reflections & Past Decisions)
         search_term = extract_pattern_key(description)
         history_str = "None"
 
         if len(search_term) > 2:
-            # Join Transaction with AIMemory to get reflections
             stmt = select(Transaction, AIMemory).outerjoin(AIMemory, Transaction.id == AIMemory.transaction_id).where(
                 Transaction.description.ilike(f"%{search_term}%"),
                 Transaction.category_id.is_not(None)
             ).order_by(Transaction.date.desc()).limit(5)
-            
+
             res = await session.execute(stmt)
-            rows = res.all() # list of (Transaction, AIMemory) tuples
-            
+            rows = res.all()
+
             if rows:
                 history_lines = []
                 for tx, mem in rows:
@@ -136,19 +155,16 @@ Text:
                         cat_name = f"{cat_obj.parent_name or 'Uncategorized'} > {cat_obj.name} [{cat_obj.type}]"
                     else:
                         cat_name = str(tx.category_id)
-                    
+
                     reflection_note = ""
                     if mem and mem.reflection:
                         reflection_note = f"\n  - LEARNING/REFLECTION: {mem.reflection}"
-                    
-                    # If verified by user, mark it
+
                     user_tag = "[USER VERIFIED]" if tx.is_verified else "[AI PREDICTION]"
-                    
                     history_lines.append(f"- '{tx.description}' -> {cat_name} ({tx.type}) {user_tag}{reflection_note}")
-                
+
                 history_str = "\n".join(history_lines)
 
-        # 2.5 Fetch Category Understanding Profiles
         profile_stmt = (
             select(AICategoryUnderstanding, Category)
             .join(Category, Category.id == AICategoryUnderstanding.category_id)
@@ -165,7 +181,6 @@ Text:
                 )
             profiles_str = "\n".join(lines)
 
-        # 2.6 Fetch Global User Coaching/Rules
         rule_stmt = select(AIGlobalMemory).where(AIGlobalMemory.is_active.is_(True)).order_by(AIGlobalMemory.created_at.desc()).limit(50)
         rule_res = await session.execute(rule_stmt)
         global_rules = rule_res.scalars().all()
@@ -179,16 +194,23 @@ Text:
             else:
                 global_rules_str += f"\n- {extra_instruction}"
 
-        # 3. Web Search Context
+        expected_type = (expected_type or "").lower().strip()
+        if expected_type not in {"expense", "income"}:
+            expected_type = None
+
+        merchant_hint = extract_pattern_key(description)
         clean_desc = self._clean_description(description)
-        search_results = self._run_web_search(clean_desc, max_results=2)
+        search_query = self._clean_description(merchant_hint) if merchant_hint and merchant_hint != "UNKNOWN" else clean_desc
+        search_results = self._run_web_search(search_query, max_results=2)
         search_context = self._format_search_results(search_results)
 
-        # 4. Construct Prompt
         prompt = f"""
 You are a financial assistant.
-Categorize this transaction: "{description}"
+Categorize this transaction and provide multiple plausible options.
+Transaction: "{description}"
 cleaned_description: '{clean_desc}'
+merchant_hint: '{merchant_hint}'
+expected_type: '{expected_type or "unknown"}'
 
 Web Search Context:
 {search_context}
@@ -211,52 +233,123 @@ Rules:
 - The category decision must be based on merchant/payee intent, NOT location.
 - Location can be ignored if present; do not use it to decide category.
 - Ignore banking noise like ATM/VISA/EFTPOS/card suffixes and legal prefixes.
-- You MUST choose id from the provided category list only.
-- If transaction is transfer/internal transfer/osko between accounts, set type to "transfer" and id to null.
+- You MUST choose IDs from the provided category list only.
 - Do not invent categories.
+- Return at least {max(3, int(min_candidates))} unique candidates, ranked best first.
+- Prefer non-transfer category candidates unless the transaction is clearly an internal transfer.
+- If expected_type is "expense" or "income", all candidates MUST use that same type.
+- Treat merchant_hint as primary merchant/payee signal. Do NOT use suburb/city/country/location tails as merchant names.
 
-Task:
-Return JSON object only with:
-- "id": exact category ID from list, or null for transfer.
-- "type": "expense", "income", or "transfer"
-- "confidence": score (0.0 - 1.0)
-- "reasoning": concise reasoning
-
+Return JSON object only:
+{{
+  "candidates": [
+    {{"id": 123, "type": "expense", "confidence": 0.82, "reasoning": "short reason"}},
+    {{"id": 456, "type": "expense", "confidence": 0.61, "reasoning": "short reason"}}
+  ]
+}}
 JSON ONLY.
 """
-
         try:
-            data, _raw_content = await self._chat_json_with_repair(prompt)
+            content = await self._chat_once(prompt)
+            data = self._parse_candidates_payload(content)
             if data is None:
-                return None, 0.0, "Unable to parse AI response.", "expense"
+                repair_prompt = f"""
+Convert the following output to strict JSON only.
+Required format:
+{{
+  "candidates": [
+    {{"id": <int>, "type": "expense|income|transfer", "confidence": <0.0-1.0>, "reasoning": "<string>"}}
+  ]
+}}
+At least {max(3, int(min_candidates))} unique candidate entries.
+Text:
+{content}
+"""
+                repaired = await self._chat_once(repair_prompt)
+                data = self._parse_candidates_payload(repaired)
 
-            suggested_id = data.get("id")
-            if suggested_id is not None:
-                suggested_id = int(suggested_id)
+            normalized = []
+            seen = set()
+            for item in (data or {}).get("candidates", []):
+                if not isinstance(item, dict):
+                    continue
+                raw_type = str(item.get("type", "expense")).lower()
+                ctype = raw_type if raw_type in {"expense", "income", "transfer"} else "expense"
+                if expected_type and ctype != expected_type:
+                    continue
 
-            confidence = float(data.get("confidence", 0.0))
-            confidence = max(0.0, min(1.0, confidence))
+                raw_id = item.get("id")
+                cid = None
+                try:
+                    if raw_id is not None:
+                        cid = int(raw_id)
+                except Exception:
+                    cid = None
 
-            reasoning = data.get("reasoning", "No reasoning.")
-            reasoning = str(reasoning)
+                if ctype == "transfer":
+                    continue
+                if cid is None or cid not in cat_by_id:
+                    continue
+                if cat_by_id[cid].type != ctype:
+                    continue
 
-            tx_type = str(data.get("type", "expense")).lower()
-            if tx_type not in {"expense", "income", "transfer"}:
-                tx_type = "expense"
+                key = (ctype, cid)
+                if key in seen:
+                    continue
+                seen.add(key)
 
-            if tx_type == "transfer":
-                return None, confidence, reasoning, "transfer"
+                try:
+                    conf = float(item.get("confidence", 0.0))
+                except Exception:
+                    conf = 0.0
+                conf = max(0.0, min(1.0, conf))
+                reason = str(item.get("reasoning", "Possible match."))
+                normalized.append({
+                    "id": cid,
+                    "type": ctype,
+                    "confidence": conf,
+                    "reasoning": reason,
+                })
 
-            if suggested_id is not None:
-                if suggested_id not in cat_by_id:
-                    return None, 0.0, f"{reasoning} [Invalid ID {suggested_id}]", tx_type
+            if len(normalized) < max(3, int(min_candidates)):
+                used = {c["id"] for c in normalized}
+                for c in sorted(categories, key=lambda x: (x.parent_name or "", x.name)):
+                    if expected_type and c.type != expected_type:
+                        continue
+                    if c.id in used:
+                        continue
+                    normalized.append({
+                        "id": c.id,
+                        "type": c.type,
+                        "confidence": 0.2,
+                        "reasoning": "Fallback candidate.",
+                    })
+                    used.add(c.id)
+                    if len(normalized) >= max(3, int(min_candidates)):
+                        break
 
-                cat = cat_by_id[suggested_id]
-                if cat.type != tx_type:
-                    return None, 0.0, f"{reasoning} [Type/category mismatch: {tx_type} vs {cat.type}]", tx_type
+            return sorted(normalized, key=lambda x: x["confidence"], reverse=True)
+        except Exception as e:
+            print(f"AI Error: {e}")
+            return []
 
-            return suggested_id, confidence, reasoning, tx_type
-
+    async def suggest_category(self, description, session, extra_instruction=None, expected_type=None):
+        """
+        Suggests category and type for the transaction.
+        Returns (category_id, confidence, reasoning, type)
+        """
+        try:
+            candidates = await self.suggest_category_candidates(
+                description,
+                session,
+                min_candidates=3,
+                extra_instruction=extra_instruction,
+                expected_type=expected_type,
+            )
+            if not candidates:
+                return None, 0.0, "Unable to produce category suggestions.", "expense"
+            top = candidates[0]
+            return top["id"], top["confidence"], top["reasoning"], top["type"]
         except Exception as e:
             print(f"AI Error: {e}")
             return None, 0.0, f"Error: {e}", "expense"
