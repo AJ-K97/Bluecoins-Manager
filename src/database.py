@@ -10,9 +10,11 @@ from dotenv import load_dotenv
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://bluecoins_user:bluecoins_password@localhost/bluecoins_db")
 
+from sqlalchemy import MetaData
+
 engine = create_async_engine(DATABASE_URL, echo=False, connect_args={"statement_cache_size": 0})
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-Base = declarative_base()
+Base = declarative_base(metadata=MetaData(schema="public"))
 
 class Account(Base):
     __tablename__ = "accounts"
