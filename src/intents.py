@@ -11,40 +11,11 @@ class IntentAI:
         """
         Classifies the user's natural language input into a specific intent and extracts entities.
         """
+        from src.persona import BluecoinsPersona
         prompt = f"""
-You are an intent classifier for a personal finance bot (Bluecoins Manager).
-Analyze the user message and return a JSON object with the detected intent and entities.
-
-Intents:
-- ADD_TRANSACTION: User wants to log a new expense or income.
-- ADD_ACCOUNT: User wants to create a new bank/financial account.
-- ADD_CATEGORY: User wants to create a new budget category.
-- LIST_ACCOUNTS: User wants to see their accounts.
-- LIST_CATEGORIES: User wants to see their budget structure.
-- LIST_RULEBOOK: User wants to see AI knowledge or fine-tune examples.
-- REVIEW_QUEUE: User wants to process pending transactions.
-- MODIFY_TRANSACTION: User wants to edit a specific existing transaction.
-- CHAT_QUERY: Default intent for general questions, reports, or advice.
-
-Entities to extract:
-- amount (float)
-- description (string)
-- name (string - for account or category)
-- transaction_id (integer - for modifications)
+{BluecoinsPersona.get_intent_prompt()}
 
 User Message: "{text}"
-
-Return JSON ONLY in this format:
-{{
-  "intent": "INTENT_NAME",
-  "entities": {{
-    "amount": null,
-    "description": null,
-    "name": null,
-    "transaction_id": null
-  }},
-  "confidence": 0.0-1.0
-}}
 """
         try:
             response = await self.client.chat(model=self.model, messages=[

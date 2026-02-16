@@ -17,6 +17,7 @@ from src.database import (
     LLMSkill,
     Transaction,
 )
+from src.persona import BluecoinsPersona
 
 
 @dataclass
@@ -231,7 +232,8 @@ class LocalLLMPipeline:
         for c in chunks:
             vec = _safe_json_loads(c.embedding_vector, [])
             score = _cosine_similarity(qvec, vec)
-            if score <= 0:
+            # Filter out low-relevance hits (noise)
+            if score < 0.25:
                 continue
             scored.append(
                 RetrievalHit(
@@ -255,13 +257,7 @@ class LocalLLMPipeline:
 
         skill_block = "\n".join(skill_lines) if skill_lines else "- No custom skills configured yet."
 
-        return (
-            "You are a local financial assistant that must follow user-defined skills and use only available context.\n"
-            "When uncertain, say what data is missing. Do not invent transactions.\n"
-            "Prefer concrete numbers and short bullet points in answers.\n\n"
-            "Active Skills:\n"
-            f"{skill_block}"
-        )
+        return BluecoinsPersona.get_chat_prompt(skill_block)
 
     async def answer(self, session, query: str, top_k: int = 8) -> Dict[str, Any]:
         hits = await self.retrieve(session, query, top_k=top_k)
