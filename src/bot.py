@@ -1079,7 +1079,7 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as log_err:
         logging.error(f"Logging FAILED: {log_err}")
     
-    if confidence > 0.7 and intent != "CHAT_QUERY":
+    if confidence > 0.7 and intent not in ["CHAT_QUERY", "LIST_TRANSACTIONS"]:
         if intent == "GREETING":
             await update.message.reply_text("👋 Hello! How can I help you with your finances today?")
             
@@ -1117,6 +1117,23 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
              if len(reply) > 4000:
                 reply = reply[:4000] + "..."
              await update.message.reply_text(reply, parse_mode="HTML")
+             
+             # Log the RAG response
+             try:
+                 async with AsyncSessionLocal() as session:
+                     await log_interaction(
+                         session=session,
+                         user_id=update.effective_user.id,
+                         username=update.effective_user.username,
+                         message_content=user_text,
+                         detected_intent=intent,
+                         confidence_score=confidence,
+                         entities=entities,
+                         action_taken="RAG_REPLY",
+                         response_content=reply
+                     )
+             except Exception as log_err:
+                 logging.error(f"RAG Logging FAILED: {log_err}")
              
         except Exception as e:
              logging.error(f"LLM Error: {e}")

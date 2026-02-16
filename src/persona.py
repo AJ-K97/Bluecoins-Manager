@@ -101,6 +101,7 @@ class BluecoinsPersona:
             "- `LIST_RULEBOOK`: User wants to see AI knowledge or fine-tune examples.\n"
             "- `REVIEW_QUEUE`: User wants to process pending transactions.\n"
             "- `MODIFY_TRANSACTION`: User wants to edit a specific existing transaction.\n"
+            "- `LIST_TRANSACTIONS`: User wants to see a list of recent transactions or search for specific ones.\n"
             "- `GREETING`: User is saying hello, hi, or goodbye.\n"
             "- `CHAT_QUERY`: Default intent for general questions, reports, or advice.\n\n"
             "**Entities to extract:**\n"

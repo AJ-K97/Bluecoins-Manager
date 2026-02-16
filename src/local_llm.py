@@ -232,7 +232,8 @@ class LocalLLMPipeline:
             "- end_date (YYYY-MM-DD)\n"
             "- min_amount (float)\n"
             "- max_amount (float)\n"
-            "- account_name (string)\n\n"
+            "- account_name (string)\n"
+            "- category_name (string)\n\n"
             "Example:\n"
             "User: 'transactions over $500 last month'\n"
             "Output: {\"min_amount\": 500, \"start_date\": \"2024-01-01\", \"end_date\": \"2024-01-31\"}\n\n"
@@ -291,6 +292,15 @@ class LocalLLMPipeline:
                 from src.database import Account
                 stmt = stmt.join(Account, Transaction.account_id == Account.id)
                 stmt = stmt.where(Account.name.ilike(f"%{filters['account_name']}%"))
+            
+            if filters.get("category_name"):
+                from src.database import Category
+                # Transaction already joined? No.
+                # Transaction is joined at line 262.
+                # We need to join Transaction using its relation?
+                # or just join Category on Transaction.category_id
+                stmt = stmt.join(Category, Transaction.category_id == Category.id)
+                stmt = stmt.where(Category.name.ilike(f"%{filters['category_name']}%"))
 
         rows = await session.execute(stmt)
         chunks = rows.scalars().all()
