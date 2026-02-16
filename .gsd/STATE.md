@@ -16,5 +16,5 @@
 Phase 14 executed successfully. Implemented `InteractionLog` schema and integrated logging into the bot's workflow. All user messages and intent classifications are now recorded for debugging.
 
 ## Next Steps
-1. Monitor logs to debug "transactions for Feb 2026" intent misclassification.
+1. /plan 18 (Remote LLM Integration)
 2. Awaiting further feature requests.

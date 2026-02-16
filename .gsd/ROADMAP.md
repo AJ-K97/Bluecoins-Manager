@@ -99,23 +99,31 @@
 - **Objectives**:
     - Define a distinct personality for the bot (e.g., professional, witty, concise).
     - Ensure tone consistency across all interaction types.
-- **Status**: ⬜ Not Started
+- **Status**: ✅ Complete
 
 ### Phase 16: Enhanced Context Retrieval
 - **Goal**: Improve how the bot uses history and project data for better context.
 - **Objectives**:
     - Optimise RAG retrieval for relevant transaction history.
     - Implement smarter context window management.
-- **Status**: ⬜ Not Started
+- **Status**: ✅ Complete
 
 ### Phase 17: Response Formatting
 - **Goal**: Ensure outputs are structured, readable, and accurate.
 - **Objectives**:
     - Standardise Markdown usage for tables, lists, and code blocks.
     - Improve readability of complex financial data.
+- **Status**: ✅ Complete
+
+### Phase 18: Remote LLM Integration
+- **Goal**: Offload LLM inference to a dedicated server via Tailscale/Ollama.
+- **Objectives**:
+    - Configure `LocalLLMPipeline` to support remote host URLs.
+    - Implement connection testing and fallback logic.
+    - Optimise timeout and retry settings for network latency.
 - **Status**: ⬜ Not Started
 
-### Phase 18: Quality Assurance & Evals
+### Phase 19: Quality Assurance & Evals
 - **Goal**: Implement evaluation metrics to measure improvement.
 - **Objectives**:
     - key performance indicators for response quality.
