@@ -150,8 +150,11 @@ class LLMFineTuneExample(Base):
     response = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-# Add back_populates to Transaction
+    transaction = relationship("Transaction", back_populates="finetune_examples")
+
+# Add relationships to Transaction
 Transaction.memory_entries = relationship("AIMemory", back_populates="transaction", cascade="save-update, merge")
+Transaction.finetune_examples = relationship("LLMFineTuneExample", back_populates="transaction", cascade="save-update, merge")
 
 async def init_db():
     async with engine.begin() as conn:
