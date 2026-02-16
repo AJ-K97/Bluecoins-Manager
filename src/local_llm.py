@@ -51,11 +51,13 @@ def _cosine_similarity(v1: List[float], v2: List[float]) -> float:
     return dot / (math.sqrt(norm1) * math.sqrt(norm2))
 
 
+from src.ai_config import get_ollama_client
+
 class LocalLLMPipeline:
     def __init__(self, chat_model: str = "llama3.1:8b", embedding_model: str = "nomic-embed-text"):
         self.chat_model = chat_model
         self.embedding_model = embedding_model
-        self.client = ollama.AsyncClient(host=os.getenv("OLLAMA_HOST"))
+        self.client = get_ollama_client()
 
     async def _embed_text(self, text: str) -> List[float]:
         text = (text or "").strip()

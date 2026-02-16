@@ -3,9 +3,11 @@ import ollama
 from sqlalchemy import text
 from src.database import get_db, AsyncSessionLocal
 
+from src.ai_config import get_ollama_client
+
 class FinanceChatAI:
-    def __init__(self, model="llama3.2:3b"):
-        self.client = ollama.AsyncClient()
+    def __init__(self, model="llama3.1:8b"):
+        self.client = get_ollama_client()
         self.model = model
         
         # Schema for the LLM
