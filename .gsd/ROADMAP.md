@@ -70,13 +70,24 @@
     - **Parameter Extraction**: Automatically extract names, amounts, and IDs from chat messages.
 - **Status**: ✅ Complete
 
-### Phase 13: Data Integrity & Cascading Deletes
-**Status**: ⬜ Not Started
-**Objective**: Ensure that deleting a transaction automatically removes all related AI memory entries, fine-tune examples, and knowledge chunks to prevent orphaned data.
+### Phase 13: AI Memory Persistence (Soft Detachment)
+**Status**: ✅ Complete
+**Objective**: Update database schema and logic so that deleting a transaction does NOT delete its corresponding AI memory entries. Instead, the link is nulled out, allowing the AI to continue benefiting from the historical pattern and reasoning.
 **Depends on**: Phase 12
 
 **Tasks**:
 - [ ] TBD (run /plan 13 to create)
+
+**Verification**:
+- TBD
+
+### Phase 14: Interaction Logging & Audit Trail
+**Status**: ⬜ Not Started
+**Objective**: Implement a comprehensive logging system to record user inputs, intent classification confidence, and bot actions. This will help debug misclassified queries (e.g., "transactions for Feb 2026" triggering Account Management).
+**Depends on**: Phase 13
+
+**Tasks**:
+- [ ] TBD (run /plan 14 to create)
 
 **Verification**:
 - TBD
