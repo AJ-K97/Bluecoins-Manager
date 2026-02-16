@@ -54,6 +54,14 @@
     - **Aesthetics**: Use rich Markdown, emojis, and consistent formatting for all bot responses.
 - **Status**: ✅ Complete
 
-### Phase 10: Refinement & Verification
+### Phase 10: Advanced Resource Management
+- **Goal**: Full CRUD management of AI rulebooks, categories, and transactions via bot.
+- **Key Features**:
+    - **Rulebook Management**: List, add, and delete AI Fine-tune examples and Knowledge chunks.
+    - **Resource CRUD**: Commands to edit existing transactions and categories.
+    - **Interactive Forms**: Use conversational flows to update database records.
+- **Status**: ⬜ Not Started
+
+### Phase 11: Refinement & Verification
 - **Goal**: Final testing, documentation, and polish.
 - **Status**: ⬜ Not Started
