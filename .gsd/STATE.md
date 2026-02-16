@@ -1,9 +1,9 @@
 # Project State
 
 ## Current Position
-- **Phase**: Phase 12 (Refinement & Verification)
-- **Status**: ✅ Complete
-- **Goal**: Comprehensive unit testing and real-world data generation for logic verification.
+- **Phase**: Phase 13 (AI Memory Persistence)
+- **Status**: Planning Complete
+- **Goal**: Implement soft-detachment of AI memory from deleted transactions.
 
 ## Last Session Summary
 Phase 12 executed successfully. Established testing infrastructure, generated synthetic data, and verified 11/11 logic tests across parsers, commands, and bot conversational flows.
