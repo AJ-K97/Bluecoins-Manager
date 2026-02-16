@@ -1,5 +1,5 @@
 
-from typing import List
+from typing import List, Any, Dict
 
 class BluecoinsPersona:
     """
@@ -20,6 +20,35 @@ class BluecoinsPersona:
     
     # Formats
     DATE_FMT = "%Y-%m-%d"
+
+    @staticmethod
+    def format_currency(amount: float) -> str:
+        """Formats a float as a currency string (e.g., $1,234.56)."""
+        return f"${amount:,.2f}"
+
+    @staticmethod
+    def format_sources(hits: List[Any]) -> str:
+        """
+        Formats a list of RetrievalHit objects into a Markdown source block.
+        Expects hits to have .metadata dict with 'date', 'description', 'amount'.
+        """
+        if not hits:
+            return ""
+
+        lines = ["\n\n**Sources:**"]
+        for i, hit in enumerate(hits, 1):
+            meta = hit.metadata
+            date = meta.get("date", "Unknown Date")
+            desc = meta.get("description", "Unknown Transaction")
+            amount = meta.get("amount", 0.0)
+            
+            # Try to shorten date to YYYY-MM-DD
+            if "T" in date:
+                date = date.split("T")[0]
+            
+            lines.append(f"{i}. {date} - {desc} (**{BluecoinsPersona.format_currency(amount)}**)")
+        
+        return "\n".join(lines)
     
     @staticmethod
     def _get_base_system_prompt() -> str:
@@ -50,6 +79,7 @@ class BluecoinsPersona:
             "- If the valid context is empty or irrelevant, politely say you don't have that information.\n"
             "- Prefer concrete numbers and short bullet points over long paragraphs.\n"
             "- Mention specific account names or categories if they appear in the context.\n"
+            "- **IMPORTANT**: Do NOT list the sources or transactions at the end. I will append the source list automatically.\n"
         )
         
         return f"{base}{skills_section}{instruction}"

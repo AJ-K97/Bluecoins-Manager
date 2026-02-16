@@ -348,8 +348,13 @@ class LocalLLMPipeline:
         )
 
         answer = await self._chat(system_prompt, user_prompt)
+        
+        # Append structured sources
+        source_block = BluecoinsPersona.format_sources(hits)
+        final_answer = f"{answer}{source_block}"
+        
         return {
-            "answer": answer,
+            "answer": final_answer,
             "contexts": [
                 {
                     "score": h.score,
