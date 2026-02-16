@@ -4,15 +4,22 @@ from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Boo
 import os
 from datetime import datetime
 from dotenv import load_dotenv
+from sqlalchemy import MetaData
 
 # Database Configuration
 # In production, use environment variables
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://bluecoins_user:bluecoins_password@localhost/bluecoins_db")
 
-from sqlalchemy import MetaData
-
-engine = create_async_engine(DATABASE_URL, echo=False, connect_args={"statement_cache_size": 0})
+engine = create_async_engine(
+    DATABASE_URL, 
+    echo=False, 
+    pool_pre_ping=True,
+    pool_recycle=300,
+    pool_size=5,
+    max_overflow=10,
+    connect_args={"statement_cache_size": 0}
+)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base(metadata=MetaData(schema="public"))
 
