@@ -44,7 +44,7 @@
 #### Phase 8.1: Historical Data Migration
 - **Goal**: Migrate existing historical transactions from local/home DB to Supabase.
 - **Objective**: Develop a synchronization or one-time migration script for historical data.
-- **Status**: ⏳ Future Task
+- **Status**: ✅ Complete
 
 ### Phase 9: Bot UX & Discoverability
 - **Goal**: Improve bot usability with menus, help commands, and better formatting.
