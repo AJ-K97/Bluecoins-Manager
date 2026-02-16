@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Boolean, Text
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Boolean, Text, BigInteger
 import os
 from datetime import datetime
 from dotenv import load_dotenv
@@ -157,7 +157,7 @@ class InteractionLog(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
-    user_id = Column(Integer, index=True)
+    user_id = Column(BigInteger, index=True)
     username = Column(String, nullable=True)
     message_content = Column(Text, nullable=True)
     detected_intent = Column(String, nullable=True, index=True)

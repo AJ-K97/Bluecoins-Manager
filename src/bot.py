@@ -1064,19 +1064,39 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     entities = intent_data.get("entities", {})
 
     # Log the interaction attempt
-    async with AsyncSessionLocal() as session:
-        await log_interaction(
-            session=session,
-            user_id=update.effective_user.id,
-            username=update.effective_user.username,
-            message_content=user_text,
-            detected_intent=intent,
-            confidence_score=confidence,
-            entities=entities,
-            action_taken="INTENT_DISPATCH" if confidence > 0.7 else "RAG_FALLBACK"
-        )
+    try:
+        async with AsyncSessionLocal() as session:
+            await log_interaction(
+                session=session,
+                user_id=update.effective_user.id,
+                username=update.effective_user.username,
+                message_content=user_text,
+                detected_intent=intent,
+                confidence_score=confidence,
+                entities=entities,
+                action_taken="INTENT_DISPATCH" if confidence > 0.7 else "RAG_FALLBACK"
+            )
+    except Exception as log_err:
+        logging.error(f"Logging FAILED: {log_err}")
     
-    if confidence > 0.7:
+    if confidence > 0.7 and intent != "CHAT_QUERY":
+        if intent == "GREETING":
+            await update.message.reply_text("👋 Hello! How can I help you with your finances today?")
+            
+            # Log the direct response
+            async with AsyncSessionLocal() as session:
+                await log_interaction(
+                    session=session,
+                    user_id=update.effective_user.id,
+                    username=update.effective_user.username,
+                    message_content=user_text,
+                    detected_intent=intent,
+                    confidence_score=confidence,
+                    entities=entities,
+                    action_taken="REPLY_GREETING"
+                )
+            return
+
         await handle_nl_dispatch(update, context, intent_data)
         return
 
@@ -1098,7 +1118,6 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply = reply[:4000] + "..."
              await update.message.reply_text(reply, parse_mode="HTML")
              
-             # Log RAG response key info (optional update to previous log entry, but for now simple append is fine or just rely on action_taken)
         except Exception as e:
              logging.error(f"LLM Error: {e}")
              await update.message.reply_text("🤖 I'm having trouble thinking right now. Is Ollama running?")
