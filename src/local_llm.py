@@ -216,16 +216,83 @@ class LocalLLMPipeline:
                 created += 1
 
         await session.commit()
+        await session.commit()
         return {"created": created, "updated": updated, "skipped": skipped, "total": len(txs)}
 
-    async def retrieve(self, session, query: str, top_k: int = 8) -> List[RetrievalHit]:
+    async def extract_search_filters(self, query: str) -> Dict[str, Any]:
+        """
+        Uses LLM to extract structured filters (date, amount, etc.) from the user query.
+        """
+        system_prompt = (
+            "You are a sophisticated query parser for a financial database.\n"
+            "Extract search filters from the user's natural language query.\n"
+            "Return JSON ONLY.\n\n"
+            "Supported Keys:\n"
+            "- start_date (YYYY-MM-DD)\n"
+            "- end_date (YYYY-MM-DD)\n"
+            "- min_amount (float)\n"
+            "- max_amount (float)\n"
+            "- account_name (string)\n\n"
+            "Example:\n"
+            "User: 'transactions over $500 last month'\n"
+            "Output: {\"min_amount\": 500, \"start_date\": \"2024-01-01\", \"end_date\": \"2024-01-31\"}\n\n"
+            f"Current Date: {datetime.now().strftime('%Y-%m-%d')}"
+        )
+        
+        try:
+            resp = await self._chat(system_prompt, query)
+            # Clean response (sometimes LLMs add markdown code blocks)
+            cleaned = resp.replace("```json", "").replace("```", "").strip()
+            filters = json.loads(cleaned)
+            return filters
+        except Exception as e:
+            # Fallback to empty filters on error
+            print(f"Filter extraction failed: {e}")
+            return {}
+
+    async def retrieve(self, session, query: str, top_k: int = 8, filters: Dict[str, Any] = None) -> List[RetrievalHit]:
         qvec = await self._embed_text(query)
         if not qvec:
             return []
 
-        rows = await session.execute(
-            select(LLMKnowledgeChunk).where(LLMKnowledgeChunk.embedding_model == self.embedding_model)
+        # Start with base query
+        # We need to join LLMKnowledgeChunk with Transaction to apply filters
+        stmt = (
+            select(LLMKnowledgeChunk)
+            .join(Transaction, LLMKnowledgeChunk.source_id == Transaction.id)
+            .where(
+                LLMKnowledgeChunk.embedding_model == self.embedding_model,
+                LLMKnowledgeChunk.source_type == "transaction"
+            )
         )
+
+        # Apply Filters
+        if filters:
+            if filters.get("start_date"):
+                try:
+                    stmt = stmt.where(Transaction.date >= datetime.strptime(filters["start_date"], "%Y-%m-%d"))
+                except ValueError: pass
+            if filters.get("end_date"):
+                try:
+                    stmt = stmt.where(Transaction.date <= datetime.strptime(filters["end_date"], "%Y-%m-%d"))
+                except ValueError: pass
+            if filters.get("min_amount") is not None:
+                stmt = stmt.where(Transaction.amount >= float(filters["min_amount"]))
+            if filters.get("max_amount") is not None:
+                stmt = stmt.where(Transaction.amount <= float(filters["max_amount"]))
+            if filters.get("account_name"):
+                # Case-insensitive partial match? Or join Account table? 
+                # Joined transaction has account_id, but we need name. 
+                # Let's join Account as well if needed, or rely on metadata/denormalization?
+                # Transaction schema has relation 'account'.
+                # Let's do a join.
+                # Note: Transaction is already joined. We need another join?
+                # We can join relation `Transaction.account`
+                from src.database import Account
+                stmt = stmt.join(Account, Transaction.account_id == Account.id)
+                stmt = stmt.where(Account.name.ilike(f"%{filters['account_name']}%"))
+
+        rows = await session.execute(stmt)
         chunks = rows.scalars().all()
 
         scored: List[RetrievalHit] = []
@@ -260,7 +327,12 @@ class LocalLLMPipeline:
         return BluecoinsPersona.get_chat_prompt(skill_block)
 
     async def answer(self, session, query: str, top_k: int = 8) -> Dict[str, Any]:
-        hits = await self.retrieve(session, query, top_k=top_k)
+        # 1. Parse Filters
+        filters = await self.extract_search_filters(query)
+        
+        # 2. Retrieve with filters
+        hits = await self.retrieve(session, query, top_k=top_k, filters=filters)
+        
         context_block = "\n\n".join(
             [f"[score={h.score:.4f}]\n{h.content}" for h in hits]
         )
