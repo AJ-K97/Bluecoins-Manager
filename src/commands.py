@@ -798,7 +798,7 @@ async def delete_transaction(session, tx_id):
     await session.commit()
     return True, "Transaction deleted."
 
-async def add_transaction(session, date, amount, description, account_name, category_id=None):
+async def add_transaction(session, date, amount, description, account_name, category_id=None, tx_type=None, confidence=None, decision_reason=None, is_verified=None):
     # 1. Resolve Account
     stmt = select(Account).where(Account.name == account_name)
     result = await session.execute(stmt)
@@ -817,12 +817,12 @@ async def add_transaction(session, date, amount, description, account_name, cate
         tx_date = date
 
     # 3. AI Categorization or Validation
-    confidence = 1.0
-    is_verified = True
-    ai_reasoning = "Manual Entry"
-    tx_type = "expense"
-    decision_state = "auto_approved"
-    decision_reason = "Manual Entry"
+    confidence = confidence if confidence is not None else 1.0
+    is_verified = is_verified if is_verified is not None else True
+    ai_reasoning = decision_reason if decision_reason else "Manual Entry"
+    tx_type = tx_type if tx_type else "expense"
+    decision_state = "auto_approved" if is_verified else "needs_review"
+    decision_reason = decision_reason if decision_reason else "Manual Entry"
     
     if category_id:
         # Validate Category

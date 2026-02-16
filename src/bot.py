@@ -6,16 +6,23 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler, CallbackQueryHandler
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, BotCommand
 from sqlalchemy import select, func
-from src.database import init_db, Account, Transaction, AsyncSessionLocal, Category
+from src.database import (
+    AsyncSessionLocal, Account, Transaction, Category, 
+    LLMKnowledgeChunk, LLMFineTuneExample, LLMSkill
+)
 from src.parser import BankParser
 from src.ai import CategorizerAI
 from src.local_llm import LocalLLMPipeline
+from src.intents import IntentAI
 
 from src.commands import list_accounts, get_queue_stats, add_transaction, get_queue_transactions, mark_transaction_verified, update_transaction_category, get_category_display_from_values
 
 
 # States
-INPUT_DETAILS, SELECT_ACCOUNT, SELECT_CATEGORY_NUMBER, CONFIRM_NEW_CATEGORY = range(4)
+(INPUT_DETAILS, SELECT_ACCOUNT, SELECT_CATEGORY_NUMBER, CONFIRM_NEW_CATEGORY, 
+ INPUT_RULEBOOK_TEXT, SELECT_RULEBOOK_TYPE,
+ INPUT_ACCOUNT_NAME, INPUT_ACCOUNT_INST,
+ INPUT_CATEGORY_NAME, INPUT_CATEGORY_TYPE, INPUT_CATEGORY_PARENT) = range(11)
 # Review States (managed via callback data mostly, but could use states if we want conversation)
 
 
@@ -41,6 +48,467 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=markup
     )
 
+async def rulebook_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("📚 List Knowledge", callback_data="rb_list_k")],
+        [InlineKeyboardButton("🎯 List Examples", callback_data="rb_list_e")],
+        [InlineKeyboardButton("➕ Add Entry", callback_data="rb_add_start")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    # Filter out or escape MarkdownV2 special characters
+    await update.message.reply_text(
+        "📝 *AI Rulebook Management*\n\n"
+        "Configure how the AI thinks and categorizes:",
+        parse_mode="Markdown",
+        reply_markup=reply_markup
+    )
+
+async def rb_list_knowledge(query, session):
+    res = await session.execute(select(LLMKnowledgeChunk).order_by(LLMKnowledgeChunk.created_at.desc()).limit(10))
+    chunks = res.scalars().all()
+    if not chunks:
+        await query.edit_message_text("No knowledge chunks found.")
+        return
+    
+    msg = "📚 *Recently Added Knowledge:*\n\n"
+    keyboard = []
+    for c in chunks:
+        # Truncate content for display
+        tiny_content = (c.content[:50] + '...') if len(c.content) > 50 else c.content
+        msg += f"• `ID {c.id}`: {tiny_content}\n"
+        keyboard.append([InlineKeyboardButton(f"🗑️ Delete {c.id}", callback_data=f"rb_del_k_{c.id}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="rb_main")])
+    await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def rb_list_examples(query, session):
+    res = await session.execute(select(LLMFineTuneExample).order_by(LLMFineTuneExample.created_at.desc()).limit(10))
+    examples = res.scalars().all()
+    if not examples:
+        await query.edit_message_text("No fine-tune examples found.")
+        return
+    
+    msg = "🎯 *Recent Training Examples:*\n\n"
+    keyboard = []
+    for e in examples:
+        msg += f"• `ID {e.id}`: {e.prompt[:30]}... -> {e.response[:20]}...\n"
+        keyboard.append([InlineKeyboardButton(f"🗑️ Delete {e.id}", callback_data=f"rb_del_e_{e.id}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="rb_main")])
+    await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def rb_delete_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    # format: rb_del_[k|e]_ID
+    parts = query.data.split("_")
+    rb_type = parts[2]
+    rb_id = int(parts[3])
+    
+    async with AsyncSessionLocal() as session:
+        if rb_type == "k":
+            obj = await session.get(LLMKnowledgeChunk, rb_id)
+        else:
+            obj = await session.get(LLMFineTuneExample, rb_id)
+            
+        if obj:
+            await session.delete(obj)
+            await session.commit()
+            await query.edit_message_text(f"✅ Deleted entry `{rb_id}`.", parse_mode="Markdown")
+        else:
+            await query.edit_message_text(f"❌ Entry `{rb_id}` not found.")
+    
+    # Return to main after a short delay or just stay here? 
+    # Let's show back button
+    keyboard = [[InlineKeyboardButton("🔙 Back to Rulebook", callback_data="rb_main")]]
+    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def rulebook_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    async with AsyncSessionLocal() as session:
+        if data == "rb_list_k":
+            await rb_list_knowledge(query, session)
+        elif data == "rb_list_e":
+            await rb_list_examples(query, session)
+        elif data.startswith("rb_del_"):
+            await rb_delete_entry(update, context)
+        elif data == "rb_main":
+             keyboard = [
+                [InlineKeyboardButton("📚 List Knowledge", callback_data="rb_list_k")],
+                [InlineKeyboardButton("🎯 List Examples", callback_data="rb_list_e")],
+                [InlineKeyboardButton("➕ Add Entry", callback_data="rb_add_start")]
+            ]
+             await query.edit_message_text(
+                "📝 *AI Rulebook Management*\n\n"
+                "Configure how the AI thinks and categorizes:",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+async def account_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    async with AsyncSessionLocal() as session:
+        if data == "acc_list":
+            accounts = await list_accounts(session)
+            if not accounts:
+                await query.edit_message_text("No accounts found.")
+                return
+            msg = "📁 *Your Accounts:*\n\n"
+            keyboard = []
+            for acc in accounts:
+                msg += f"• `{acc.name}` \({acc.institution}\)\n"
+                keyboard.append([InlineKeyboardButton(f"🗑️ Delete {acc.name}", callback_data=f"acc_del_{acc.id}")])
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="acc_main")])
+            await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        
+        elif data.startswith("acc_del_"):
+            acc_id = int(data.split("_")[2])
+            acc = await session.get(Account, acc_id)
+            if acc:
+                await session.delete(acc)
+                await session.commit()
+                await query.edit_message_text(f"✅ Account `{acc.name}` deleted.")
+            else:
+                await query.edit_message_text("❌ Account not found.")
+            keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="acc_main")]]
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+
+        elif data == "acc_main":
+            keyboard = [
+                [InlineKeyboardButton("📁 List Accounts", callback_data="acc_list")],
+                [InlineKeyboardButton("➕ Add Account", callback_data="acc_add_start")],
+            ]
+            await query.edit_message_text("📁 *Account Management*\n\nManage your financial institutions:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    async with AsyncSessionLocal() as session:
+        if data == "cat_list":
+            result = await session.execute(select(Category).order_by(Category.parent_name, Category.name))
+            categories = result.scalars().all()
+            if not categories:
+                 await query.edit_message_text("No categories found.")
+                 return
+            
+            tree = {}
+            for c in categories:
+                parent = c.parent_name or "Uncategorized"
+                if parent not in tree: tree[parent] = []
+                tree[parent].append(c)
+            
+            msg = "🏷️ *Your Categories:*\n\n"
+            keyboard = []
+            for parent, kids in sorted(tree.items()):
+                msg += f"📁 *{parent}*\n"
+                for kid in kids:
+                    msg += f"  └─ `{kid.name}` _({kid.type})_\n"
+                    keyboard.append([InlineKeyboardButton(f"🗑️ Del {kid.name}", callback_data=f"cat_del_{kid.id}")])
+            
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="cat_main")])
+            # Limit to top 8 + back to avoid keyboard too large
+            await query.edit_message_text(msg[:4000], parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard[:8] + [keyboard[-1]]))
+        
+        elif data.startswith("cat_del_"):
+            cat_id = int(data.split("_")[2])
+            cat = await session.get(Category, cat_id)
+            if cat:
+                await session.delete(cat)
+                await session.commit()
+                await query.edit_message_text(f"✅ Category `{cat.name}` deleted.")
+            else:
+                await query.edit_message_text("❌ Category not found.")
+            keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="cat_main")]]
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+
+        elif data == "cat_main":
+            keyboard = [
+                [InlineKeyboardButton("🏷️ List Categories", callback_data="cat_list")],
+                [InlineKeyboardButton("➕ Add Category", callback_data="cat_add_start")],
+            ]
+            await query.edit_message_text("🏷️ *Category Management*\n\nOrganize your spending structure:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def acc_add_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("🏦 *Step 1/2: Enter account name (e.g. My Bank):*", parse_mode="Markdown")
+    return INPUT_ACCOUNT_NAME
+
+async def acc_receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = update.message.text
+    context.user_data["acc_name"] = name
+    await update.message.reply_text(f"🏦 *Step 2/2: Enter institution for '{name}' (e.g. HSBC):*", parse_mode="Markdown")
+    return INPUT_ACCOUNT_INST
+
+async def acc_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inst = update.message.text
+    name = context.user_data.get("acc_name")
+    
+    async with AsyncSessionLocal() as session:
+        try:
+            session.add(Account(name=name, institution=inst))
+            await session.commit()
+            await update.message.reply_text(f"✅ Account *{name}* added\.", parse_mode="MarkdownV2")
+        except Exception as e:
+            await session.rollback()
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+    return ConversationHandler.END
+
+async def cat_add_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("🏷️ *Step 1/3: Enter category name (e.g. Coffee):*", parse_mode="Markdown")
+    return INPUT_CATEGORY_NAME
+
+async def cat_receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = update.message.text
+    context.user_data["cat_name"] = name
+    
+    keyboard = [
+        [InlineKeyboardButton("📉 Expense", callback_data="cat_type_expense")],
+        [InlineKeyboardButton("📈 Income", callback_data="cat_type_income")]
+    ]
+    await update.message.reply_text(f"🏷️ *Step 2/3: Select type for '{name}':*", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    return INPUT_CATEGORY_TYPE
+
+async def cat_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    ctype = query.data.split("_")[2]
+    context.user_data["cat_type"] = ctype
+    
+    await query.edit_message_text("🏷️ *Step 3/3: Enter parent category (or 'none'):*", parse_mode="Markdown")
+    return INPUT_CATEGORY_PARENT
+
+async def cat_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    parent = update.message.text
+    if parent.lower() == "none":
+        parent = None
+    name = context.user_data.get("cat_name")
+    ctype = context.user_data.get("cat_type")
+    
+    async with AsyncSessionLocal() as session:
+        try:
+            session.add(Category(name=name, parent_name=parent, type=ctype))
+            await session.commit()
+            label = f"{parent} > {name}" if parent else name
+            await update.message.reply_text(f"✅ Category *{label}* added\.", parse_mode="MarkdownV2")
+        except Exception as e:
+            await session.rollback()
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+    return ConversationHandler.END
+
+async def rb_add_start_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    keyboard = [
+        [InlineKeyboardButton("📚 Knowledge Chunk", callback_data="rb_type_k")],
+        [InlineKeyboardButton("🎯 Fine-Tune Example", callback_data="rb_type_e")],
+        [InlineKeyboardButton("🔙 Cancel", callback_data="rb_main")]
+    ]
+    await query.edit_message_text("📄 *Step 1/2: Select entry type:*", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    return SELECT_RULEBOOK_TYPE
+
+async def handle_nl_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE, intent_data: dict):
+    intent = intent_data.get("intent")
+    entities = intent_data.get("entities", {})
+    
+    if intent == "ADD_ACCOUNT":
+        context.user_data["nl_action"] = "ADD_ACCOUNT"
+        if entities.get("name"):
+            context.user_data["nl_data"] = {"name": entities["name"]}
+            await update.message.reply_text(f"🏦 *Adding account '{entities['name']}'.*\nWhat is the institution name?")
+            context.user_data["nl_state"] = "WAIT_INST"
+        else:
+            context.user_data["nl_data"] = {}
+            await update.message.reply_text("🏦 *Account Creation:* What's the name of the account?")
+            context.user_data["nl_state"] = "WAIT_NAME"
+            
+    elif intent == "ADD_CATEGORY":
+        context.user_data["nl_action"] = "ADD_CATEGORY"
+        if entities.get("name"):
+            context.user_data["nl_data"] = {"name": entities["name"]}
+            keyboard = [[InlineKeyboardButton("📉 Expense", callback_data="cat_nl_expense")], [InlineKeyboardButton("📈 Income", callback_data="cat_nl_income")]]
+            await update.message.reply_text(f"🏷️ *Adding category '{entities['name']}'.*\nIs it an Expense or Income?", reply_markup=InlineKeyboardMarkup(keyboard))
+            context.user_data["nl_state"] = "WAIT_TYPE"
+        else:
+            context.user_data["nl_data"] = {}
+            await update.message.reply_text("🏷️ *Category Creation:* What's the name?")
+            context.user_data["nl_state"] = "WAIT_NAME"
+
+    elif intent == "ADD_TRANSACTION":
+        context.user_data["nl_action"] = "ADD_TRANSACTION"
+        if entities.get("amount") and entities.get("description"):
+            context.user_data["nl_data"] = {"amount": float(entities["amount"]), "description": entities["description"]}
+            # Pick account
+            async with AsyncSessionLocal() as session:
+                accounts = await list_accounts(session)
+                keyboard = [[InlineKeyboardButton(acc.name, callback_data=f"tx_nl_acc_{acc.name}")] for acc in accounts]
+                await update.message.reply_text(
+                    f"💰 *Logging Transaction:* `{entities['amount']:.2f}` for `{entities['description']}`\n🏦 _Which account was this from?_ ",
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                context.user_data["nl_state"] = "WAIT_ACC"
+        else:
+            context.user_data["nl_data"] = {}
+            await update.message.reply_text("💰 *New Transaction:* Please tell me the amount and what it was for (e.g. '50 for dinner')")
+            context.user_data["nl_state"] = "WAIT_DETAILS"
+
+    elif intent == "LIST_ACCOUNTS":
+        return await accounts_command(update, context)
+    elif intent == "LIST_CATEGORIES":
+        return await categories_command(update, context)
+    elif intent == "LIST_RULEBOOK":
+        return await rulebook_command(update, context)
+    elif intent == "REVIEW_QUEUE":
+        return await review_command(update, context)
+    elif intent == "MODIFY_TRANSACTION":
+        tx_id = entities.get("transaction_id")
+        if tx_id:
+            async with AsyncSessionLocal() as session:
+                tx = await session.get(Transaction, int(tx_id))
+                if tx:
+                    await review_single_transaction(update, context, tx, session)
+                else:
+                    await update.message.reply_text(f"❌ Transaction `{tx_id}` not found.")
+        else:
+            await update.message.reply_text("📋 Which transaction would you like to modify? (Please provide the ID)")
+            
+    return None
+
+async def nl_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    if data.startswith("cat_nl_"):
+        ctype = data.split("_")[2] # expense or income
+        context.user_data["nl_data"]["type"] = ctype
+        context.user_data["nl_state"] = "WAIT_PARENT"
+        await query.edit_message_text(f"🏷️ Selected: *{ctype.title()}*.\nWho is the parent category? (or reply 'None')", parse_mode="Markdown")
+        
+    elif data.startswith("tx_nl_acc_"):
+        acc_name = data.replace("tx_nl_acc_", "")
+        context.user_data["nl_data"]["account"] = acc_name
+        
+        # Next step: Category selection via AI
+        amount = context.user_data["nl_data"]["amount"]
+        desc = context.user_data["nl_data"]["description"]
+        
+        await query.edit_message_text(f"💰 Account: *{acc_name}*.\n🧠 Thinking of a category...", parse_mode="Markdown")
+        
+        async with AsyncSessionLocal() as session:
+            ai = CategorizerAI()
+            candidates = await ai.suggest_category_candidates(desc, session, min_candidates=5)
+            context.user_data["candidates"] = candidates
+            
+            msg = f"🏷️ *Suggested Categories* for '{desc}':\n\n"
+            for i, c in enumerate(candidates, 1):
+                cid = c['id']
+                r = await session.execute(select(Category).where(Category.id == cid))
+                cat = r.scalar_one_or_none()
+                cat_path = f"{cat.parent_name} > {cat.name}" if cat and cat.parent_name else (cat.name if cat else f"ID {cid}")
+                msg += f"{i}. {cat_path} ({c['type']}) - {c['confidence']*100:.0f}%\n"
+            
+            msg += "\n*Reply with the number (e.g. 1)*"
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode="Markdown")
+            context.user_data["nl_state"] = "WAIT_CAT_NUM"
+
+async def nl_cat_number_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    candidates = context.user_data.get("candidates", [])
+    nl_data = context.user_data.get("nl_data", {})
+    
+    try:
+        selection = int(text)
+        if 1 <= selection <= len(candidates):
+            choice = candidates[selection - 1]
+            cat_id = choice.get('id')
+            
+            async with AsyncSessionLocal() as session:
+                from datetime import datetime
+                success, msg, tx = await add_transaction(
+                    session,
+                    date=datetime.now(),
+                    amount=nl_data["amount"],
+                    description=nl_data["description"],
+                    account_name=nl_data["account"],
+                    category_id=cat_id,
+                    tx_type=choice.get('type', 'expense'),
+                    decision_reason=choice.get('reasoning', 'NL Flow'),
+                    confidence=choice.get('confidence', 1.0)
+                )
+                if success:
+                    cat_name = choice.get('reasoning', 'Categorized') # fallback
+                    await update.message.reply_text(f"✅ Transaction Saved!\n💰 {nl_data['amount']:.2f} | {nl_data['description']}\n🏦 {nl_data['account']}")
+                    context.user_data.clear()
+                else:
+                    await update.message.reply_text(f"❌ Error: {msg}")
+        else:
+            await update.message.reply_text(f"Please enter a number between 1 and {len(candidates)}.")
+    except ValueError:
+        await update.message.reply_text("Please enter a valid number.")
+
+async def rb_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    rb_type = query.data.split("_")[2] # k or e
+    context.user_data["rb_type"] = rb_type
+    
+    label = "Knowledge (General Rule)" if rb_type == "k" else "Training Example (Prompt/Response)"
+    await query.edit_message_text(
+        f"✍️ *Step 2/2: Provide Content*\n\n"
+        f"Selected: `{label}`\n\n"
+        "Please message the text you'd like to add\.",
+        parse_mode="MarkdownV2"
+    )
+    return INPUT_RULEBOOK_TEXT
+
+async def rb_save_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    rb_type = context.user_data.get("rb_type")
+    
+    async with AsyncSessionLocal() as session:
+        if rb_type == "k":
+             from src.local_llm import LocalLLMPipeline
+             import json
+             llm = LocalLLMPipeline()
+             # We need embedding. reindex_transactions is the one that does it normally.
+             # We'll do it manually here for a single chunk.
+             vector = await llm._embed_text(text)
+             chunk = LLMKnowledgeChunk(
+                 source_type="manual",
+                 source_id=0,
+                 content=text,
+                 embedding_model=llm.embedding_model,
+                 embedding_vector=json.dumps(vector) if vector else "[]"
+             )
+             session.add(chunk)
+        else:
+             example = LLMFineTuneExample(
+                 source_transaction_id=0, # 0 means manual/synthetic
+                 prompt=text,
+                 response="User-defined behavior"
+             )
+             session.add(example)
+        
+        await session.commit()
+        await update.message.reply_text("✅ Rulebook entry saved and successfully indexed.")
+    return ConversationHandler.END
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🤖 *Bluecoins Manager Help*\n\n"
@@ -61,113 +529,29 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
 async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    async with AsyncSessionLocal() as session:
-        if not args:
-            # List behavior
-            accounts = await list_accounts(session)
-            if not accounts:
-                await update.message.reply_text("No accounts found.")
-                return
-            msg = "📁 *Your Accounts:*\n"
-            for acc in accounts:
-                msg += f"• `{acc.name}` \({acc.institution}\)\n"
-            await update.message.reply_text(msg, parse_mode="Markdown")
-            return
-
-        subcommand = args[0].lower()
-        if subcommand == "list":
-             accounts = await list_accounts(session)
-             if not accounts:
-                await update.message.reply_text("No accounts found.")
-                return
-             msg = "*Accounts:*\n"
-             for acc in accounts:
-                msg += f"- `{acc.name}` ({acc.institution})\n"
-             await update.message.reply_text(msg, parse_mode="Markdown")
-        
-        elif subcommand == "add":
-            if len(args) < 3:
-                 await update.message.reply_text("Usage: `/accounts add <name> <institution>`", parse_mode="Markdown")
-                 return
-            name = args[1]
-            institution = args[2]
-            
-            # Simple add check from bot
-            try:
-                session.add(Account(name=name, institution=institution))
-                await session.commit()
-                await update.message.reply_text(f"✅ Account `{name}` added.", parse_mode="Markdown")
-            except Exception as e:
-                await session.rollback()
-                await update.message.reply_text(f"❌ Error: {e}")
-        else:
-             await update.message.reply_text("Unknown subcommand. Use `list` or `add`.")
+    keyboard = [
+        [InlineKeyboardButton("📁 List Accounts", callback_data="acc_list")],
+        [InlineKeyboardButton("➕ Add Account", callback_data="acc_add_start")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "📁 *Account Management*\n\nManage your financial institutions:",
+        parse_mode="Markdown",
+        reply_markup=reply_markup
+    )
 
 
 async def categories_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    async with AsyncSessionLocal() as session:
-        subcommand = args[0].lower() if args else "list"
-        
-        if subcommand == "list":
-            # Hierarchical view similar to CLI
-            result = await session.execute(select(Category).order_by(Category.parent_name, Category.name))
-            categories = result.scalars().all()
-            if not categories:
-                 await update.message.reply_text("No categories found.")
-                 return
-            
-            # Group by Parent
-            tree = {}
-            for c in categories:
-                parent = c.parent_name or "Uncategorized"
-                if parent not in tree:
-                    tree[parent] = []
-                tree[parent].append(c)
-            
-            msg = "🏷️ *Your Categories:*\n\n"
-            for parent, kids in sorted(tree.items()):
-                msg += f"📁 *{parent}*\n"
-                for kid in kids:
-                    msg += f"  └─ `{kid.name}` _({kid.type})_\n"
-            
-            # Telegram has message length limits; might need splitting if too long
-            if len(msg) > 4000:
-                msg = msg[:4000] + "\n...(truncated)"
-                
-            await update.message.reply_text(msg, parse_mode="Markdown")
-            
-        elif subcommand == "add":
-             # Usage: /categories add <name> <type> [parent]
-             if len(args) < 3:
-                  await update.message.reply_text("Usage: `/categories add <name> <expense|income> [parent]`", parse_mode="Markdown")
-                  return
-             name = args[1]
-             ctype = args[2].lower()
-             parent = args[3] if len(args) > 3 else None
-             
-             if ctype not in ["expense", "income"]:
-                  await update.message.reply_text("Type must be 'expense' or 'income'.")
-                  return
-
-             # Check existence
-             stmt = select(Category).where(
-                 Category.name == name,
-                 Category.parent_name == parent,
-                 Category.type == ctype
-             )
-             existing = await session.execute(stmt)
-             if existing.scalar_one_or_none():
-                 await update.message.reply_text("Category already exists.")
-                 return
-             
-             session.add(Category(name=name, parent_name=parent, type=ctype))
-             await session.commit()
-             label = f"{parent} > {name}" if parent else name
-             await update.message.reply_text(f"✅ Category `{label}` added.", parse_mode="Markdown")
-        else:
-             await update.message.reply_text("Unknown subcommand. Use `list` or `add`.")
+    keyboard = [
+        [InlineKeyboardButton("🏷️ List Categories", callback_data="cat_list")],
+        [InlineKeyboardButton("➕ Add Category", callback_data="cat_add_start")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "🏷️ *Category Management*\n\nOrganize your spending structure:",
+        parse_mode="Markdown",
+        reply_markup=reply_markup
+    )
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with AsyncSessionLocal() as session:
@@ -288,6 +672,43 @@ async def select_account_callback(update: Update, context: ContextTypes.DEFAULT_
         await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode="Markdown")
         return SELECT_CATEGORY_NUMBER
 
+async def review_single_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE, tx: Transaction, session):
+    """Common logic to display a transaction for review/editing."""
+    # Format Message
+    cat_str = "Uncategorized"
+    if tx.category:
+        cat_str = f"{tx.category.parent_name} > {tx.category.name}"
+    elif tx.type == "transfer":
+        cat_str = "Transfer"
+        
+    msg = (
+        f"🔎 *Review Transaction ID: {tx.id}*\n"
+        f"📅 {tx.date.strftime('%Y-%m-%d')}\n"
+        f"🏦 {tx.account.name if tx.account else 'Unknown'}\n"
+        f"📝 *{tx.description}*\n"
+        f"💰 *{tx.amount:.2f}*\n"
+        f"🏷️ {cat_str} `({tx.type})`\n"
+        f"🤖 Conf: {tx.confidence_score:.2f} | Rsn: {tx.decision_reason or 'None'}"
+    )
+    
+    # Buttons
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Approve", callback_data=f"rev_ok_{tx.id}"),
+            InlineKeyboardButton("⏭️ Skip", callback_data=f"rev_skip_{tx.id}"),
+        ],
+        [
+            InlineKeyboardButton("✏️ Edit Category", callback_data=f"rev_cat_{tx.id}"),
+            InlineKeyboardButton("🗑️ Delete", callback_data=f"rev_del_{tx.id}"),
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+
 async def review_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fetches one pending transaction and shows it."""
     async with AsyncSessionLocal() as session:
@@ -297,39 +718,7 @@ async def review_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ Review Queue is empty!")
             return
         
-        tx = queue[0]
-        
-        # Format Message
-        cat_str = "Uncategorized"
-        if tx.category:
-            cat_str = f"{tx.category.parent_name} > {tx.category.name}"
-        elif tx.type == "transfer":
-            cat_str = "Transfer"
-            
-        msg = (
-            f"🔎 *Review Transaction*\n"
-            f"📅 {tx.date.strftime('%Y-%m-%d')}\n"
-            f"🏦 {tx.account.name if tx.account else 'Unknown'}\n"
-            f"📝 *{tx.description}*\n"
-            f"💰 *{tx.amount:.2f}*\n"
-            f"🏷️ {cat_str} `({tx.type})`\n"
-            f"🤖 Conf: {tx.confidence_score:.2f} | Rsn: {tx.decision_reason or 'None'}"
-        )
-        
-        # Buttons
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Approve", callback_data=f"rev_ok_{tx.id}"),
-                InlineKeyboardButton("⏭️ Skip", callback_data=f"rev_skip_{tx.id}"),
-            ],
-            [
-                InlineKeyboardButton("✏️ Edit Category", callback_data=f"rev_cat_{tx.id}"),
-                InlineKeyboardButton("🗑️ Delete", callback_data=f"rev_del_{tx.id}"),
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+        await review_single_transaction(update, context, queue[0], session)
 
 async def review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -435,7 +824,7 @@ async def select_category_number(update: Update, context: ContextTypes.DEFAULT_T
                     desc, 
                     acc_name, 
                     category_id=cat_id, 
-                    type=tx_type
+                    tx_type=tx_type
                 )
                 
                 # Fetch category name for better confirmation
@@ -590,45 +979,102 @@ async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Handle natural language questions via RAG.
+    Handle natural language actions and questions.
     """
     user_text = update.message.text
     if not user_text:
         return
 
-    # Ignore if in conversation state (handled by conv_handler)
-    # But this handler is added last, so it catches anything not trapped by conv_handler or commands.
-    
+    # Check for active conversational state
+    nl_action = context.user_data.get("nl_action")
+    nl_state = context.user_data.get("nl_state")
+    nl_data = context.user_data.get("nl_data", {})
+
+    if nl_action and nl_state:
+        # Handle the next step in the conversational flow
+        if nl_action == "ADD_ACCOUNT":
+            if nl_state == "WAIT_NAME":
+                nl_data["name"] = user_text
+                context.user_data["nl_state"] = "WAIT_INST"
+                await update.message.reply_text(f"🏦 Got it, '{user_text}'. What's the institution name?")
+                return
+            elif nl_state == "WAIT_INST":
+                inst = user_text
+                name = nl_data["name"]
+                async with AsyncSessionLocal() as session:
+                    session.add(Account(name=name, institution=inst))
+                    await session.commit()
+                await update.message.reply_text(f"✅ Awesome! I've added the *{name}* ({inst}) account for you.", parse_mode="Markdown")
+                context.user_data.clear()
+                return
+
+        elif nl_action == "ADD_CATEGORY":
+            if nl_state == "WAIT_NAME":
+                nl_data["name"] = user_text
+                context.user_data["nl_state"] = "WAIT_TYPE"
+                keyboard = [[InlineKeyboardButton("📉 Expense", callback_data="cat_nl_expense")], [InlineKeyboardButton("📈 Income", callback_data="cat_nl_income")]]
+                await update.message.reply_text(f"🏷️ Okay, category '{user_text}'. Is this an Expense or Income?", reply_markup=InlineKeyboardMarkup(keyboard))
+                return
+            elif nl_state == "WAIT_PARENT":
+                parent = None if user_text.lower() == "none" else user_text
+                name, ctype = nl_data["name"], nl_data["type"]
+                async with AsyncSessionLocal() as session:
+                    session.add(Category(name=name, parent_name=parent, type=ctype))
+                    await session.commit()
+                label = f"{parent} > {name}" if parent else name
+                await update.message.reply_text(f"✅ Done! Category *{label}* added.", parse_mode="Markdown")
+                context.user_data.clear()
+                return
+
+        elif nl_action == "ADD_TRANSACTION":
+            if nl_state == "WAIT_DETAILS":
+                # Re-run intent classification on details
+                intent_ai = IntentAI()
+                res = await intent_ai.classify(user_text)
+                ent = res.get("entities", {})
+                if ent.get("amount") and ent.get("description"):
+                    nl_data["amount"] = float(ent["amount"])
+                    nl_data["description"] = ent["description"]
+                    async with AsyncSessionLocal() as session:
+                        accounts = await list_accounts(session)
+                        keyboard = [[InlineKeyboardButton(acc.name, callback_data=f"tx_nl_acc_{acc.name}")] for acc in accounts]
+                        await update.message.reply_text(f"💰 Logged: {nl_data['amount']:.2f} for {nl_data['description']}.\n🏦 Which bank account?", reply_markup=InlineKeyboardMarkup(keyboard))
+                    context.user_data["nl_state"] = "WAIT_ACC"
+                    return
+                else:
+                    await update.message.reply_text("I'm sorry, I couldn't understand the amount and description. Try '50 for sushi'.")
+                    return
+            elif nl_state == "WAIT_CAT_NUM":
+                return await nl_cat_number_handler(update, context)
+
+    # No active state, or intent changed
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
+    # 1. Intent Classification
+    intent_ai = IntentAI()
+    intent_data = await intent_ai.classify(user_text)
+    
+    if intent_data.get("confidence", 0) > 0.7:
+        await handle_nl_dispatch(update, context, intent_data)
+        return
+
+    # 2. RAG Fallback
     async with AsyncSessionLocal() as session:
         llm = LocalLLMPipeline()
         try:
-             # RAG Answer
              result = await llm.answer(session, user_text, top_k=5)
              answer = result["answer"]
-             
-             # Extract sources for citation
              sources = []
              for ctx in result.get("contexts", [])[:3]:
-                 # Format: "Date: Desc (Amount)"
-                 # We have content string, let's just parse or use metadata if available
-                 # metadata is not in the dict returned by answer() currently, logic in local_llm.py 
-                 # answer() returns dict with 'contexts' list of dicts.
-                 # Let's trust the answer for now, or append top source.
-                 content_preview = ctx['content'].split('\n')[2] # Description line usually
+                 content_preview = ctx['content'].split('\n')[2]
                  sources.append(f"- {content_preview}")
              
              reply = f"{answer}"
              if sources:
                  reply += "\n\n*Sources:*\n" + "\n".join(sources)
-                 
-             # Split if too long
              if len(reply) > 4000:
                 reply = reply[:4000] + "..."
-                
              await update.message.reply_text(reply, parse_mode="Markdown")
-             
         except Exception as e:
              logging.error(f"LLM Error: {e}")
              await update.message.reply_text("🤖 I'm having trouble thinking right now. Is Ollama running?")
@@ -654,6 +1100,7 @@ async def post_init(application):
     commands = [
         BotCommand("stats", "Quick summary of review queue"),
         BotCommand("review", "Start reviewing transactions"),
+        BotCommand("rulebook", "Manage AI categorization rules"),
         BotCommand("add", "Add a manual transaction"),
         BotCommand("accounts", "List all accounts"),
         BotCommand("categories", "View budget categories"),
@@ -676,6 +1123,7 @@ if __name__ == '__main__':
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("rulebook", rulebook_command))
     app.add_handler(CommandHandler("accounts", accounts_command))
     app.add_handler(CommandHandler("categories", categories_command))
     app.add_handler(CommandHandler("stats", stats_command))
@@ -685,7 +1133,44 @@ if __name__ == '__main__':
     # Review Callbacks
     app.add_handler(CallbackQueryHandler(review_callback, pattern="^rev_"))
     app.add_handler(CallbackQueryHandler(set_category_callback, pattern="^setcat_"))
+    app.add_handler(CallbackQueryHandler(rulebook_callback, pattern="^rb_(list|del|main)"))
+    app.add_handler(CallbackQueryHandler(account_callback, pattern="^acc_(list|del|main)"))
+    app.add_handler(CallbackQueryHandler(category_callback, pattern="^cat_(list|del|main)"))
+    app.add_handler(CallbackQueryHandler(nl_callback_handler, pattern="^(cat|tx)_nl_"))
     
+    # Rulebook Add Conversation
+    rb_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(rb_add_start_callback, pattern="^rb_add_start$")],
+        states={
+            SELECT_RULEBOOK_TYPE: [CallbackQueryHandler(rb_type_selected, pattern="^rb_type_")],
+            INPUT_RULEBOOK_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, rb_save_entry)],
+        },
+        fallbacks=[CallbackQueryHandler(rulebook_callback, pattern="^rb_main$")],
+    )
+    app.add_handler(rb_conv_handler)
+    
+    # Account Add Conversation
+    acc_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(acc_add_start_callback, pattern="^acc_add_start$")],
+        states={
+            INPUT_ACCOUNT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, acc_receive_name)],
+            INPUT_ACCOUNT_INST: [MessageHandler(filters.TEXT & ~filters.COMMAND, acc_save)],
+        },
+        fallbacks=[CallbackQueryHandler(account_callback, pattern="^acc_main$")],
+    )
+    app.add_handler(acc_conv_handler)
+
+    # Category Add Conversation
+    cat_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(cat_add_start_callback, pattern="^cat_add_start$")],
+        states={
+            INPUT_CATEGORY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, cat_receive_name)],
+            INPUT_CATEGORY_TYPE: [CallbackQueryHandler(cat_type_selected, pattern="^cat_type_")],
+            INPUT_CATEGORY_PARENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, cat_save)],
+        },
+        fallbacks=[CallbackQueryHandler(category_callback, pattern="^cat_main$")],
+    )
+    # Transaction Add Conversation
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("add", start_add),

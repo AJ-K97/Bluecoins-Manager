@@ -34,7 +34,7 @@
     - **Interactive Review**: Approve/Edit transactions via inline buttons.
     - **Chat**: Ask "Why?" for categorizations or "How much spent on X?".
     - **Commands**: Manage Accounts/Categories directly from chat.
-- **Status**: ✅ Complete (Implementation) / ⬜ Pending Manual Verification
+- **Status**: ✅ Complete
 
 ### Phase 8: Cloud Database Migration
 - **Goal**: Transition to cloud-hosted Postgres for cross-device access.
@@ -60,8 +60,16 @@
     - **Rulebook Management**: List, add, and delete AI Fine-tune examples and Knowledge chunks.
     - **Resource CRUD**: Commands to edit existing transactions and categories.
     - **Interactive Forms**: Use conversational flows to update database records.
-- **Status**: ⬜ Not Started
+- **Status**: ✅ Complete
 
-### Phase 11: Refinement & Verification
+### Phase 11: Conversational Intelligence (Intent Handling)
+- **Goal**: Transition from commands to natural language for all configuration tasks.
+- **Key Features**:
+    - **Intent Classification**: Use LLM to detect if the user wants to add, list, or modify resources.
+    - **Dynamic Action Dispatching**: Map "I want to add X account" to the internal add-account logic.
+    - **Parameter Extraction**: Automatically extract names, amounts, and IDs from chat messages.
+- **Status**: ✅ Complete
+
+### Phase 12: Refinement & Verification
 - **Goal**: Final testing, documentation, and polish.
 - **Status**: ⬜ Not Started
