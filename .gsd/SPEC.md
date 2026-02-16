@@ -1,6 +1,9 @@
 # SPEC.md — Project Specification
 
 > **Status**: `FINALIZED`
+> **Project**: Bluecoins Manager
+> **Role**: Intelligent Finance Assistant
+> **Goal**: Provide a comprehensive CLI and Telegram interface for managing personal finance data, enhanced with AI for categorization, insights, and natural language interaction.
 
 ## Vision
 A local-first, privacy-focused financial management toolkit that leverages Local LLMs (RAG) to automate transaction categorization. It bridges the gap between raw bank exports and structured financial data, offering a powerful CLI/TUI for review and management without sending improved financial data to the cloud.
@@ -12,6 +15,19 @@ A local-first, privacy-focused financial management toolkit that leverages Local
 4. **Entity Management**: CRUD operations for Accounts and Categories via CLI.
 5. **Unified Access**: Full feature parity between CLI and Telegram Bot (including single transaction entry).
 6. **Deterministic Rules**: Regex-based overrides for instant, zero-cost categorization of recurring transactions.
+
+## Core Capabilities
+- **Transaction Management**: Entry, editing, and deletion of transactions.
+- **Category Management**: Hierarchical category structure.
+- **Bank Data Ingestion**: Parsing and mapping of bank statements (CSV/PDF).
+- **Telegram Bot**: Interactive interface for on-the-go management and querying.
+- **AI Intelligence**: Intent classification, categorization reasoning, and conversational insights.
+
+## Architecture
+- **Backend**: Python (FastAPI/CLI)
+- **Database**: PostgreSQL (local-first; can run in Supabase-hosted Postgres)
+- **AI**: Local LLM integration for intent and reasoning.
+- **Interface**: Telegram Bot API + CLI/TUI.
 
 ## Non-Goals (Out of Scope)
 - Cloud syncing (Local-first only)
@@ -35,3 +51,8 @@ Technical users who prefer CLI tools, value privacy, and want "smart" budgeting 
 - [x] Interactive TUI for review (`src/interactive.py`)
 - [ ] Comprehensive test coverage for all parsers
 - [ ] Refined categorization rules and conflict handling
+
+## Current Status
+- Milestone 1 (Foundation) Complete.
+- Milestone 2 (Intelligent Assistant) Complete up to Phase 14.
+- Milestone 3 (Cognitive Refinement) In progress.

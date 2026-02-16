@@ -91,3 +91,33 @@
 
 **Verification**:
 - TBD
+
+## Milestone 3: Cognitive Refinement
+
+### Phase 15: Persona & Style Definition
+- **Goal**: Establish a consistent, engaging persona and response style.
+- **Objectives**:
+    - Define a distinct personality for the bot (e.g., professional, witty, concise).
+    - Ensure tone consistency across all interaction types.
+- **Status**: ⬜ Not Started
+
+### Phase 16: Enhanced Context Retrieval
+- **Goal**: Improve how the bot uses history and project data for better context.
+- **Objectives**:
+    - Optimise RAG retrieval for relevant transaction history.
+    - Implement smarter context window management.
+- **Status**: ⬜ Not Started
+
+### Phase 17: Response Formatting
+- **Goal**: Ensure outputs are structured, readable, and accurate.
+- **Objectives**:
+    - Standardise Markdown usage for tables, lists, and code blocks.
+    - Improve readability of complex financial data.
+- **Status**: ⬜ Not Started
+
+### Phase 18: Quality Assurance & Evals
+- **Goal**: Implement evaluation metrics to measure improvement.
+- **Objectives**:
+    - key performance indicators for response quality.
+    - Set up a feedback loop for continuous improvement.
+- **Status**: ⬜ Not Started
