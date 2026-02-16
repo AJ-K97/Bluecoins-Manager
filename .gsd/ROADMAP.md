@@ -70,8 +70,13 @@
     - **Parameter Extraction**: Automatically extract names, amounts, and IDs from chat messages.
 - **Status**: ✅ Complete
 
-### Phase 12: Refinement & Verification
-**Status**: ✅ Complete
-- Implement comprehensive unit testing for ALL features.
-- Generate synthetic "real-world" test data for logic verification.
-- Mock Ollama/Telegram for isolated testing.
+### Phase 13: Data Integrity & Cascading Deletes
+**Status**: ⬜ Not Started
+**Objective**: Ensure that deleting a transaction automatically removes all related AI memory entries, fine-tune examples, and knowledge chunks to prevent orphaned data.
+**Depends on**: Phase 12
+
+**Tasks**:
+- [ ] TBD (run /plan 13 to create)
+
+**Verification**:
+- TBD

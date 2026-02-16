@@ -9,4 +9,5 @@
 Phase 12 executed successfully. Established testing infrastructure, generated synthetic data, and verified 11/11 logic tests across parsers, commands, and bot conversational flows.
 
 ## Next Steps
-1. Project complete. Awaiting further instructions or final review.
+1. Execute Phase 13 (Data Integrity & Cascading Deletes).
+2. /plan 13 to create execution plans.
