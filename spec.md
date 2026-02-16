@@ -1,4 +1,4 @@
-# 📄 Financial CLI Toolkit - Specification Document
+# 📄 Financial CLI Toolkit - Specification Document [FINALIZED]
 
 ## 🎯 Objective
 
