@@ -123,7 +123,40 @@ Develop a Python-based Command-Line Interface (CLI) toolkit that converts bank t
 
 ---
 
-### Sprint 6: Final Testing & Documentation
+### Sprint 7: Telegram Bot Command Center
+
+**Goal:** Transform Telegram Bot into a full Command Center
+
+**Core Features:**
+
+1.  **Review Queue Management**
+    - List pending transactions requiring user confirmation.
+    - **Smart Category Selection**:
+        - Display top 3-5 AI suggested categories as numbered options (e.g., "1. Food, 2. Groceries, 3. Custom").
+        - User replies with just "1" to select.
+        - Fallback to fuzzy text search if "Custom" is selected.
+    - Inline buttons to `Approve`, `Edit Amount`, or `Skip`.
+    - Batch approval for high-confidence predictions.
+
+2.  **Conversational Intelligence (RAG-Enabled)**
+    - **Architecture**: Leverages existing `LocalLLMPipeline` (Vector Store + Ollama).
+    - **Interactive Coaching**:
+        - When correcting a category, bot asks: "Why did you change this? I thought it was X."
+        - User replies: "Because Vendor Y is actually for Z."
+        - Bot saves this reasoning to `AIMemory` and `LLMSkill` for future reference.
+    - **Re-indexing**: `/reindex` command to update vector store with latest transaction data.
+    - **'Ask' Feature**:
+        - Natural Language Queries: "How much did I spend on Coffee last month?" -> RAG retrieves relevant transaction chunks -> LLM summarizes.
+        - Explainability: "Why is this 'Entertainment'?" -> Retrieving `AIMemory` reasoning.
+
+3.  **CLI Parity**
+    - Manage Accounts: `/account list`, `/account add` (wizard style).
+    - Manage Categories: `/category list`, `/category add`.
+    - Manual Element: `/add <amount> <desc>` -> Triggers AI suggestion flow with numbered options.
+
+---
+
+### Sprint 8: Final Testing & Documentation
 
 **Goal:** Test, refine UX, and add documentation
 

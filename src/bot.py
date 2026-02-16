@@ -9,10 +9,16 @@ from sqlalchemy import select, func
 from src.database import init_db, Account, Transaction, AsyncSessionLocal
 from src.parser import BankParser
 from src.ai import CategorizerAI
-from src.commands import list_accounts, get_queue_stats, add_transaction
+from src.local_llm import LocalLLMPipeline
+
+from src.commands import list_accounts, get_queue_stats, add_transaction, get_queue_transactions, mark_transaction_verified, update_transaction_category, get_category_display_from_values
+
 
 # States
-INPUT_DETAILS, SELECT_ACCOUNT = range(2)
+INPUT_DETAILS, SELECT_ACCOUNT, SELECT_CATEGORY_NUMBER, CONFIRM_NEW_CATEGORY = range(4)
+# Review States (managed via callback data mostly, but could use states if we want conversation)
+
+
 
 # Enable logging
 logging.basicConfig(
@@ -31,16 +37,113 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
     async with AsyncSessionLocal() as session:
-        accounts = await list_accounts(session)
-        if not accounts:
-            await update.message.reply_text("No accounts found.")
+        if not args:
+            # List behavior
+            accounts = await list_accounts(session)
+            if not accounts:
+                await update.message.reply_text("No accounts found.")
+                return
+            msg = "*Accounts:*\n"
+            for acc in accounts:
+                msg += f"- `{acc.name}` ({acc.institution})\n"
+            await update.message.reply_text(msg, parse_mode="Markdown")
             return
+
+        subcommand = args[0].lower()
+        if subcommand == "list":
+             accounts = await list_accounts(session)
+             if not accounts:
+                await update.message.reply_text("No accounts found.")
+                return
+             msg = "*Accounts:*\n"
+             for acc in accounts:
+                msg += f"- `{acc.name}` ({acc.institution})\n"
+             await update.message.reply_text(msg, parse_mode="Markdown")
+        
+        elif subcommand == "add":
+            if len(args) < 3:
+                 await update.message.reply_text("Usage: `/accounts add <name> <institution>`", parse_mode="Markdown")
+                 return
+            name = args[1]
+            institution = args[2]
             
-        msg = "Accounts:\n"
-        for acc in accounts:
-            msg += f"- {acc.name} ({acc.institution})\n"
-        await update.message.reply_text(msg)
+            # Simple add check from bot
+            try:
+                session.add(Account(name=name, institution=institution))
+                await session.commit()
+                await update.message.reply_text(f"✅ Account `{name}` added.", parse_mode="Markdown")
+            except Exception as e:
+                await session.rollback()
+                await update.message.reply_text(f"❌ Error: {e}")
+        else:
+             await update.message.reply_text("Unknown subcommand. Use `list` or `add`.")
+
+
+async def categories_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    async with AsyncSessionLocal() as session:
+        subcommand = args[0].lower() if args else "list"
+        
+        if subcommand == "list":
+            # Hierarchical view similar to CLI
+            result = await session.execute(select(Category).order_by(Category.parent_name, Category.name))
+            categories = result.scalars().all()
+            if not categories:
+                 await update.message.reply_text("No categories found.")
+                 return
+            
+            # Group by Parent
+            tree = {}
+            for c in categories:
+                parent = c.parent_name or "Uncategorized"
+                if parent not in tree:
+                    tree[parent] = []
+                tree[parent].append(c)
+            
+            msg = "*Categories:*\n"
+            for parent, children in sorted(tree.items()):
+                 msg += f"📂 *{parent}*\n"
+                 for c in children:
+                     msg += f"  - {c.name} `[{c.type}]`\n"
+            
+            # Telegram has message length limits; might need splitting if too long
+            if len(msg) > 4000:
+                msg = msg[:4000] + "\n...(truncated)"
+                
+            await update.message.reply_text(msg, parse_mode="Markdown")
+            
+        elif subcommand == "add":
+             # Usage: /categories add <name> <type> [parent]
+             if len(args) < 3:
+                  await update.message.reply_text("Usage: `/categories add <name> <expense|income> [parent]`", parse_mode="Markdown")
+                  return
+             name = args[1]
+             ctype = args[2].lower()
+             parent = args[3] if len(args) > 3 else None
+             
+             if ctype not in ["expense", "income"]:
+                  await update.message.reply_text("Type must be 'expense' or 'income'.")
+                  return
+
+             # Check existence
+             stmt = select(Category).where(
+                 Category.name == name,
+                 Category.parent_name == parent,
+                 Category.type == ctype
+             )
+             existing = await session.execute(stmt)
+             if existing.scalar_one_or_none():
+                 await update.message.reply_text("Category already exists.")
+                 return
+             
+             session.add(Category(name=name, parent_name=parent, type=ctype))
+             await session.commit()
+             label = f"{parent} > {name}" if parent else name
+             await update.message.reply_text(f"✅ Category `{label}` added.", parse_mode="Markdown")
+        else:
+             await update.message.reply_text("Unknown subcommand. Use `list` or `add`.")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with AsyncSessionLocal() as session:
@@ -109,12 +212,199 @@ async def select_account_callback(update: Update, context: ContextTypes.DEFAULT_
     account_name = data[4:] # remove acc_
     amount = context.user_data.get("add_amount")
     desc = context.user_data.get("add_desc")
+    context.user_data["add_account"] = account_name
+    
+    await query.edit_message_text(f"Account: {account_name}\nAnalyzing category for '{desc}'...")
+    
+    # Run AI Categorization
+    async with AsyncSessionLocal() as session:
+        ai = CategorizerAI()
+        # Get candidates
+        candidates = await ai.suggest_category_candidates(
+            desc, 
+            session, 
+            min_candidates=5
+        )
+        context.user_data["candidates"] = candidates
+        
+        msg = f"Select Category for *{desc}* (${amount}):\n\n"
+        
+        # Build numbered list
+        for idx, cand in enumerate(candidates, 1):
+            cid = cand.get('id')
+            reason = cand.get('reasoning', '')
+            ctype = cand.get('type', 'expense')
+            
+            # Fetch names
+            if cid:
+                 r = await session.execute(select(Category).where(Category.id == cid))
+                 c = r.scalar_one_or_none()
+                 if c:
+                     label = f"{c.parent_name or ''} > {c.name}"
+                 else:
+                     label = f"ID:{cid}"
+            else:
+                 label = "Uncategorized"
+            
+            msg += f"*{idx}.* {label} `({ctype})`\n_{reason}_\n\n"
+            
+        msg += "Reply with the *number* (e.g., '1') to select."
+        
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=msg, parse_mode="Markdown")
+        return SELECT_CATEGORY_NUMBER
+
+async def review_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fetches one pending transaction and shows it."""
+    async with AsyncSessionLocal() as session:
+        # Get one high priority item
+        queue = await get_queue_transactions(session, limit=1)
+        if not queue:
+            await update.message.reply_text("✅ Review Queue is empty!")
+            return
+        
+        tx = queue[0]
+        
+        # Format Message
+        cat_str = "Uncategorized"
+        if tx.category:
+            cat_str = f"{tx.category.parent_name} > {tx.category.name}"
+        elif tx.type == "transfer":
+            cat_str = "Transfer"
+            
+        msg = (
+            f"🔎 *Review Transaction*\n"
+            f"📅 {tx.date.strftime('%Y-%m-%d')}\n"
+            f"🏦 {tx.account.name if tx.account else 'Unknown'}\n"
+            f"📝 *{tx.description}*\n"
+            f"💰 *{tx.amount:.2f}*\n"
+            f"🏷️ {cat_str} `({tx.type})`\n"
+            f"🤖 Conf: {tx.confidence_score:.2f} | Rsn: {tx.decision_reason or 'None'}"
+        )
+        
+        # Buttons
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"rev_ok_{tx.id}"),
+                InlineKeyboardButton("⏭️ Skip", callback_data=f"rev_skip_{tx.id}"),
+            ],
+            [
+                InlineKeyboardButton("✏️ Edit Category", callback_data=f"rev_cat_{tx.id}"),
+                InlineKeyboardButton("🗑️ Delete", callback_data=f"rev_del_{tx.id}"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+
+async def review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    parts = data.split("_")
+    action = parts[1] # ok, skip, cat, del
+    tx_id = int(parts[2])
     
     async with AsyncSessionLocal() as session:
-        success, msg, tx = await add_transaction(session, datetime.now(), amount, desc, account_name)
-        await query.edit_message_text(f"✅ {msg}")
+        if action == "ok":
+            success, msg = await mark_transaction_verified(session, tx_id)
+            if success:
+                 await query.edit_message_text(f"✅ Verified transaction.")
+                 # Trigger next review? 
+                 # await review_command(update, context) # Recursive might be tricky with update obj
+            else:
+                 await query.edit_message_text(f"❌ Error: {msg}")
+
+        elif action == "skip":
+             await query.edit_message_text(f"⏭️ Skipped.")
         
-    return ConversationHandler.END
+        elif action == "del":
+             # Implementation needed depending on policy (soft/hard delete)
+             # For now just verify removed
+             from src.commands import delete_transaction
+             await delete_transaction(session, tx_id)
+             await query.edit_message_text(f"🗑️ Deleted.")
+
+        elif action == "cat":
+             # This requires user input. We can't easily jump into conversation handler from callback 
+             # without returning a state. 
+             # Simplified: Ask user to reply with category ID or name? 
+             # Better: Show top 5 categories as buttons
+             
+             # Fetch tx to get desc
+             tx = await session.get(Transaction, tx_id)
+             if not tx:
+                 await query.edit_message_text("Transaction not found.")
+                 return
+
+             ai = CategorizerAI()
+             candidates = await ai.suggest_category_candidates(tx.description, session, min_candidates=5)
+             
+             keyboard = []
+             for c in candidates:
+                 cid = c['id']
+                 # Retrieve name
+                 r = await session.execute(select(Category).where(Category.id == cid))
+                 cat = r.scalar_one_or_none()
+                 label = f"{cat.name}" if cat else f"ID {cid}"
+                 keyboard.append([InlineKeyboardButton(label, callback_data=f"setcat_{tx_id}_{cid}")])
+             
+             keyboard.append([InlineKeyboardButton("🔙 Cancel", callback_data=f"rev_cancel")])
+             reply_markup = InlineKeyboardMarkup(keyboard)
+             await query.edit_message_text(f"Select Category for '{tx.description}':", reply_markup=reply_markup)
+
+async def set_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    # format: setcat_TXID_CATID
+    parts = data.split("_")
+    tx_id = int(parts[1])
+    cat_id = int(parts[2])
+    
+    async with AsyncSessionLocal() as session:
+        success, msg = await update_transaction_category(session, tx_id, cat_id)
+        if success:
+             await query.edit_message_text(f"✅ Category updated.")
+        else:
+             await query.edit_message_text(f"❌ Error: {msg}")
+
+async def select_category_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    text = update.message.text.strip()
+    candidates = context.user_data.get("candidates", [])
+    
+    try:
+        selection = int(text)
+        if 1 <= selection <= len(candidates):
+            choice = candidates[selection - 1]
+            cat_id = choice.get('id')
+            tx_type = choice.get('type', 'expense')
+            
+            # Finalize Transaction
+            amount = context.user_data.get("add_amount")
+            desc = context.user_data.get("add_desc")
+            acc_name = context.user_data.get("add_account")
+            
+            async with AsyncSessionLocal() as session:
+                success, msg, tx = await add_transaction(
+                    session, 
+                    datetime.now(), 
+                    amount, 
+                    desc, 
+                    acc_name, 
+                    category_id=cat_id, 
+                    type=tx_type
+                )
+                await update.message.reply_text(f"✅ Transaction saved!\nCategory: ID {cat_id}")
+            return ConversationHandler.END
+        else:
+             await update.message.reply_text(f"Please enter a number between 1 and {len(candidates)}.")
+             return SELECT_CATEGORY_NUMBER
+    except ValueError:
+        await update.message.reply_text("Please enter a valid number.")
+        return SELECT_CATEGORY_NUMBER
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Operation cancelled.")
@@ -215,10 +505,81 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"New Transactions: {new_count}\n"
             
             await update.message.reply_text(msg)
+            
+            # Trigger background reindex (or just do it here if small)
+            if new_count > 0:
+                llm = LocalLLMPipeline()
+                res = await llm.reindex_transactions(session, since=None) 
+                # Optimization: pass 'since' if we tracked last sync time, but for now reindex all is safer
+                await update.message.reply_text(f"🧠 Knowledge updated: {res['created']} new chunks.")
+
+
 
     except Exception as e:
         logging.error(f"Error processing file: {e}")
         await update.message.reply_text(f"❌ Error occurred: {str(e)}")
+
+async def reindex_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔄 Re-indexing transaction knowledge base...")
+    async with AsyncSessionLocal() as session:
+        llm = LocalLLMPipeline()
+        try:
+            res = await llm.reindex_transactions(session)
+            await update.message.reply_text(
+                f"✅ Index Complete.\n"
+                f"Created: {res['created']}\n"
+                f"Updated: {res['updated']}\n"
+                f"Total: {res['total']}"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {e}")
+
+async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handle natural language questions via RAG.
+    """
+    user_text = update.message.text
+    if not user_text:
+        return
+
+    # Ignore if in conversation state (handled by conv_handler)
+    # But this handler is added last, so it catches anything not trapped by conv_handler or commands.
+    
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    
+    async with AsyncSessionLocal() as session:
+        llm = LocalLLMPipeline()
+        try:
+             # RAG Answer
+             result = await llm.answer(session, user_text, top_k=5)
+             answer = result["answer"]
+             
+             # Extract sources for citation
+             sources = []
+             for ctx in result.get("contexts", [])[:3]:
+                 # Format: "Date: Desc (Amount)"
+                 # We have content string, let's just parse or use metadata if available
+                 # metadata is not in the dict returned by answer() currently, logic in local_llm.py 
+                 # answer() returns dict with 'contexts' list of dicts.
+                 # Let's trust the answer for now, or append top source.
+                 content_preview = ctx['content'].split('\n')[2] # Description line usually
+                 sources.append(f"- {content_preview}")
+             
+             reply = f"{answer}"
+             if sources:
+                 reply += "\n\n*Sources:*\n" + "\n".join(sources)
+                 
+             # Split if too long
+             if len(reply) > 4000:
+                reply = reply[:4000] + "..."
+                
+             await update.message.reply_text(reply, parse_mode="Markdown")
+             
+        except Exception as e:
+             logging.error(f"LLM Error: {e}")
+             await update.message.reply_text("🤖 I'm having trouble thinking right now. Is Ollama running?")
+
+
 
 if __name__ == '__main__':
     from dotenv import load_dotenv
@@ -235,18 +596,29 @@ if __name__ == '__main__':
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("accounts", accounts_command))
+    app.add_handler(CommandHandler("categories", categories_command))
     app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("review", review_command))
+    app.add_handler(CommandHandler("reindex", reindex_command))
+    
+    # Review Callbacks
+    app.add_handler(CallbackQueryHandler(review_callback, pattern="^rev_"))
+    app.add_handler(CallbackQueryHandler(set_category_callback, pattern="^setcat_"))
     
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("add", start_add)],
         states={
             INPUT_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_details)],
             SELECT_ACCOUNT: [CallbackQueryHandler(select_account_callback)],
+            SELECT_CATEGORY_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, select_category_number)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
     app.add_handler(conv_handler)
     
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    
+    # Fallback to Chat (must be last)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_message))
     
     app.run_polling()

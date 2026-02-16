@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Iterable, List
+from typing import Iterable, List, Union, Optional
 
 
 AUTO_APPROVE_MIN = 0.97
@@ -16,13 +16,13 @@ class DecisionResult:
     can_auto_verify: bool
 
 
-def _normalize_flags(conflict_flags: Iterable[str] | None) -> List[str]:
+def _normalize_flags(conflict_flags: Optional[Iterable[str]]) -> List[str]:
     if not conflict_flags:
         return []
     return sorted({str(x).strip().lower() for x in conflict_flags if str(x).strip()})
 
 
-def evaluate_decision_policy(confidence: float, conflict_flags: Iterable[str] | None = None) -> DecisionResult:
+def evaluate_decision_policy(confidence: float, conflict_flags: Optional[Iterable[str]] = None) -> DecisionResult:
     conf = float(confidence or 0.0)
     flags = _normalize_flags(conflict_flags)
 

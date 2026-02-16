@@ -363,7 +363,7 @@ Text:
         session,
         user_message,
         conversation_history=None,
-        web_search_query=None
+        rag_pipeline=None # Injected LocalLLMPipeline instance
     ):
         """
         Conversational assistant for discussing a single in-review transaction.
@@ -397,33 +397,43 @@ Text:
                 lines.append(f"{role}: {content}")
             history_text = "\n".join(lines)
 
-        prompt = f"""
-You are helping a user review one bank transaction.
-Do not output JSON. Give a clear conversational answer.
-If asked to search, use provided web search context and cite uncertain points.
-Focus on WHY the current categorization was chosen, possible alternatives, and what evidence would change it.
+        # RAG Retrieval if pipeline provided
+        rag_context = "No relevant past transactions found."
+        if rag_pipeline:
+            # query based on description + user message
+            query = f"{tx_data.get('description')} {user_message}"
+            hits = await rag_pipeline.retrieve(session, query, top_k=5)
+            if hits:
+                rag_context = "\n".join([f"- {h.content} (Score: {h.score:.2f})" for h in hits])
 
+        prompt = f"""
+You are assisting a user in categorizing a transaction.
 Transaction:
 - Date: {tx_data.get("date")}
 - Amount: {tx_data.get("amount")}
 - Description: {tx_data.get("description")}
 
-Current model decision:
+Current Decision:
 - Type: {current_type}
 - Category: {current_label}
-- Reasoning: {current_reasoning or "No reasoning yet."}
+- Reasoning: {current_reasoning}
 
-Available categories:
-{categories_text}
-
-Conversation so far:
+Conversation History:
 {history_text}
 
-Web search context (if requested):
-{web_context}
+Relevant Past Information (RAG):
+{rag_context}
 
-User message:
-{user_message}
+Available Categories:
+{categories_text}
+
+User Input: "{user_message}"
+
+Instructions:
+- Answer the user's question or concern directly.
+- If the user corrects you, ask "Why?" to understand the pattern (unless obvious).
+- Use the RAG context to support your answer (e.g., "In the past, you categorized similar items as...").
+- Be concise and helpful.
 """
         try:
             return await self._chat_once(prompt)
