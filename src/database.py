@@ -78,7 +78,7 @@ class AIMemory(Base):
     __tablename__ = "ai_memory"
     
     id = Column(Integer, primary_key=True, index=True)
-    transaction_id = Column(Integer, ForeignKey("transactions.id"))
+    transaction_id = Column(Integer, ForeignKey("transactions.id", ondelete="SET NULL"))
     pattern_key = Column(String, index=True) # e.g. "SHELL", "UBER"
     
     ai_suggested_category_id = Column(Integer, nullable=True)
@@ -145,13 +145,13 @@ class LLMFineTuneExample(Base):
     __tablename__ = "llm_finetune_examples"
 
     id = Column(Integer, primary_key=True, index=True)
-    source_transaction_id = Column(Integer, ForeignKey("transactions.id"), nullable=False)
+    source_transaction_id = Column(Integer, ForeignKey("transactions.id", ondelete="SET NULL"), nullable=True)
     prompt = Column(Text, nullable=False)
     response = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 # Add back_populates to Transaction
-Transaction.memory_entries = relationship("AIMemory", back_populates="transaction", cascade="all, delete-orphan")
+Transaction.memory_entries = relationship("AIMemory", back_populates="transaction", cascade="save-update, merge")
 
 async def init_db():
     async with engine.begin() as conn:
