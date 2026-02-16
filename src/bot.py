@@ -4,9 +4,9 @@ import asyncio
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler, CallbackQueryHandler
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, BotCommand
 from sqlalchemy import select, func
-from src.database import init_db, Account, Transaction, AsyncSessionLocal
+from src.database import init_db, Account, Transaction, AsyncSessionLocal, Category
 from src.parser import BankParser
 from src.ai import CategorizerAI
 from src.local_llm import LocalLLMPipeline
@@ -27,14 +27,38 @@ logging.basicConfig(
 )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reply_keyboard = [
+        ['📊 Stats', '📝 Review'],
+        ['➕ Add', '❓ Help']
+    ]
+    markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
+    
     await update.message.reply_text(
-        "Hello! I am your Bluecoins Manager Bot.\n"
-        "Commands:\n"
-        "/accounts - List accounts\n"
-        "/stats - Show review queue stats\n"
-        "/add - Add a manual transaction\n"
-        "Or send a CSV file to import."
+        "👋 *Welcome to Bluecoins Manager!*\n\n"
+        "I can help you manage your finances directly from Telegram.\n"
+        "Use the menu button below or types `/help` to see all commands.",
+        parse_mode="Markdown",
+        reply_markup=markup
     )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "🤖 *Bluecoins Manager Help*\n\n"
+        "*Core Commands:*\n"
+        "📊 `/stats` \- Show review queue summary\n"
+        "📝 `/review` \- Process pending transactions\n"
+        "➕ `/add <amt> <desc>` \- Quick manual entry\n"
+        "📁 `/accounts` \- List & manage accounts\n"
+        "🏷️ `/categories` \- View your budget categories\n\n"
+        "*Advanced:*\n"
+        "🔄 `/reindex` \- Update AI memory from database\n"
+        "📄 *Send a CSV/PDF* \- Import bank statements\n\n"
+        "*Chatting:*\n"
+        "You can ask me questions in natural language, like:\n"
+        "_\"How much did I spend on food this month?\"_\n"
+        "_\"Why was my last transaction categorized as Utilities?\"_"
+    )
+    await update.message.reply_text(help_text, parse_mode="Markdown")
 
 async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
@@ -45,9 +69,9 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not accounts:
                 await update.message.reply_text("No accounts found.")
                 return
-            msg = "*Accounts:*\n"
+            msg = "📁 *Your Accounts:*\n"
             for acc in accounts:
-                msg += f"- `{acc.name}` ({acc.institution})\n"
+                msg += f"• `{acc.name}` \({acc.institution}\)\n"
             await update.message.reply_text(msg, parse_mode="Markdown")
             return
 
@@ -102,11 +126,11 @@ async def categories_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     tree[parent] = []
                 tree[parent].append(c)
             
-            msg = "*Categories:*\n"
-            for parent, children in sorted(tree.items()):
-                 msg += f"📂 *{parent}*\n"
-                 for c in children:
-                     msg += f"  - {c.name} `[{c.type}]`\n"
+            msg = "🏷️ *Your Categories:*\n\n"
+            for parent, kids in sorted(tree.items()):
+                msg += f"📁 *{parent}*\n"
+                for kid in kids:
+                    msg += f"  └─ `{kid.name}` _({kid.type})_\n"
             
             # Telegram has message length limits; might need splitting if too long
             if len(msg) > 4000:
@@ -152,19 +176,23 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Queue is empty/No stats.")
             return
             
-        msg = "Review Queue Stats:\n"
-        msg += f"{'State':<15} {'Bucket':<10} {'Count'}\n"
-        msg += "-" * 35 + "\n"
+        msg = "📊 *Review Queue Summary*\n\n"
+        msg += f"`{'State':<12} {'Bucket':<10} {'Qty'}`\n"
+        msg += "`" + "─" * 28 + "`\n"
         for state, bucket, count in rows:
-             msg += f"{state or 'none':<15} {bucket or 'none':<10} {count}\n"
-        await update.message.reply_text(f"```\n{msg}\n```", parse_mode="MarkdownV2")
+             s = (state or "none").capitalize()
+             b = (bucket or "none").capitalize()
+             msg += f"`{s:<12} {b:<10} {count}`\n"
+        
+        await update.message.reply_text(msg, parse_mode="MarkdownV2")
 
 async def start_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Please enter the transaction details in format:\n"
-        "`Amount Description`\n"
-        "Example: `50.00 Lunch at Cafe`",
-        parse_mode="Markdown"
+        "📝 *Manual Entry Step 1/3*\n\n"
+        "Please enter the amount and a brief description\.\n"
+        "Format: `Amount Description`\n\n"
+        "Example: `50.00 Dinner at Sushi Bar`",
+        parse_mode="MarkdownV2"
     )
     return INPUT_DETAILS
 
@@ -197,7 +225,14 @@ async def receive_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton(acc.name, callback_data=f"acc_{acc.name}")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(f"Transaction: {amount} for '{desc}'.\nSelect Account:", reply_markup=reply_markup)
+        await update.message.reply_text(
+            f"💰 *Manual Entry Step 2/3*\n\n"
+            f"*Transaction:* `{amount:.2f}`\n"
+            f"*Description:* `{desc}`\n\n"
+            "🏦 _Select Account:_ ",
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
         return SELECT_ACCOUNT
 
 async def select_account_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -351,7 +386,12 @@ async def review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
              
              keyboard.append([InlineKeyboardButton("🔙 Cancel", callback_data=f"rev_cancel")])
              reply_markup = InlineKeyboardMarkup(keyboard)
-             await query.edit_message_text(f"Select Category for '{tx.description}':", reply_markup=reply_markup)
+             await query.edit_message_text(
+                 f"🏷️ *Select Category* for:\n"
+                 f"_{tx.description}_", 
+                 parse_mode="Markdown",
+                 reply_markup=reply_markup
+             )
 
 async def set_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -397,7 +437,21 @@ async def select_category_number(update: Update, context: ContextTypes.DEFAULT_T
                     category_id=cat_id, 
                     type=tx_type
                 )
-                await update.message.reply_text(f"✅ Transaction saved!\nCategory: ID {cat_id}")
+                
+                # Fetch category name for better confirmation
+                cat_name = "Unknown"
+                if cat_id:
+                    res = await session.execute(select(Category).where(Category.id == cat_id))
+                    cat = res.scalar_one_or_none()
+                    cat_name = cat.name if cat else "Unknown"
+
+                await update.message.reply_text(
+                    f"✅ *Transaction Saved\!*\n\n"
+                    f"💰 *Amount:* `{amount:.2f}`\n"
+                    f"🏦 *Account:* `{acc_name}`\n"
+                    f"🏷️ *Category:* `{cat_name}`",
+                    parse_mode="MarkdownV2"
+                )
             return ConversationHandler.END
         else:
              await update.message.reply_text(f"Please enter a number between 1 and {len(candidates)}.")
@@ -407,7 +461,7 @@ async def select_category_number(update: Update, context: ContextTypes.DEFAULT_T
         return SELECT_CATEGORY_NUMBER
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Operation cancelled.")
+    await update.message.reply_text("❌ *Operation cancelled\.*", parse_mode="MarkdownV2")
     return ConversationHandler.END
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -581,6 +635,32 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 
+async def handle_keyboard_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == '📊 Stats':
+        return await stats_command(update, context)
+    elif text == '📝 Review':
+        return await review_command(update, context)
+    elif text == '➕ Add':
+        # Start the add conversation
+        return await start_add(update, context)
+    elif text == '❓ Help':
+        return await help_command(update, context)
+    else:
+        # Pass to general chat handle
+        return await handle_chat_message(update, context)
+
+async def post_init(application):
+    commands = [
+        BotCommand("stats", "Quick summary of review queue"),
+        BotCommand("review", "Start reviewing transactions"),
+        BotCommand("add", "Add a manual transaction"),
+        BotCommand("accounts", "List all accounts"),
+        BotCommand("categories", "View budget categories"),
+        BotCommand("help", "Show detailed guide")
+    ]
+    await application.bot.set_my_commands(commands)
+
 if __name__ == '__main__':
     from dotenv import load_dotenv
     load_dotenv()
@@ -592,9 +672,10 @@ if __name__ == '__main__':
         exit(1)
         
     print("Bot is starting...")
-    app = ApplicationBuilder().token(token).build()
+    app = ApplicationBuilder().token(token).post_init(post_init).build()
     
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("accounts", accounts_command))
     app.add_handler(CommandHandler("categories", categories_command))
     app.add_handler(CommandHandler("stats", stats_command))
@@ -606,7 +687,10 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(set_category_callback, pattern="^setcat_"))
     
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("add", start_add)],
+        entry_points=[
+            CommandHandler("add", start_add),
+            MessageHandler(filters.Regex('^➕ Add$'), start_add)
+        ],
         states={
             INPUT_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_details)],
             SELECT_ACCOUNT: [CallbackQueryHandler(select_account_callback)],
@@ -617,6 +701,9 @@ if __name__ == '__main__':
     app.add_handler(conv_handler)
     
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    
+    # Handle Keyboard Buttons
+    app.add_handler(MessageHandler(filters.Regex('^(📊 Stats|📝 Review|➕ Add|❓ Help)$'), handle_keyboard_button))
     
     # Fallback to Chat (must be last)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_message))

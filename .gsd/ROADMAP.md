@@ -46,6 +46,14 @@
 - **Objective**: Develop a synchronization or one-time migration script for historical data.
 - **Status**: ⏳ Future Task
 
-### Phase 9: Refinement & Verification
+### Phase 9: Bot UX & Discoverability
+- **Goal**: Improve bot usability with menus, help commands, and better formatting.
+- **Key Features**:
+    - **Command Menu**: Register bot commands with Telegram for easy access via the '/' button.
+    - **Help Command**: Implement `/help` with detailed usage guides.
+    - **Aesthetics**: Use rich Markdown, emojis, and consistent formatting for all bot responses.
+- **Status**: ✅ Complete
+
+### Phase 10: Refinement & Verification
 - **Goal**: Final testing, documentation, and polish.
 - **Status**: ⬜ Not Started
