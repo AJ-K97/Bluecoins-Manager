@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import html
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler, CallbackQueryHandler
@@ -681,14 +682,17 @@ async def review_single_transaction(update: Update, context: ContextTypes.DEFAUL
     elif tx.type == "transfer":
         cat_str = "Transfer"
         
+    def e(s):
+        return html.escape(str(s))
+
     msg = (
-        f"🔎 *Review Transaction ID: {tx.id}*\n"
-        f"📅 {tx.date.strftime('%Y-%m-%d')}\n"
-        f"🏦 {tx.account.name if tx.account else 'Unknown'}\n"
-        f"📝 *{tx.description}*\n"
-        f"💰 *{tx.amount:.2f}*\n"
-        f"🏷️ {cat_str} `({tx.type})`\n"
-        f"🤖 Conf: {tx.confidence_score:.2f} | Rsn: {tx.decision_reason or 'None'}"
+        f"🔎 <b>Review Transaction ID: {e(tx.id)}</b>\n"
+        f"📅 {e(tx.date.strftime('%Y-%m-%d'))}\n"
+        f"🏦 {e(tx.account.name if tx.account else 'Unknown')}\n"
+        f"📝 <b>{e(tx.description)}</b>\n"
+        f"💰 <b>{tx.amount:.2f}</b>\n"
+        f"🏷️ {e(cat_str)} <code>({e(tx.type)})</code>\n"
+        f"🤖 Conf: {tx.confidence_score:.2f} | Rsn: {e(tx.decision_reason or 'None')}"
     )
     
     # Buttons
@@ -705,9 +709,9 @@ async def review_single_transaction(update: Update, context: ContextTypes.DEFAUL
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     if update.callback_query:
-        await update.callback_query.edit_message_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+        await update.callback_query.edit_message_text(msg, parse_mode="HTML", reply_markup=reply_markup)
     else:
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+        await update.message.reply_text(msg, parse_mode="HTML", reply_markup=reply_markup)
 
 async def review_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fetches one pending transaction and shows it."""
@@ -1004,7 +1008,7 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 async with AsyncSessionLocal() as session:
                     session.add(Account(name=name, institution=inst))
                     await session.commit()
-                await update.message.reply_text(f"✅ Awesome! I've added the *{name}* ({inst}) account for you.", parse_mode="Markdown")
+                await update.message.reply_text(f"✅ Awesome! I've added the <b>{html.escape(name)}</b> ({html.escape(inst)}) account for you.", parse_mode="HTML")
                 context.user_data.clear()
                 return
 
@@ -1013,7 +1017,7 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 nl_data["name"] = user_text
                 context.user_data["nl_state"] = "WAIT_TYPE"
                 keyboard = [[InlineKeyboardButton("📉 Expense", callback_data="cat_nl_expense")], [InlineKeyboardButton("📈 Income", callback_data="cat_nl_income")]]
-                await update.message.reply_text(f"🏷️ Okay, category '{user_text}'. Is this an Expense or Income?", reply_markup=InlineKeyboardMarkup(keyboard))
+                await update.message.reply_text(f"🏷️ Okay, category '{html.escape(user_text)}'. Is this an Expense or Income?", reply_markup=InlineKeyboardMarkup(keyboard))
                 return
             elif nl_state == "WAIT_PARENT":
                 parent = None if user_text.lower() == "none" else user_text
@@ -1022,7 +1026,7 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     session.add(Category(name=name, parent_name=parent, type=ctype))
                     await session.commit()
                 label = f"{parent} > {name}" if parent else name
-                await update.message.reply_text(f"✅ Done! Category *{label}* added.", parse_mode="Markdown")
+                await update.message.reply_text(f"✅ Done! Category <b>{html.escape(label)}</b> added.", parse_mode="HTML")
                 context.user_data.clear()
                 return
 
@@ -1069,12 +1073,12 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                  content_preview = ctx['content'].split('\n')[2]
                  sources.append(f"- {content_preview}")
              
-             reply = f"{answer}"
+             reply = f"{html.escape(answer)}"
              if sources:
-                 reply += "\n\n*Sources:*\n" + "\n".join(sources)
+                 reply += "\n\n<b>Sources:</b>\n" + "\n".join([f"- {html.escape(s)}" for s in sources])
              if len(reply) > 4000:
                 reply = reply[:4000] + "..."
-             await update.message.reply_text(reply, parse_mode="Markdown")
+             await update.message.reply_text(reply, parse_mode="HTML")
         except Exception as e:
              logging.error(f"LLM Error: {e}")
              await update.message.reply_text("🤖 I'm having trouble thinking right now. Is Ollama running?")
