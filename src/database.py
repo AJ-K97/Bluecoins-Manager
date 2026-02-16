@@ -152,6 +152,20 @@ class LLMFineTuneExample(Base):
 
     transaction = relationship("Transaction", back_populates="finetune_examples")
 
+class InteractionLog(Base):
+    __tablename__ = "interaction_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    user_id = Column(Integer, index=True)
+    username = Column(String, nullable=True)
+    message_content = Column(Text, nullable=True)
+    detected_intent = Column(String, nullable=True, index=True)
+    confidence_score = Column(Float, nullable=True)
+    entities_json = Column(Text, nullable=True)
+    action_taken = Column(String, nullable=True)
+    response_content = Column(Text, nullable=True)
+
 # Add relationships to Transaction
 Transaction.memory_entries = relationship("AIMemory", back_populates="transaction", cascade="save-update, merge")
 Transaction.finetune_examples = relationship("LLMFineTuneExample", back_populates="transaction", cascade="save-update, merge")

@@ -15,6 +15,7 @@ from src.parser import BankParser
 from src.ai import CategorizerAI
 from src.local_llm import LocalLLMPipeline
 from src.intents import IntentAI
+from src.logger import log_interaction
 
 from src.commands import list_accounts, get_queue_stats, add_transaction, get_queue_transactions, mark_transaction_verified, update_transaction_category, get_category_display_from_values
 
@@ -1058,7 +1059,24 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     intent_ai = IntentAI()
     intent_data = await intent_ai.classify(user_text)
     
-    if intent_data.get("confidence", 0) > 0.7:
+    intent = intent_data.get("intent")
+    confidence = intent_data.get("confidence", 0.0)
+    entities = intent_data.get("entities", {})
+
+    # Log the interaction attempt
+    async with AsyncSessionLocal() as session:
+        await log_interaction(
+            session=session,
+            user_id=update.effective_user.id,
+            username=update.effective_user.username,
+            message_content=user_text,
+            detected_intent=intent,
+            confidence_score=confidence,
+            entities=entities,
+            action_taken="INTENT_DISPATCH" if confidence > 0.7 else "RAG_FALLBACK"
+        )
+    
+    if confidence > 0.7:
         await handle_nl_dispatch(update, context, intent_data)
         return
 
@@ -1079,6 +1097,8 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
              if len(reply) > 4000:
                 reply = reply[:4000] + "..."
              await update.message.reply_text(reply, parse_mode="HTML")
+             
+             # Log RAG response key info (optional update to previous log entry, but for now simple append is fine or just rely on action_taken)
         except Exception as e:
              logging.error(f"LLM Error: {e}")
              await update.message.reply_text("🤖 I'm having trouble thinking right now. Is Ollama running?")
