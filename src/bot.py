@@ -47,8 +47,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "I can help you manage your finances directly from Telegram.\n"
         "Use the menu button below or types `/help` to see all commands.",
         parse_mode="Markdown",
-        reply_markup=markup
     )
+    
+async def send_typing_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """
+    Continuously sends the 'typing' action every 4 seconds to keep the indicator active.
+    Intended to be used as a background task during long LLM inferences.
+    """
+    try:
+        while True:
+            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            await asyncio.sleep(4)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logging.error(f"Typing loop error: {e}")
 
 async def rulebook_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -1103,39 +1116,56 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     # 2. RAG Fallback
     async with AsyncSessionLocal() as session:
         llm = LocalLLMPipeline()
+        typing_task = None
         try:
-             result = await llm.answer(session, user_text, top_k=10)
-             answer = result["answer"]
-             sources = []
-             for ctx in result.get("contexts", [])[:3]:
-                 content_preview = ctx['content'].split('\n')[2]
-                 sources.append(f"- {content_preview}")
-             
-             reply = f"{html.escape(answer)}"
-             if sources:
-                 reply += "\n\n<b>Sources:</b>\n" + "\n".join([f"- {html.escape(s)}" for s in sources])
-             if len(reply) > 4000:
-                reply = reply[:4000] + "..."
-             await update.message.reply_text(reply, parse_mode="HTML")
-             
-             # Log the RAG response
-             try:
-                 async with AsyncSessionLocal() as session:
-                     await log_interaction(
-                         session=session,
-                         user_id=update.effective_user.id,
-                         username=update.effective_user.username,
-                         message_content=user_text,
-                         detected_intent=intent,
-                         confidence_score=confidence,
-                         entities=entities,
-                         action_taken="RAG_REPLY",
-                         response_content=reply
-                     )
-             except Exception as log_err:
-                 logging.error(f"RAG Logging FAILED: {log_err}")
-             
+            # Start persistent typing indicator
+            typing_task = asyncio.create_task(send_typing_loop(context, update.effective_chat.id))
+            
+            result = await llm.answer(session, user_text, top_k=10)
+            
+            # Stop typing indicator
+            if typing_task:
+                typing_task.cancel()
+                try:
+                    await typing_task
+                except asyncio.CancelledError:
+                    pass
+            
+            answer = result["answer"]
+            sources = []
+            for ctx in result.get("contexts", [])[:3]:
+                content_preview = ctx['content'].split('\n')[2]
+                sources.append(f"- {content_preview}")
+            
+            reply = f"{html.escape(answer)}"
+            if sources:
+                reply += "\n\n<b>Sources:</b>\n" + "\n".join([f"- {html.escape(s)}" for s in sources])
+            if len(reply) > 4000:
+               reply = reply[:4000] + "..."
+            await update.message.reply_text(reply, parse_mode="HTML")
+            
+            # Log the RAG response
+            try:
+                async with AsyncSessionLocal() as session:
+                    await log_interaction(
+                        session=session,
+                        user_id=update.effective_user.id,
+                        username=update.effective_user.username,
+                        message_content=user_text,
+                        detected_intent=intent,
+                        confidence_score=confidence,
+                        entities=entities,
+                        action_taken="RAG_REPLY",
+                        response_content=reply
+                    )
+            except Exception as log_err:
+                logging.error(f"RAG Logging FAILED: {log_err}")
+            
         except Exception as e:
+             if typing_task:
+                typing_task.cancel()
+             logging.error(f"LLM Error: {e}")
+             await update.message.reply_text("🤖 I'm having trouble thinking right now. Is Ollama running?")
              logging.error(f"LLM Error: {e}")
              await update.message.reply_text("🤖 I'm having trouble thinking right now. Is Ollama running?")
 
