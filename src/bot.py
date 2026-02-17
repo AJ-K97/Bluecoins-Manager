@@ -1003,12 +1003,6 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not user_text:
         return
 
-    # 0. Handle explicit conversational commands
-    if user_text.strip() == "/reset":
-        context.user_data["history"] = []
-        await update.message.reply_text("🧹 Context cleared.")
-        return
-
     # Check for active conversational state
     nl_action = context.user_data.get("nl_action")
     nl_state = context.user_data.get("nl_state")
@@ -1119,7 +1113,7 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await handle_nl_dispatch(update, context, intent_data)
         return
 
-    # 2. RAG / SQL Fallback
+    # 2. RAG Fallback
     async with AsyncSessionLocal() as session:
         llm = LocalLLMPipeline()
         typing_task = None
@@ -1127,10 +1121,7 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             # Start persistent typing indicator
             typing_task = asyncio.create_task(send_typing_loop(context, update.effective_chat.id))
             
-            # Get History
-            history = context.user_data.get("history", [])
-            
-            result = await llm.answer(session, user_text, history=history, top_k=10)
+            result = await llm.answer(session, user_text, top_k=10)
             
             # Stop typing indicator
             if typing_task:
@@ -1141,29 +1132,14 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     pass
             
             answer = result["answer"]
-            tool_used = result.get("tool", "RAG")
+            sources = []
+            for ctx in result.get("contexts", [])[:3]:
+                content_preview = ctx['content'].split('\n')[2]
+                sources.append(f"- {content_preview}")
             
-            # Append to history
-            history.append({"role": "user", "content": user_text})
-            history.append({"role": "assistant", "content": answer})
-            # Keep last 10
-            context.user_data["history"] = history[-10:]
-            
-            # Format Reply
             reply = f"{html.escape(answer)}"
-            
-            if tool_used == "RAG":
-                sources = []
-                for ctx in result.get("contexts", [])[:3]:
-                    content_preview = ctx['content'].split('\n')[2]
-                    sources.append(f"- {content_preview}")
-                if sources:
-                    reply += "\n\n<b>Sources:</b>\n" + "\n".join([f"- {html.escape(s)}" for s in sources])
-            
-            elif tool_used == "SQL":
-                sql_query = result.get("sql_query", "")
-                reply += f"\n\n<pre>{html.escape(sql_query)}</pre>"
-
+            if sources:
+                reply += "\n\n<b>Sources:</b>\n" + "\n".join([f"- {html.escape(s)}" for s in sources])
             if len(reply) > 4000:
                reply = reply[:4000] + "..."
             await update.message.reply_text(reply, parse_mode="HTML")
