@@ -2,7 +2,7 @@ import ollama
 import re
 from sqlalchemy import select
 from src.database import Category, Transaction, AIMemory, AIGlobalMemory, AICategoryUnderstanding
-from src.patterns import extract_pattern_key
+from src.keyword_resolver import KeywordResolver
 
 from src.ai_config import get_ollama_client
 
@@ -137,10 +137,12 @@ Text:
 
         cat_str = "\n".join(cat_lines)
 
-        search_term = extract_pattern_key(description)
+        keyword_resolver = KeywordResolver()
+        resolved_keyword = await keyword_resolver.resolve(description, session)
+        search_term = resolved_keyword.keyword
         history_str = "None"
 
-        if len(search_term) > 2:
+        if len(search_term) > 2 and resolved_keyword.confidence >= 0.35:
             stmt = select(Transaction, AIMemory).outerjoin(AIMemory, Transaction.id == AIMemory.transaction_id).where(
                 Transaction.description.ilike(f"%{search_term}%"),
                 Transaction.category_id.is_not(None)
@@ -200,9 +202,15 @@ Text:
         if expected_type not in {"expense", "income"}:
             expected_type = None
 
-        merchant_hint = extract_pattern_key(description)
+        merchant_hint = resolved_keyword.keyword
+        merchant_hint_confidence = resolved_keyword.confidence
+        merchant_hint_source = resolved_keyword.source
         clean_desc = self._clean_description(description)
-        search_query = self._clean_description(merchant_hint) if merchant_hint and merchant_hint != "UNKNOWN" else clean_desc
+        search_query = (
+            self._clean_description(merchant_hint)
+            if merchant_hint and merchant_hint != "UNKNOWN" and merchant_hint_confidence >= 0.35
+            else clean_desc
+        )
         search_results = self._run_web_search(search_query, max_results=2)
         search_context = self._format_search_results(search_results)
 
@@ -212,6 +220,8 @@ Categorize this transaction and provide multiple plausible options.
 Transaction: "{description}"
 cleaned_description: '{clean_desc}'
 merchant_hint: '{merchant_hint}'
+merchant_hint_confidence: '{merchant_hint_confidence:.2f}'
+merchant_hint_source: '{merchant_hint_source}'
 expected_type: '{expected_type or "unknown"}'
 
 Web Search Context:

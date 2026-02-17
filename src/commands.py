@@ -18,12 +18,14 @@ from src.database import (
     LLMKnowledgeChunk,
     LLMSkill,
     LLMFineTuneExample,
+    MerchantKeywordAlias,
     Base,
     engine,
 )
 from src.parser import BankParser
 from src.ai import CategorizerAI
-from src.patterns import extract_pattern_key
+from src.patterns import extract_pattern_key_result
+from src.keyword_resolver import KeywordResolver
 from src.policy import (
     AUTO_APPROVE_MIN,
     POLICY_VERSION,
@@ -128,6 +130,7 @@ async def rebuild_category_understanding(session, category_ids=None):
     cat_res = await session.execute(stmt)
     categories = cat_res.scalars().all()
 
+    resolver = KeywordResolver()
     updates = 0
     for cat in categories:
         tx_stmt = (
@@ -145,7 +148,8 @@ async def rebuild_category_understanding(session, category_ids=None):
         pattern_counter = Counter()
         sample_descriptions = []
         for tx in txs:
-            key = extract_pattern_key(tx.description)
+            resolved = await resolver.resolve(tx.description, session)
+            key = resolved.keyword
             if key:
                 pattern_counter[key] += 1
             if tx.description:
@@ -253,6 +257,7 @@ RESETTABLE_MODELS = {
     "categories": Category,
     "transactions": Transaction,
     "ai_memory": AIMemory,
+    "merchant_keyword_aliases": MerchantKeywordAlias,
     "ai_global_memory": AIGlobalMemory,
     "ai_category_understanding": AICategoryUnderstanding,
     "llm_knowledge_chunks": LLMKnowledgeChunk,
@@ -479,6 +484,7 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
 
     # Initialize AI
     ai = CategorizerAI()
+    keyword_resolver = KeywordResolver()
     
     new_txs = []
     new_tx_ids = []
@@ -506,6 +512,8 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
             skipped += 1
             continue
         
+        keyword_result = await keyword_resolver.resolve(tx_data["description"], session)
+
         cat_id = None
         confidence = 0.0
         reasoning = None
@@ -610,11 +618,9 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
                 verified_categories_touched.add(cat_id)
             
             # Create Memory Entry
-            pattern_key = extract_pattern_key(tx_data["description"])
-            
             memory = AIMemory(
                 transaction_id=new_tx.id,
-                pattern_key=pattern_key,
+                pattern_key=keyword_result.keyword,
                 ai_suggested_category_id=ai_suggested_cat_id,
                 ai_reasoning=reasoning or ai_suggested_reasoning,
                 user_selected_category_id=cat_id if is_verified else None, # If verified, we record it
@@ -626,6 +632,17 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
             await session.commit()
             new_txs.append(new_tx)
             new_tx_ids.append(new_tx.id)
+            if is_verified:
+                try:
+                    await keyword_resolver.learn_from_verified(
+                        session,
+                        tx_data["description"],
+                        resolved_keyword=keyword_result.keyword,
+                        transaction_id=new_tx.id,
+                    )
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
         except Exception as e:
             await session.rollback()
             partial_msg = (
@@ -832,7 +849,7 @@ async def update_transaction_category(session, tx_id, category_id=None, set_tran
             session.add(memory)
         else:
             # Create new if missing
-            pattern_key = extract_pattern_key(tx.description)
+            pattern_key = extract_pattern_key_result(tx.description).keyword
             new_mem = AIMemory(
                  transaction_id=tx.id,
                  pattern_key=pattern_key,
@@ -852,6 +869,11 @@ async def update_transaction_category(session, tx_id, category_id=None, set_tran
         await rebuild_category_understanding(session, category_ids=touched_categories)
 
     await session.commit()
+    try:
+        await keyword_resolver.learn_from_verified(session, tx.description, transaction_id=tx.id)
+        await session.commit()
+    except Exception:
+        await session.rollback()
     return True, "Transaction category updated and verified."
 
 async def update_transaction_amount(session, tx_id, new_amount):
@@ -886,6 +908,12 @@ async def mark_transaction_verified(session, tx_id):
             await rebuild_category_understanding(session, category_ids=[tx.category_id])
 
     await session.commit()
+    if tx:
+        try:
+            await keyword_resolver.learn_from_verified(session, tx.description, transaction_id=tx.id)
+            await session.commit()
+        except Exception:
+            await session.rollback()
     return True, "Transaction verified."
 
 async def delete_transaction(session, tx_id):
@@ -966,7 +994,7 @@ async def add_transaction(session, date, amount, description, account_name, cate
     
     # 5. Create Memory (if AI used and unverified)
     if not is_verified and category_id:
-         pattern_key = extract_pattern_key(description)
+         pattern_key = extract_pattern_key_result(description).keyword
          memory = AIMemory(
              transaction_id=new_tx.id,
              pattern_key=pattern_key,
@@ -978,6 +1006,12 @@ async def add_transaction(session, date, amount, description, account_name, cate
          session.add(memory)
 
     await session.commit()
+    if is_verified:
+        try:
+            await keyword_resolver.learn_from_verified(session, description, transaction_id=new_tx.id)
+            await session.commit()
+        except Exception:
+            await session.rollback()
     
     status_msg = "Added" if is_verified else "Added (Needs Review)"
     return True, f"{status_msg}: #{new_tx.id} {description} ({amount})", new_tx
