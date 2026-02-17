@@ -8,13 +8,6 @@ load_dotenv()
 
 def get_ollama_client() -> ollama.AsyncClient:
     """
-    Returns an async Ollama client configured with the OLLAMA_HOST environment variable.
-    Defaults to 127.0.0.1:11434 if not set.
+    Returns an async Ollama client configured for local execution.
     """
-    host = os.getenv("OLLAMA_HOST")
-    if host:
-        # print(f"DEBUG: Connecting to Ollama at {host}")
-        return ollama.AsyncClient(host=host)
-    else:
-        # print("DEBUG: Connecting to Ollama at default localhost")
-        return ollama.AsyncClient()
+    return ollama.AsyncClient()
