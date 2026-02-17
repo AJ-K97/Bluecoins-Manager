@@ -2,11 +2,14 @@ import argparse
 import asyncio
 import csv
 import os
+import json
 from datetime import datetime
 from sqlalchemy.exc import IntegrityError
 from src.database import init_db, AsyncSessionLocal
 from src.interactive import interactive_main, review_queue_menu
 from src.parser import BankParser, format_pdf_debug_report, format_pdf_blocks_report
+from src.keyword_resolver import KeywordResolver
+from src.ai import CategorizerAI
 from src.commands import (
     list_accounts,
     add_account,
@@ -96,6 +99,129 @@ async def pdf_debug_command(args):
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(full_report)
         print(f"Saved full debug report to {args.output}")
+
+
+async def keyword_debug_command(args):
+    description = (args.desc or "").strip()
+    if not description:
+        print("Error: --desc is required")
+        return
+    async with AsyncSessionLocal() as session:
+        resolver = KeywordResolver()
+        debug = await resolver.debug(session, description)
+    resolved = debug["resolved_result"]
+    rule = debug["rule_result"]
+    print("Keyword Debug")
+    print(f"- description: {debug['description']}")
+    print(f"- normalized_phrase: {debug['normalized_phrase']}")
+    print(f"- rule.keyword: {rule.keyword} (conf={rule.confidence:.2f}, source={rule.source})")
+    print(f"- resolved.keyword: {resolved.keyword} (conf={resolved.confidence:.2f}, source={resolved.source})")
+    print(f"- tokens_used: {', '.join(resolved.tokens_used) if resolved.tokens_used else 'none'}")
+    matches = debug.get("exact_alias_matches") or []
+    if matches:
+        print("- exact_alias_matches:")
+        for m in matches:
+            print(
+                f"  - {m['canonical_keyword']} "
+                f"(support={m['support_count']}, verified={m['verified_count']})"
+            )
+            if args.show_sources:
+                sources = []
+                try:
+                    payload = json.loads(m.get("metadata_json") or "{}")
+                    if isinstance(payload, dict):
+                        sources = payload.get("source_transactions") or []
+                except Exception:
+                    sources = []
+                if sources:
+                    print("    sources:")
+                    for s in sources:
+                        tx_id = s.get("transaction_id")
+                        desc = (s.get("description") or "").strip()
+                        print(f"      - tx_id={tx_id} | {desc}")
+                else:
+                    print("    sources: none")
+    else:
+        print("- exact_alias_matches: none")
+
+
+async def category_debug_command(args):
+    description = (args.desc or "").strip()
+    if not description:
+        print("Error: --desc is required")
+        return
+
+    tx_type = (args.tx_type or "").strip().lower()
+    if tx_type not in {"expense", "income"}:
+        print("Error: --tx-type must be one of: expense, income")
+        return
+
+    async with AsyncSessionLocal() as session:
+        resolver = KeywordResolver()
+        keyword_debug = await resolver.debug(session, description)
+        ai = CategorizerAI(model=args.model)
+        extra_instruction = (
+            f"Debug context: transaction amount is {float(args.amount):.2f}. "
+            f"Use amount direction and size as a weak hint only."
+        )
+        candidates = await ai.suggest_category_candidates(
+            description,
+            session,
+            min_candidates=max(3, int(args.top_k)),
+            extra_instruction=extra_instruction,
+            expected_type=tx_type,
+        )
+
+    resolved = keyword_debug["resolved_result"]
+    rule = keyword_debug["rule_result"]
+
+    print("Category Debug")
+    print(f"- description: {description}")
+    print(f"- amount: {float(args.amount):.2f}")
+    print(f"- tx_type: {tx_type}")
+    print(f"- keyword.rule: {rule.keyword} (conf={rule.confidence:.2f}, source={rule.source})")
+    print(
+        f"- keyword.resolved: {resolved.keyword} "
+        f"(conf={resolved.confidence:.2f}, source={resolved.source})"
+    )
+    print(
+        f"- keyword.tokens_used: "
+        f"{', '.join(resolved.tokens_used) if resolved.tokens_used else 'none'}"
+    )
+
+    if not candidates:
+        print("- ai.decision: none")
+        print("- ai.reasoning: Unable to produce category suggestions.")
+        return
+
+    top = candidates[0]
+    print("- ai.top_decision:")
+    print(f"  - category_id: {top['id']}")
+    print(f"  - predicted_type: {top['type']}")
+    print(f"  - confidence: {top['confidence']:.2f}")
+    print(f"  - reasoning: {top['reasoning']}")
+
+    print("- ai.candidates:")
+    for idx, c in enumerate(candidates[: max(1, int(args.top_k))], start=1):
+        print(
+            f"  {idx}. category_id={c['id']} type={c['type']} "
+            f"conf={c['confidence']:.2f}"
+        )
+        print(f"     reasoning: {c['reasoning']}")
+
+
+async def keyword_backfill_command(args):
+    async with AsyncSessionLocal() as session:
+        resolver = KeywordResolver()
+        stats = await resolver.backfill_from_verified_transactions(
+            session,
+            reset_existing=not args.keep_existing,
+        )
+    print(
+        f"Keyword backfill complete. "
+        f"seen_verified={stats['seen_verified']} learned_updates={stats['learned_updates']} "
+        f"reset_existing={not args.keep_existing}"
+    )
 
 
 async def llm_command(args):
@@ -231,6 +357,33 @@ async def main():
     pdf_debug_parser.add_argument("--output", help="Optional output .txt path for full report")
     pdf_debug_parser.add_argument("--max-lines", type=int, default=500, help="Max lines for console preview")
 
+    keyword_debug_parser = subparsers.add_parser("keyword-debug")
+    keyword_debug_parser.add_argument("--desc", required=True, help="Transaction description to analyze")
+    keyword_debug_parser.add_argument(
+        "--show-sources",
+        action="store_true",
+        help="Pretty print source transactions stored against alias matches.",
+    )
+
+    category_debug_parser = subparsers.add_parser("category-debug")
+    category_debug_parser.add_argument("--desc", required=True, help="Transaction description")
+    category_debug_parser.add_argument("--amount", type=float, required=True, help="Transaction amount")
+    category_debug_parser.add_argument(
+        "--tx-type",
+        required=True,
+        choices=["expense", "income"],
+        help="Expected transaction type",
+    )
+    category_debug_parser.add_argument("--top-k", type=int, default=5, help="How many candidates to print")
+    category_debug_parser.add_argument("--model", default="llama3.1:8b", help="LLM model name")
+
+    keyword_backfill_parser = subparsers.add_parser("keyword-backfill")
+    keyword_backfill_parser.add_argument(
+        "--keep-existing",
+        action="store_true",
+        help="Keep existing alias rows and add/update on top (default rebuilds aliases from scratch).",
+    )
+
     # Local LLM pipeline
     llm_parser = subparsers.add_parser("llm")
     llm_parser.add_argument("--model", default="llama3.1:8b", help="Local chat model name")
@@ -319,6 +472,12 @@ async def main():
         await account_command(args)
     elif args.command == "convert":
         await convert_command(args)
+    elif args.command == "keyword-debug":
+        await keyword_debug_command(args)
+    elif args.command == "keyword-backfill":
+        await keyword_backfill_command(args)
+    elif args.command == "category-debug":
+        await category_debug_command(args)
     elif args.command == "llm":
         await llm_command(args)
     elif args.command == "db":
