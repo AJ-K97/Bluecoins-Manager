@@ -6,6 +6,7 @@ from datetime import datetime
 from sqlalchemy.exc import IntegrityError
 from src.database import init_db, AsyncSessionLocal
 from src.interactive import interactive_main, review_queue_menu
+from src.parser import BankParser, format_pdf_debug_report, format_pdf_blocks_report
 from src.commands import (
     list_accounts,
     add_account,
@@ -56,6 +57,45 @@ async def add_tx_command(args):
             account_name=args.account
         )
         print(msg)
+
+
+async def pdf_debug_command(args):
+    parser = BankParser()
+    if args.as_blocks:
+        bank_name = args.bank or "ANZ"
+        try:
+            blocks_data = parser.extract_pdf_blocks_debug(args.input, bank_name=bank_name)
+        except Exception as e:
+            print(f"Error: {e}")
+            return
+        report = format_pdf_blocks_report(blocks_data, max_blocks=args.max_blocks)
+        print(report)
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as f:
+                f.write(format_pdf_blocks_report(blocks_data, max_blocks=None))
+            print(f"Saved full block debug report to {args.output}")
+        return
+
+    mode = "both"
+    if args.raw_only:
+        mode = "raw"
+    elif args.cleaned_only:
+        mode = "cleaned"
+
+    try:
+        debug_data = parser.extract_pdf_debug(args.input, apply_cleaning=True)
+    except Exception as e:
+        print(f"Error: {e}")
+        return
+
+    preview_report = format_pdf_debug_report(debug_data, mode=mode, max_lines=args.max_lines)
+    print(preview_report)
+
+    if args.output:
+        full_report = format_pdf_debug_report(debug_data, mode=mode, max_lines=None)
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(full_report)
+        print(f"Saved full debug report to {args.output}")
 
 
 async def llm_command(args):
@@ -179,6 +219,18 @@ async def main():
     conv_parser.add_argument("--account", required=True)
     conv_parser.add_argument("--output", help="Optional output CSV")
 
+    # PDF text debug/inspection
+    pdf_debug_parser = subparsers.add_parser("pdf-debug")
+    pdf_debug_parser.add_argument("--input", required=True, help="Path to PDF file")
+    mode_group = pdf_debug_parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--cleaned-only", action="store_true")
+    mode_group.add_argument("--raw-only", action="store_true")
+    pdf_debug_parser.add_argument("--as-blocks", action="store_true", help="Show assembled multiline transaction blocks")
+    pdf_debug_parser.add_argument("--bank", help="Bank name for block assembly (default: ANZ when --as-blocks)")
+    pdf_debug_parser.add_argument("--max-blocks", type=int, default=200, help="Max blocks to print in --as-blocks mode")
+    pdf_debug_parser.add_argument("--output", help="Optional output .txt path for full report")
+    pdf_debug_parser.add_argument("--max-lines", type=int, default=500, help="Max lines for console preview")
+
     # Local LLM pipeline
     llm_parser = subparsers.add_parser("llm")
     llm_parser.add_argument("--model", default="llama3.1:8b", help="Local chat model name")
@@ -252,9 +304,14 @@ async def main():
     add_tx_parser.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"), help="YYYY-MM-DD")
 
     args = parser.parse_args()
-    
+
+    # Commands that do not require database connectivity.
+    if args.command == "pdf-debug":
+        await pdf_debug_command(args)
+        return
+
     await init_db()
-    
+
     if not args.command:
         # Launch Interactive Mode if no args
         await interactive_main()

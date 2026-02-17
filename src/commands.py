@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import textwrap
 from datetime import datetime
 from collections import Counter
 from sqlalchemy import select, update, delete, func
@@ -449,6 +450,15 @@ async def delete_category(session, category_id, reassign_category_id=None, delet
 
 
 async def process_import(session, bank_name, file_path, account_name, output_path=None, review_callback=None):
+    def render_box(lines, width=88):
+        border = "+" + "-" * (width - 2) + "+"
+        print(border)
+        for line in lines:
+            wrapped = textwrap.wrap(str(line), width=width - 4) or [""]
+            for part in wrapped:
+                print(f"| {part:<{width - 4}} |")
+        print(border)
+
     # Check Account
     result = await session.execute(select(Account).where(Account.name == account_name))
     account = result.scalar_one_or_none()
@@ -471,10 +481,19 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
     ai = CategorizerAI()
     
     new_txs = []
+    new_tx_ids = []
     skipped = 0
     verified_categories_touched = set()
     
     for tx_data in transactions:
+        raw_block = (tx_data.get("raw_csv_row") or "").strip()
+        source_lines = []
+        if raw_block:
+            if " | " in raw_block:
+                source_lines = [x.strip() for x in raw_block.split(" | ") if x.strip()]
+            else:
+                source_lines = [raw_block]
+
         # Check duplicate
         stmt = select(Transaction).where(
             Transaction.date == tx_data["date"],
@@ -506,6 +525,11 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
             cat_id = None
         ai_suggested_cat_id = cat_id if tx_type != "transfer" else None
         ai_suggested_reasoning = reasoning
+        if tx_type == "transfer":
+            ai_label = "(Transfer) > (Transfer) [transfer]"
+        else:
+            ai_parent, ai_name = await get_category_display_from_values(session, tx_type, ai_suggested_cat_id)
+            ai_label = format_category_label(ai_parent, ai_name, tx_type)
         
         conflict_flags = []
         if tx_type != "transfer" and cat_id is None:
@@ -534,6 +558,19 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
                 cat_id = None
         else:
             is_verified = decision.can_auto_verify
+
+        source_block_section = [f"  - {line}" for line in source_lines] if source_lines else ["  - (none)"]
+        box_lines = [
+            f"Date: {tx_data['date']}    Amount: {tx_data['amount']}",
+            f"Type: {(tx_type or '').upper()}",
+            f"Description: {tx_data['description']}",
+            "Source Block:",
+            *source_block_section,
+            f"AI Suggestion: {ai_label}",
+            f"AI Confidence: {confidence:.2f}",
+            f"AI Reasoning: {ai_suggested_reasoning or 'No reasoning provided.'}",
+        ]
+        render_box(box_lines)
 
         final_flags = []
         if tx_type != "transfer" and cat_id is None:
@@ -566,47 +603,64 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
             review_priority=100 if is_verified else decision.priority,
             review_bucket=decision.bucket,
         )
-        session.add(new_tx)
-        await session.flush() # Get ID
-        if is_verified and cat_id:
-            verified_categories_touched.add(cat_id)
-        
-        # Create Memory Entry
-        pattern_key = extract_pattern_key(tx_data["description"])
-        
-        memory = AIMemory(
-            transaction_id=new_tx.id,
-            pattern_key=pattern_key,
-            ai_suggested_category_id=ai_suggested_cat_id,
-            ai_reasoning=reasoning or ai_suggested_reasoning,
-            user_selected_category_id=cat_id if is_verified else None, # If verified, we record it
-            policy_version=POLICY_VERSION,
-            threshold_used=AUTO_APPROVE_MIN,
-            conflict_flags_json=json.dumps(final_flags, ensure_ascii=True),
-        )
-        session.add(memory)
-        new_txs.append(new_tx)
-    
-    await session.commit()
+        try:
+            session.add(new_tx)
+            await session.flush() # Get ID
+            if is_verified and cat_id:
+                verified_categories_touched.add(cat_id)
+            
+            # Create Memory Entry
+            pattern_key = extract_pattern_key(tx_data["description"])
+            
+            memory = AIMemory(
+                transaction_id=new_tx.id,
+                pattern_key=pattern_key,
+                ai_suggested_category_id=ai_suggested_cat_id,
+                ai_reasoning=reasoning or ai_suggested_reasoning,
+                user_selected_category_id=cat_id if is_verified else None, # If verified, we record it
+                policy_version=POLICY_VERSION,
+                threshold_used=AUTO_APPROVE_MIN,
+                conflict_flags_json=json.dumps(final_flags, ensure_ascii=True),
+            )
+            session.add(memory)
+            await session.commit()
+            new_txs.append(new_tx)
+            new_tx_ids.append(new_tx.id)
+        except Exception as e:
+            await session.rollback()
+            partial_msg = (
+                f"Import stopped due to database error after saving {len(new_txs)} transactions "
+                f"(skipped {skipped} duplicates): {e}"
+            )
+            return False, partial_msg, new_txs
 
     if verified_categories_touched:
-        await rebuild_category_understanding(session, category_ids=list(verified_categories_touched))
-        await session.commit()
+        try:
+            await rebuild_category_understanding(session, category_ids=list(verified_categories_touched))
+            await session.commit()
+        except Exception:
+            await session.rollback()
     
     result_msg = f"Imported {len(new_txs)} transactions. Skipped {skipped} duplicates."
     
     # Export if requested
-    if output_path and new_txs:
+    if output_path and new_tx_ids:
         # Re-fetch with category for export
-        tx_ids = [t.id for t in new_txs]
-        stmt = select(Transaction).options(selectinload(Transaction.category), selectinload(Transaction.account)).where(Transaction.id.in_(tx_ids))
+        stmt = select(Transaction).options(selectinload(Transaction.category), selectinload(Transaction.account)).where(Transaction.id.in_(new_tx_ids))
         result = await session.execute(stmt)
         export_txs = result.scalars().all()
         
         success, msg = export_to_bluecoins_csv(export_txs, output_path)
         result_msg += f"\n{msg}"
         
-    return True, result_msg, new_txs
+    # Re-fetch persisted rows so caller gets stable objects even with per-row commits.
+    persisted = []
+    if new_tx_ids:
+        stmt = select(Transaction).options(selectinload(Transaction.category), selectinload(Transaction.account)).where(Transaction.id.in_(new_tx_ids))
+        result = await session.execute(stmt)
+        persisted = result.scalars().all()
+
+    return True, result_msg, persisted
 
 async def get_transactions(session, account_id=None, start_date=None, end_date=None):
     stmt = select(Transaction).options(

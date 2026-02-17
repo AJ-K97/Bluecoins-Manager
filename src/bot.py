@@ -16,6 +16,7 @@ from src.ai import CategorizerAI
 from src.local_llm import LocalLLMPipeline
 from src.intents import IntentAI
 from src.logger import log_interaction
+from src.bank_config import list_bank_names
 
 from src.commands import (
     list_accounts,
@@ -674,10 +675,9 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def _detect_bank_from_filename(file_name: str):
     filename_upper = (file_name or "").upper()
-    if "HSBC" in filename_upper:
-        return "HSBC"
-    if "WISE" in filename_upper:
-        return "Wise"
+    for bank_name in list_bank_names():
+        if bank_name.upper() in filename_upper:
+            return bank_name
     return None
 
 def _fmt_date(value):
@@ -1245,7 +1245,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parser = BankParser()
         bank_name = _detect_bank_from_filename(document.file_name)
         if not bank_name:
-            await update.message.reply_text("Could not detect bank from filename. Please rename file to include 'HSBC' or 'Wise'.")
+            known = ", ".join(list_bank_names()) or "none"
+            await update.message.reply_text(
+                f"Could not detect bank from filename. Rename it to include one of: {known}."
+            )
             return
 
         # Parse Transactions

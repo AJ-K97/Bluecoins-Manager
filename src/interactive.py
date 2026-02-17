@@ -1,4 +1,5 @@
 import os
+import re
 import textwrap
 
 from datetime import datetime
@@ -19,6 +20,8 @@ from src.commands import (
     get_queue_transactions, get_queue_stats,
 )
 from src.ai import CategorizerAI
+from src.bank_config import list_bank_names, load_banks_payload, upsert_bank_format
+from src.parser import BankParser, format_pdf_debug_report, format_pdf_blocks_report
 
 from src.tui import TransactionReviewApp
 
@@ -725,14 +728,25 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
     """
     Called for each transaction during import if review is enabled.
     """
-    def render_box(lines, width=88):
+    def box_text(lines, width=88):
+        out = []
         border = "+" + "-" * (width - 2) + "+"
-        print(border)
+        out.append(border)
         for line in lines:
             wrapped = textwrap.wrap(str(line), width=width - 4) or [""]
             for part in wrapped:
-                print(f"| {part:<{width - 4}} |")
-        print(border)
+                out.append(f"| {part:<{width - 4}} |")
+        out.append(border)
+        return "\n".join(out)
+
+    def source_block_lines(raw_csv_row):
+        raw = (raw_csv_row or "").strip()
+        if not raw:
+            return []
+        # Multiline-table parser stores block lines joined by " | ".
+        if " | " in raw:
+            return [x.strip() for x in raw.split(" | ") if x.strip()]
+        return [raw]
 
     ai = CategorizerAI()
     effective_cat_id = current_cat_id
@@ -770,10 +784,17 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
         if not suggestion_lines:
             suggestion_lines = ["  No category suggestions available."]
 
-        render_box([
+        block_lines = source_block_lines(tx_data.get("raw_csv_row"))
+        block_section = []
+        if block_lines:
+            block_section.extend(["Source Block:"])
+            block_section.extend([f"  - {line}" for line in block_lines])
+
+        summary_box = box_text([
             f"Date: {tx_data['date']}    Amount: {tx_data['amount']}",
             f"Type: {type_disp}",
             f"Description: {tx_data['description']}",
+            *block_section,
             f"AI Suggestion: {suggestion_label}",
             f"Confidence: {effective_confidence:.2f}",
             f"Reasoning: {effective_reasoning}",
@@ -782,7 +803,7 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
         ])
 
         action = await inquirer.select(
-            message="Action:",
+            message=f"{summary_box}\nAction:",
             choices=[
                 Choice(value="accept", name="Accept & Verify"),
                 Choice(value="pick_suggested", name="Pick from Suggested Categories"),
@@ -982,7 +1003,7 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
 
                 discussion_history.append({"role": "user", "content": user_msg})
                 discussion_history.append({"role": "assistant", "content": model_reply})
-                render_box([f"Model: {model_reply}"])
+                print("\n" + box_text([f"Model: {model_reply}"]))
 
             if discussion_history:
                 conversation_instruction = await ai.summarize_review_conversation(
@@ -1017,23 +1038,35 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
 
 async def import_wizard(session):
     # 1. Select Bank
-    # Hardcoded for now, could load from config
+    bank_names = list_bank_names()
+    if not bank_names:
+        print("No bank formats configured. Please add one via 'Manage Bank Formats'.")
+        return
+
     bank = await inquirer.select(
         message="Select Bank Format:",
-        choices=["HSBC", "Wise", "CommBank", Choice(value=None, name="Cancel")]
+        choices=bank_names + [Choice(value=None, name="Cancel")]
     ).execute_async()
     
     if not bank: return
 
     # 2. Select File
     file_path = await inquirer.filepath(
-        message="Path to CSV file:",
+        message="Path to CSV/PDF file:",
         default=os.getcwd(), # Removed trailing slash
-        validate=lambda x: os.path.isfile(x) and x.endswith('.csv'),
+        validate=lambda x: os.path.isfile(x) and x.lower().endswith((".csv", ".pdf")),
         only_files=True
     ).execute_async()
     
     if not file_path: return
+
+    if file_path.lower().endswith(".pdf"):
+        inspect_now = await inquirer.confirm(
+            message="Inspect PDF text/blocks before importing?",
+            default=True,
+        ).execute_async()
+        if inspect_now:
+            await inspect_pdf_text_menu(default_file_path=file_path, default_bank=bank)
 
     # 3. Select Account
     accounts = await get_all_accounts(session)
@@ -1096,6 +1129,133 @@ async def import_wizard(session):
 
 from src.chat import FinanceChatAI
 
+
+def _date_regex_hint_from_format(fmt):
+    tokens = {
+        "%d": r"\d{1,2}",
+        "%m": r"\d{1,2}",
+        "%Y": r"\d{4}",
+        "%y": r"\d{2}",
+        "%b": r"[A-Za-z]{3}",
+        "%B": r"[A-Za-z]+",
+    }
+    out = re.escape(fmt)
+    for token, repl in tokens.items():
+        out = out.replace(re.escape(token), repl)
+    out = out.replace(r"\ ", r"\s+")
+    return out
+
+
+def _build_guided_pdf_regex():
+    date_pattern = r"\d{1,2}\s+[A-Za-z]{3}"
+    amount_pattern = r"\$?[\d,]+\.\d{2}"
+    return rf"^({date_pattern})\s+(.+?)\s+({amount_pattern})?\s*({amount_pattern})?\s+{amount_pattern}$"
+
+
+async def bank_format_builder_menu():
+    payload = load_banks_payload()
+    existing = sorted(payload["banks"].keys())
+
+    bank_name = await inquirer.text(message="Bank name to add/update (e.g. ANZ):").execute_async()
+    bank_name = (bank_name or "").strip()
+    if not bank_name:
+        return
+
+    if bank_name in existing:
+        overwrite = await inquirer.confirm(
+            message=f"Bank '{bank_name}' already exists. Overwrite format?"
+        ).execute_async()
+        if not overwrite:
+            return
+
+    source_mode = await inquirer.select(
+        message="What input format should this bank support?",
+        choices=[
+            Choice(value="csv", name="CSV only"),
+            Choice(value="pdf", name="PDF only"),
+            Choice(value="both", name="CSV and PDF"),
+            Choice(value=None, name="Cancel"),
+        ],
+    ).execute_async()
+    if not source_mode:
+        return
+
+    date_formats_raw = await inquirer.text(
+        message="Date formats (comma-separated strptime patterns):",
+        default="%d %b %Y,%d/%m/%Y,%Y-%m-%d,%d-%m-%Y,%d %b",
+    ).execute_async()
+    date_formats = [x.strip() for x in (date_formats_raw or "").split(",") if x.strip()]
+    if not date_formats:
+        date_formats = ["%d %b %Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"]
+
+    cfg = {"date_formats": date_formats}
+
+    if source_mode in {"csv", "both"}:
+        print("\nCSV mapping\n-----------")
+        cfg["date_column"] = await inquirer.text(message="Date column name:").execute_async()
+        cfg["description_column"] = await inquirer.text(message="Description column name:").execute_async()
+        cfg["amount_column"] = await inquirer.text(message="Amount column name:").execute_async()
+
+        type_mode = await inquirer.select(
+            message="How should transaction type be inferred?",
+            choices=[
+                Choice(value="amount_sign", name="Use amount sign (+/-)"),
+                Choice(value="direction_column", name="Use direction column (IN/OUT etc.)"),
+            ],
+        ).execute_async()
+        cfg["type_determination"] = type_mode
+        cfg["negate_amounts"] = await inquirer.confirm(
+            message="Negate parsed amounts? (for statements where signs are reversed)",
+            default=False,
+        ).execute_async()
+
+        if type_mode == "direction_column":
+            cfg["direction_column"] = await inquirer.text(message="Direction column name:").execute_async()
+            cfg["direction_in_value"] = await inquirer.text(message="Incoming value (e.g. IN):").execute_async()
+            cfg["direction_out_value"] = await inquirer.text(message="Outgoing value (e.g. OUT):").execute_async()
+
+    if source_mode in {"pdf", "both"}:
+        print("\nPDF mapping\n-----------")
+        pdf_mode = await inquirer.select(
+            message="PDF parse mode",
+            choices=[
+                Choice(value="guided_debit_credit", name="Guided: Date + Description + Credit/Debit + Balance"),
+                Choice(value="manual_regex", name="Manual regex"),
+            ],
+        ).execute_async()
+
+        if pdf_mode == "guided_debit_credit":
+            cfg["pdf_regex"] = _build_guided_pdf_regex()
+            cfg["pdf_date_group"] = 1
+            cfg["pdf_description_group"] = 2
+            cfg["pdf_credit_group"] = 3
+            cfg["pdf_debit_group"] = 4
+            cfg["pdf_prefer_debit_when_single_amount"] = await inquirer.confirm(
+                message="If only one amount is found, treat it as Debit (expense)?",
+                default=False,
+            ).execute_async()
+            print("Generated regex for split credit/debit PDF lines.")
+        else:
+            default_date_re = _date_regex_hint_from_format(date_formats[0]) if date_formats else r"\d{1,2}\s+[A-Za-z]{3}\s+\d{4}"
+            default_regex = rf"^({default_date_re})\s+(.+?)\s+(-?\$?[\d,]+\.\d{{2}})$"
+            cfg["pdf_regex"] = await inquirer.text(
+                message="Regex with groups: date(1), description(2), amount(3)",
+                default=default_regex,
+            ).execute_async()
+            cfg["pdf_date_group"] = 1
+            cfg["pdf_description_group"] = 2
+            cfg["pdf_amount_group"] = 3
+
+    upsert_bank_format(bank_name, cfg)
+    print(f"\nSaved bank format '{bank_name}' to data/banks_config.json\n")
+    print(cfg)
+
+    if bank_name.upper() == "ANZ":
+        print(
+            "\nANZ tip: for lines like '29 Jan ... Credit Debit Balance', use the guided PDF mode.\n"
+            "Keep '%d %b' in date formats; the parser can infer the year from text like 'Effective Date 27/01/2026'.\n"
+        )
+
 async def chat_wizard(session):
     print("\n💬 Chat with your Finance Data")
     print("Ask questions like 'How much did I spend on Food last month?' or 'Show me top expenses'.")
@@ -1112,6 +1272,84 @@ async def chat_wizard(session):
         response = await chat_ai.chat(question, session)
         print(f"\nAI: {response}\n")
 
+
+async def inspect_pdf_text_menu(default_file_path=None, default_bank=None):
+    file_path = default_file_path
+    if not file_path:
+        file_path = await inquirer.filepath(
+            message="Path to PDF file:",
+            default=os.getcwd(),
+            validate=lambda x: os.path.isfile(x) and x.lower().endswith(".pdf"),
+            only_files=True,
+        ).execute_async()
+    if not file_path:
+        return
+
+    mode = await inquirer.select(
+        message="Display mode:",
+        choices=[
+            Choice(value="both", name="Raw + Cleaned (default)"),
+            Choice(value="raw", name="Raw only"),
+            Choice(value="cleaned", name="Cleaned only"),
+            Choice(value="blocks", name="Blocks (assembled multiline transactions)"),
+            Choice(value=None, name="Cancel"),
+        ],
+    ).execute_async()
+    if not mode:
+        return
+
+    preview_label = "Max preview blocks:" if mode == "blocks" else "Max preview lines:"
+    max_lines_raw = await inquirer.text(
+        message=preview_label,
+        default="500",
+        validate=lambda x: (x or "").strip().isdigit() and int((x or "").strip()) > 0,
+        invalid_message="Enter a positive integer.",
+    ).execute_async()
+    max_lines = int((max_lines_raw or "500").strip())
+
+    parser = BankParser()
+    report_preview = None
+    full_report = None
+    try:
+        if mode == "blocks":
+            bank_name = default_bank
+            if not bank_name:
+                bank_name = await inquirer.select(
+                    message="Select bank format for block assembly:",
+                    choices=list_bank_names() + [Choice(value=None, name="Cancel")],
+                ).execute_async()
+            if not bank_name:
+                return
+            blocks_data = parser.extract_pdf_blocks_debug(file_path, bank_name)
+            report_preview = format_pdf_blocks_report(blocks_data, max_blocks=max_lines)
+            full_report = format_pdf_blocks_report(blocks_data, max_blocks=None)
+        else:
+            debug_data = parser.extract_pdf_debug(file_path, apply_cleaning=True)
+            report_preview = format_pdf_debug_report(debug_data, mode=mode, max_lines=max_lines)
+            full_report = format_pdf_debug_report(debug_data, mode=mode, max_lines=None)
+    except Exception as e:
+        print(f"\n❌ Error: {e}\n")
+        return
+
+    print("\n" + report_preview)
+
+    do_export = await inquirer.confirm(message="Export full report to .txt file?").execute_async()
+    if not do_export:
+        return
+
+    output_path = await inquirer.filepath(
+        message="Output path:",
+        default="pdf_debug_report.txt",
+        validate=lambda x: not os.path.isdir(x),
+    ).execute_async()
+    if not output_path:
+        return
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(full_report)
+    print(f"\nSaved full debug report to {output_path}\n")
+
+
 async def interactive_main():
     print("Welcome to Bluecoins Manager V2")
     await init_db()
@@ -1127,6 +1365,8 @@ async def interactive_main():
                     "Manage Transactions",
                     "Manage Categories",
                     "Manage Accounts",
+                    "Manage Bank Formats",
+                    "Inspect PDF Text (pypdf)",
                     "Manage AI Rulebook",
                     "Reset Database",
                     "Chat with your Data",
@@ -1146,6 +1386,10 @@ async def interactive_main():
                 await manage_transactions_menu(session)
             elif action == "Manage Categories":
                 await manage_categories_menu(session)
+            elif action == "Manage Bank Formats":
+                await bank_format_builder_menu()
+            elif action == "Inspect PDF Text (pypdf)":
+                await inspect_pdf_text_menu()
             elif action == "Manage AI Rulebook":
                 await manage_global_rulebook_menu(session)
             elif action == "Reset Database":

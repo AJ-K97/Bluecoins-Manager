@@ -365,7 +365,8 @@ Text:
         session,
         user_message,
         conversation_history=None,
-        rag_pipeline=None # Injected LocalLLMPipeline instance
+        rag_pipeline=None, # Injected LocalLLMPipeline instance
+        web_search_query=None,
     ):
         """
         Conversational assistant for discussing a single in-review transaction.

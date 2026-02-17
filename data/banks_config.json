@@ -30,6 +30,39 @@
             "direction_column": "Direction",
             "direction_in_value": "IN",
             "direction_out_value": "OUT"
+        },
+        "ANZ": {
+            "pdf_parser": "multiline_table",
+            "date_formats": [
+                "%d %b %Y",
+                "%d/%m/%Y",
+                "%Y-%m-%d",
+                "%d-%m-%Y",
+                "%d %b"
+            ],
+            "pdf_tx_start_regex": "^(?P<date>\\d{1,2}\\s+[A-Za-z]{3})(?:\\s+|$)(?P<rest>.*)$",
+            "pdf_amount_balance_regex": "^\\$?[\\d,]+\\.\\d{2}(?:\\s+\\$?[\\d,]+\\.\\d{2}){1,2}$",
+            "pdf_ignore_line_patterns": [
+                "^Account Statement$",
+                "^ANZ Plus Everyday$",
+                "^Date Description Credit Debit Balance$",
+                "^Branch Number \\(BSB\\) Account Number Opening Balance Closing Balance$",
+                "^Account Name$",
+                "^Transactions$",
+                "^Opening Balance\\b",
+                "^Please check your statement carefully\\.$",
+                "^Australia and New Zealand Banking Group Limited",
+                "^If you notice any errors",
+                "^For information about your account",
+                "^a complaint with the Australian Financial Complaints Authority",
+                "^www\\.afca\\.org\\.au"
+            ],
+            "pdf_regex": "^(\\d{1,2}\\s+[A-Za-z]{3})\\s+(.+?)\\s+(\\$?[\\d,]+\\.\\d{2})?\\s*(\\$?[\\d,]+\\.\\d{2})?\\s+\\$?[\\d,]+\\.\\d{2}$",
+            "pdf_date_group": 1,
+            "pdf_description_group": 2,
+            "pdf_credit_group": 3,
+            "pdf_debit_group": 4,
+            "pdf_prefer_debit_when_single_amount": false
         }
     }
 }
