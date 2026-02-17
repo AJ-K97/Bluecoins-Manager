@@ -29,6 +29,16 @@ We use Ollama to run the Llama 3 model locally.
     ```bash
     ollama serve
     ```
+4.  **(Optional) Use Ollama on another machine**:
+    - On the main PC (the machine running Ollama), expose Ollama on LAN:
+      ```bash
+      OLLAMA_HOST=0.0.0.0:11434 ollama serve
+      ```
+    - On this Bluecoins machine, set `OLLAMA_HOST` in `.env`:
+      ```bash
+      OLLAMA_HOST=http://<MAIN_PC_LAN_IP>:11434
+      ```
+    - Ensure firewall allows TCP `11434` on the main PC.
 
 ### C. Telegram Bot
 1.  Open Telegram and chat with **@BotFather**.

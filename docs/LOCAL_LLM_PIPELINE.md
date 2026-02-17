@@ -62,6 +62,14 @@ docker-compose up -d
 ```bash
 ollama serve
 ```
+If Ollama runs on another machine, set this project's `.env`:
+```bash
+OLLAMA_HOST=http://<MAIN_PC_LAN_IP>:11434
+```
+and start Ollama on the main PC bound to LAN:
+```bash
+OLLAMA_HOST=0.0.0.0:11434 ollama serve
+```
 
 3. Pull models (example defaults):
 ```bash
