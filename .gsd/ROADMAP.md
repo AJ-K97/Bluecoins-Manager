@@ -115,15 +115,23 @@
     - Improve readability of complex financial data.
 - **Status**: ✅ Complete
 
-### Phase 18: Remote LLM Integration
+### Phase 18: Contextual Intelligence & Query Refinement
+- **Goal**: Enable multi-turn conversation memory and context-aware query generation.
+- **Objectives**:
+    - Implement conversation history buffer in `LocalLLMPipeline`.
+    - Enhance `extract_search_filters` to use history for resolving references.
+    - Implement explicit context sessions (`/start-convo`, `/end-convo`).
+- **Status**: ⏳ In Progress
+
+### Phase 19: Remote LLM Integration
 - **Goal**: Offload LLM inference to a dedicated server via Tailscale/Ollama.
 - **Objectives**:
     - Configure `LocalLLMPipeline` to support remote host URLs.
     - Implement connection testing and fallback logic.
     - Optimise timeout and retry settings for network latency.
-- **Status**: ⬜ Not Started
+- **Status**: ✅ Complete
 
-### Phase 19: Quality Assurance & Evals
+### Phase 20: Quality Assurance & Evals
 - **Goal**: Implement evaluation metrics to measure improvement.
 - **Objectives**:
     - key performance indicators for response quality.
