@@ -53,6 +53,48 @@ async def delete_account(session, name):
     else:
         return False, f"Account '{name}' not found."
 
+async def update_account(session, current_name, new_name=None, new_institution=None):
+    result = await session.execute(select(Account).where(Account.name == current_name))
+    acc = result.scalar_one_or_none()
+    if not acc:
+        return False, f"Account '{current_name}' not found.", 0
+
+    target_name = (new_name or "").strip() or acc.name
+    target_institution = (new_institution or "").strip() or acc.institution
+
+    if target_name == acc.name and target_institution == acc.institution:
+        return False, "No account changes provided.", 0
+
+    if target_name != acc.name:
+        duplicate = await session.execute(select(Account).where(Account.name == target_name))
+        if duplicate.scalar_one_or_none():
+            return False, f"Account '{target_name}' already exists.", 0
+
+    linked_tx_count = await session.scalar(
+        select(func.count(Transaction.id)).where(Transaction.account_id == acc.id)
+    )
+    linked_tx_count = int(linked_tx_count or 0)
+
+    acc.name = target_name
+    acc.institution = target_institution
+    session.add(acc)
+
+    # Force-write linked transactions so downstream consumers that depend on
+    # account-linked rows are updated in the same DB transaction.
+    if linked_tx_count:
+        await session.execute(
+            update(Transaction)
+            .where(Transaction.account_id == acc.id)
+            .values(account_id=acc.id)
+        )
+
+    try:
+        await session.commit()
+        return True, f"Updated account '{current_name}' to '{target_name}'.", linked_tx_count
+    except IntegrityError:
+        await session.rollback()
+        return False, f"Account '{target_name}' already exists.", 0
+
 async def get_all_accounts(session):
     result = await session.execute(select(Account))
     return result.scalars().all()

@@ -17,12 +17,24 @@ from src.local_llm import LocalLLMPipeline
 from src.intents import IntentAI
 from src.logger import log_interaction
 
-from src.commands import list_accounts, get_queue_stats, add_transaction, get_queue_transactions, mark_transaction_verified, update_transaction_category, get_category_display_from_values
+from src.commands import (
+    list_accounts,
+    get_queue_stats,
+    add_transaction,
+    get_queue_transactions,
+    mark_transaction_verified,
+    update_transaction_category,
+    get_category_display_from_values,
+    update_account,
+)
 
 UPLOAD_REVIEW_STATE_KEY = "upload_review_state"
 UPLOAD_REVIEW_IDLE = "idle"
 UPLOAD_REVIEW_AWAITING_FILE = "awaiting_file"
 UPLOAD_REVIEW_IN_PROGRESS = "in_progress"
+ACCOUNT_EDIT_STATE_KEY = "account_edit_state"
+ACCOUNT_EDIT_WAIT_NAME = "wait_new_name"
+ACCOUNT_EDIT_WAIT_CONFIRM = "wait_confirm"
 
 
 # States
@@ -184,10 +196,68 @@ async def account_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = []
             for acc in accounts:
                 msg += f"• `{acc.name}` \({acc.institution}\)\n"
-                keyboard.append([InlineKeyboardButton(f"🗑️ Delete {acc.name}", callback_data=f"acc_del_{acc.id}")])
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(f"✏️ Edit {acc.name}", callback_data=f"acc_edit_{acc.id}"),
+                        InlineKeyboardButton(f"🗑️ Delete {acc.name}", callback_data=f"acc_del_{acc.id}"),
+                    ]
+                )
             keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="acc_main")])
             await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-        
+
+        elif data.startswith("acc_edit_"):
+            acc_id = int(data.split("_")[2])
+            acc = await session.get(Account, acc_id)
+            if not acc:
+                await query.edit_message_text("❌ Account not found.")
+                keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="acc_main")]]
+                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+                return
+
+            context.user_data[ACCOUNT_EDIT_STATE_KEY] = {
+                "status": ACCOUNT_EDIT_WAIT_NAME,
+                "account_id": acc.id,
+                "old_name": acc.name,
+                "institution": acc.institution,
+            }
+            await query.edit_message_text(
+                f"✏️ Renaming *{acc.name}*.\n\nReply with the new account name.",
+                parse_mode="Markdown",
+            )
+
+        elif data.startswith("acc_edit_confirm_"):
+            state = context.user_data.get(ACCOUNT_EDIT_STATE_KEY, {})
+            if state.get("status") != ACCOUNT_EDIT_WAIT_CONFIRM:
+                await query.edit_message_text("No pending account edit found.")
+                return
+
+            acc_id = int(data.split("_")[3])
+            if acc_id != state.get("account_id"):
+                await query.edit_message_text("Pending edit does not match this account.")
+                return
+
+            success, msg, linked_updates = await update_account(
+                session,
+                current_name=state.get("old_name"),
+                new_name=state.get("new_name"),
+                new_institution=state.get("institution"),
+            )
+            if success:
+                await query.edit_message_text(
+                    f"✅ {msg}\nUpdated {linked_updates} linked transaction(s)."
+                )
+            else:
+                await query.edit_message_text(f"❌ {msg}")
+            context.user_data.pop(ACCOUNT_EDIT_STATE_KEY, None)
+            keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="acc_main")]]
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+
+        elif data == "acc_edit_cancel":
+            context.user_data.pop(ACCOUNT_EDIT_STATE_KEY, None)
+            await query.edit_message_text("Account edit canceled.")
+            keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="acc_main")]]
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+
         elif data.startswith("acc_del_"):
             acc_id = int(data.split("_")[2])
             acc = await session.get(Account, acc_id)
@@ -1331,6 +1401,46 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
+    account_edit_state = context.user_data.get(ACCOUNT_EDIT_STATE_KEY, {})
+    if account_edit_state.get("status") == ACCOUNT_EDIT_WAIT_NAME:
+        new_name = (user_text or "").strip()
+        if not new_name:
+            await update.message.reply_text("Account name cannot be empty. Please reply with a valid name.")
+            return
+
+        if new_name == account_edit_state.get("old_name"):
+            await update.message.reply_text("That is the same name. Reply with a different account name.")
+            return
+
+        async with AsyncSessionLocal() as session:
+            acc = await session.get(Account, account_edit_state.get("account_id"))
+            if not acc:
+                await update.message.reply_text("❌ Account not found. Please start again from /accounts.")
+                context.user_data.pop(ACCOUNT_EDIT_STATE_KEY, None)
+                return
+
+            tx_count = await session.scalar(
+                select(func.count(Transaction.id)).where(Transaction.account_id == acc.id)
+            )
+            tx_count = int(tx_count or 0)
+
+        account_edit_state["status"] = ACCOUNT_EDIT_WAIT_CONFIRM
+        account_edit_state["new_name"] = new_name
+        account_edit_state["tx_count"] = tx_count
+        context.user_data[ACCOUNT_EDIT_STATE_KEY] = account_edit_state
+
+        keyboard = [
+            [InlineKeyboardButton("✅ Confirm", callback_data=f"acc_edit_confirm_{account_edit_state['account_id']}")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="acc_edit_cancel")],
+        ]
+        await update.message.reply_text(
+            f"Rename *{account_edit_state['old_name']}* to *{new_name}* and update "
+            f"*{tx_count}* linked transaction(s)?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
     # Check for active conversational state
     nl_action = context.user_data.get("nl_action")
     nl_state = context.user_data.get("nl_state")
@@ -1555,7 +1665,7 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(upload_review_callback, pattern="^upl_"))
     app.add_handler(CallbackQueryHandler(set_category_callback, pattern="^setcat_"))
     app.add_handler(CallbackQueryHandler(rulebook_callback, pattern="^rb_(list|del|main)"))
-    app.add_handler(CallbackQueryHandler(account_callback, pattern="^acc_(list|del|main)"))
+    app.add_handler(CallbackQueryHandler(account_callback, pattern="^acc_"))
     app.add_handler(CallbackQueryHandler(category_callback, pattern="^cat_(list|del|main)"))
     app.add_handler(CallbackQueryHandler(nl_callback_handler, pattern="^(cat|tx)_nl_"))
     

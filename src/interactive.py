@@ -2,13 +2,13 @@ import os
 import textwrap
 
 from datetime import datetime
-from sqlalchemy import select
+from sqlalchemy import select, func
 from InquirerPy import inquirer
 from InquirerPy.separator import Separator
 from InquirerPy.base.control import Choice
-from src.database import init_db, AsyncSessionLocal
+from src.database import init_db, AsyncSessionLocal, Account, Transaction
 from src.commands import (
-    list_accounts, add_account, delete_account, process_import, get_all_accounts,
+    list_accounts, add_account, delete_account, update_account, process_import, get_all_accounts,
     get_transactions, update_transaction_category, delete_transaction, export_to_bluecoins_csv,
     get_all_categories, mark_transaction_verified, update_transaction_amount,
     add_category, delete_category, get_category_display_from_values, add_global_memory_instruction,
@@ -161,6 +161,7 @@ async def manage_accounts_menu(session):
             choices=[
                 "List Accounts",
                 "Add Account",
+                "Edit Account",
                 "Delete Account",
                 Choice(value=None, name="Back to Main Menu")
             ],
@@ -204,6 +205,61 @@ async def manage_accounts_menu(session):
                 if confirm:
                     success, msg = await delete_account(session, target)
                     print(f"\n{msg}\n")
+
+        elif action == "Edit Account":
+            accounts = await list_accounts(session)
+            if not accounts:
+                print("No accounts to edit.")
+                continue
+
+            choices = [Choice(value=acc.name, name=f"{acc.name} ({acc.institution})") for acc in accounts]
+            choices.append(Choice(value=None, name="Cancel"))
+            current_name = await inquirer.select(
+                message="Select Account to Edit:",
+                choices=choices
+            ).execute_async()
+            if not current_name:
+                continue
+
+            acc_res = await session.execute(select(Account).where(Account.name == current_name))
+            account = acc_res.scalar_one_or_none()
+            if not account:
+                print("Account not found.")
+                continue
+
+            new_name = await inquirer.text(
+                message="New account name:",
+                default=account.name,
+            ).execute_async()
+            if not (new_name or "").strip():
+                print("Account name cannot be empty.")
+                continue
+
+            linked_tx_count = await session.scalar(
+                select(func.count(Transaction.id)).where(Transaction.account_id == account.id)
+            )
+            linked_tx_count = int(linked_tx_count or 0)
+
+            confirm = await inquirer.confirm(
+                message=(
+                    f"Rename '{account.name}' to '{new_name.strip()}' and update "
+                    f"{linked_tx_count} linked transaction(s)?"
+                )
+            ).execute_async()
+            if not confirm:
+                print("Edit canceled.")
+                continue
+
+            success, msg, updated_count = await update_account(
+                session,
+                current_name=account.name,
+                new_name=new_name.strip(),
+                new_institution=account.institution,
+            )
+            if success:
+                print(f"\n{msg} Updated {updated_count} linked transaction(s).\n")
+            else:
+                print(f"\n{msg}\n")
 
 async def manage_transactions_menu(session):
     while True:
