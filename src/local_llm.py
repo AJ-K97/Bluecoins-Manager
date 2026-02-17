@@ -342,8 +342,15 @@ class LocalLLMPipeline:
         # 1. Parse Filters
         filters = await self.extract_search_filters(query)
         
+        # Adaptive top_k: If precision filters are applied (date, amount, account, category),
+        # we can afford to pull more context because the result set is already narrowed.
+        if filters:
+            effective_top_k = max(top_k, 20)
+        else:
+            effective_top_k = top_k
+
         # 2. Retrieve with filters
-        hits = await self.retrieve(session, query, top_k=top_k, filters=filters)
+        hits = await self.retrieve(session, query, top_k=effective_top_k, filters=filters)
         
         context_block = "\n\n".join(
             [f"[score={h.score:.4f}]\n{h.content}" for h in hits]

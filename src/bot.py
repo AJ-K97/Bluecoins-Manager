@@ -1104,7 +1104,7 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     async with AsyncSessionLocal() as session:
         llm = LocalLLMPipeline()
         try:
-             result = await llm.answer(session, user_text, top_k=5)
+             result = await llm.answer(session, user_text, top_k=10)
              answer = result["answer"]
              sources = []
              for ctx in result.get("contexts", [])[:3]:
