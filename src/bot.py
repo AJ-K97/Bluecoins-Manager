@@ -19,6 +19,11 @@ from src.logger import log_interaction
 
 from src.commands import list_accounts, get_queue_stats, add_transaction, get_queue_transactions, mark_transaction_verified, update_transaction_category, get_category_display_from_values
 
+UPLOAD_REVIEW_STATE_KEY = "upload_review_state"
+UPLOAD_REVIEW_IDLE = "idle"
+UPLOAD_REVIEW_AWAITING_FILE = "awaiting_file"
+UPLOAD_REVIEW_IN_PROGRESS = "in_progress"
+
 
 # States
 (INPUT_DETAILS, SELECT_ACCOUNT, SELECT_CATEGORY_NUMBER, CONFIRM_NEW_CATEGORY, 
@@ -226,8 +231,8 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for parent, kids in sorted(tree.items()):
                 msg += f"📁 *{parent}*\n"
                 for kid in kids:
-                    msg += f"  └─ `{kid.name}` _({kid.type})_\n"
-                    keyboard.append([InlineKeyboardButton(f"🗑️ Del {kid.name}", callback_data=f"cat_del_{kid.id}")])
+                    msg += f"  └─ `ID {kid.id}`: `{kid.name}` _({kid.type})_\n"
+                    keyboard.append([InlineKeyboardButton(f"🗑️ Del {kid.id}", callback_data=f"cat_del_{kid.id}")])
             
             keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="cat_main")])
             # Limit to top 8 + back to avoid keyboard too large
@@ -530,6 +535,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Core Commands:*\n"
         "📊 `/stats` \- Show review queue summary\n"
         "📝 `/review` \- Process pending transactions\n"
+        "📤 `/upload` \- Review a CSV line by line before saving\n"
         "➕ `/add <amt> <desc>` \- Quick manual entry\n"
         "📁 `/accounts` \- List & manage accounts\n"
         "🏷️ `/categories` \- View your budget categories\n\n"
@@ -567,6 +573,280 @@ async def categories_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         parse_mode="Markdown",
         reply_markup=reply_markup
     )
+
+def _get_upload_state(context: ContextTypes.DEFAULT_TYPE):
+    state = context.user_data.get(UPLOAD_REVIEW_STATE_KEY)
+    if not state:
+        state = {"status": UPLOAD_REVIEW_IDLE}
+        context.user_data[UPLOAD_REVIEW_STATE_KEY] = state
+    return state
+
+async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state = {
+        "status": UPLOAD_REVIEW_AWAITING_FILE,
+        "pending": [],
+        "cursor": 0,
+        "saved_count": 0,
+        "skipped_count": 0,
+        "duplicate_count": 0,
+        "account_name": None,
+        "bank_name": None,
+        "file_name": None,
+    }
+    context.user_data[UPLOAD_REVIEW_STATE_KEY] = state
+    await update.message.reply_text(
+        "📤 Upload review mode enabled.\n"
+        "Please send a `.csv` file now.\n\n"
+        "I will show each transaction, my suggested category decision, and wait for your approval.\n"
+        "During review, reply with `cat <id>` to override category, or use buttons.",
+        parse_mode="Markdown",
+    )
+
+def _detect_bank_from_filename(file_name: str):
+    filename_upper = (file_name or "").upper()
+    if "HSBC" in filename_upper:
+        return "HSBC"
+    if "WISE" in filename_upper:
+        return "Wise"
+    return None
+
+def _fmt_date(value):
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    return str(value)
+
+async def _build_upload_review_queue(session, transactions):
+    ai = CategorizerAI()
+    pending = []
+    for tx in transactions:
+        cat_id, confidence, reasoning, suggested_type = await ai.suggest_category(
+            tx["description"],
+            session,
+            expected_type=tx["type"] if tx["type"] in {"expense", "income"} else None,
+        )
+        tx_type = suggested_type or tx["type"]
+        if tx_type == "transfer":
+            cat_id = None
+
+        pending.append(
+            {
+                "date": tx["date"],
+                "description": tx["description"],
+                "amount": tx["amount"],
+                "raw_csv_row": tx["raw_csv_row"],
+                "suggested_category_id": cat_id,
+                "suggested_confidence": confidence or 0.0,
+                "suggested_reasoning": reasoning or "No reasoning provided.",
+                "suggested_type": tx_type,
+                "selected_category_id": None,
+                "selected_type": None,
+            }
+        )
+    return pending
+
+async def _category_label_by_id(session, category_id):
+    if not category_id:
+        return "Uncategorized"
+    row = await session.execute(select(Category).where(Category.id == category_id))
+    cat = row.scalar_one_or_none()
+    if not cat:
+        return f"ID {category_id} (not found)"
+    parent = cat.parent_name or "Uncategorized"
+    return f"{parent} > {cat.name} [{cat.type}]"
+
+async def _send_category_id_list(context: ContextTypes.DEFAULT_TYPE, chat_id: int, tx_type: str):
+    async with AsyncSessionLocal() as session:
+        stmt = select(Category).order_by(Category.parent_name, Category.name, Category.id)
+        if tx_type in {"expense", "income"}:
+            stmt = stmt.where(Category.type == tx_type)
+        rows = await session.execute(stmt)
+        cats = rows.scalars().all()
+
+    if not cats:
+        await context.bot.send_message(chat_id=chat_id, text="No categories found.")
+        return
+
+    header = f"🏷️ Category IDs for {html.escape(tx_type)}\n\n" if tx_type in {"expense", "income"} else "🏷️ Category IDs\n\n"
+    lines = [header]
+    for cat in cats:
+        parent = html.escape(cat.parent_name or "Uncategorized")
+        name = html.escape(cat.name or "Uncategorized")
+        ctype = html.escape(cat.type or "unknown")
+        lines.append(f"{cat.id}: {parent} &gt; {name} [{ctype}]\n")
+
+    chunk = ""
+    for line in lines:
+        if len(chunk) + len(line) > 3900:
+            await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML")
+            chunk = ""
+        chunk += line
+    if chunk:
+        await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML")
+
+async def _show_current_upload_review(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    state = _get_upload_state(context)
+    pending = state.get("pending", [])
+    cursor = state.get("cursor", 0)
+    if cursor >= len(pending):
+        reindex_note = ""
+        saved_count = state.get("saved_count", 0)
+        if saved_count > 0:
+            try:
+                async with AsyncSessionLocal() as session:
+                    llm = LocalLLMPipeline()
+                    res = await llm.reindex_transactions(session, since=None)
+                reindex_note = f"\nKnowledge updated: {res.get('created', 0)} new chunks."
+            except Exception as e:
+                logging.error(f"Upload-review reindex failed: {e}")
+                reindex_note = "\nKnowledge reindex failed. Run /reindex."
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "✅ Upload review complete.\n"
+                f"Saved: {saved_count}\n"
+                f"Skipped: {state.get('skipped_count', 0)}\n"
+                f"Duplicates in file: {state.get('duplicate_count', 0)}"
+                f"{reindex_note}"
+            ),
+        )
+        state["status"] = UPLOAD_REVIEW_IDLE
+        return
+
+    tx = pending[cursor]
+    chosen_type = tx.get("selected_type") or tx.get("suggested_type")
+    chosen_cat_id = tx.get("selected_category_id")
+    if chosen_cat_id is None:
+        chosen_cat_id = tx.get("suggested_category_id")
+
+    async with AsyncSessionLocal() as session:
+        suggested_label = await _category_label_by_id(session, tx.get("suggested_category_id"))
+        chosen_label = await _category_label_by_id(session, chosen_cat_id)
+
+    decision_text = (
+        f"AI Decision: <code>{html.escape(chosen_label)}</code> as <code>{html.escape(str(chosen_type))}</code>\n"
+        f"Confidence: <code>{(tx.get('suggested_confidence', 0.0) * 100):.0f}%</code>\n"
+        f"Reason: {html.escape(str(tx.get('suggested_reasoning', '')))}"
+    )
+    if tx.get("selected_category_id") is not None or tx.get("selected_type") is not None:
+        decision_text += f"\n\nOverride Active: <code>{html.escape(chosen_label)}</code> as <code>{html.escape(str(chosen_type))}</code>"
+    else:
+        decision_text += f"\n\nSuggested Category: <code>{html.escape(suggested_label)}</code>"
+
+    msg = (
+        f"📄 Review <code>{cursor + 1}/{len(pending)}</code>\n"
+        f"Date: <code>{html.escape(_fmt_date(tx['date']))}</code>\n"
+        f"Amount: <code>{html.escape(str(tx['amount']))}</code>\n"
+        f"Description: <code>{html.escape(str(tx['description']))}</code>\n\n"
+        f"{decision_text}\n\n"
+        "Actions:\n"
+        "- Tap <b>Accept</b> to save this transaction.\n"
+        "- Reply <code>cat &lt;id&gt;</code> to override category.\n"
+        "- Tap <b>Show Categories</b> to view IDs."
+    )
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Accept", callback_data="upl_accept"),
+            InlineKeyboardButton("⏭️ Skip", callback_data="upl_skip"),
+        ],
+        [
+            InlineKeyboardButton("🔁 Mark Transfer", callback_data="upl_transfer"),
+            InlineKeyboardButton("🏷️ Show Categories", callback_data="upl_categories"),
+        ],
+        [InlineKeyboardButton("❌ Cancel Upload Review", callback_data="upl_cancel")],
+    ]
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=msg,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+async def _save_current_upload_transaction(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    state = _get_upload_state(context)
+    pending = state.get("pending", [])
+    cursor = state.get("cursor", 0)
+    if cursor >= len(pending):
+        await _show_current_upload_review(chat_id, context)
+        return
+
+    tx = pending[cursor]
+    chosen_type = tx.get("selected_type") or tx.get("suggested_type")
+    chosen_cat_id = tx.get("selected_category_id")
+    if chosen_cat_id is None:
+        chosen_cat_id = tx.get("suggested_category_id")
+
+    if chosen_type != "transfer" and not chosen_cat_id:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="No category selected for non-transfer transaction. Reply with `cat <id>` or use *Mark Transfer*.",
+            parse_mode="Markdown",
+        )
+        return
+
+    if chosen_type == "transfer":
+        chosen_cat_id = None
+
+    async with AsyncSessionLocal() as session:
+        success, msg, _ = await add_transaction(
+            session=session,
+            date=tx["date"],
+            amount=tx["amount"],
+            description=tx["description"],
+            account_name=state.get("account_name"),
+            category_id=chosen_cat_id,
+            tx_type=chosen_type,
+            confidence=tx.get("suggested_confidence"),
+            decision_reason=f"Upload review accepted. {tx.get('suggested_reasoning', '')}",
+            is_verified=True,
+        )
+        if not success:
+            await context.bot.send_message(chat_id=chat_id, text=f"❌ Could not save transaction: {msg}")
+            return
+
+    state["saved_count"] = state.get("saved_count", 0) + 1
+    state["cursor"] = cursor + 1
+    await _show_current_upload_review(chat_id, context)
+
+async def upload_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    state = _get_upload_state(context)
+    if state.get("status") != UPLOAD_REVIEW_IN_PROGRESS:
+        await query.edit_message_text("No active upload review. Use /upload to start.")
+        return
+
+    action = (query.data or "").replace("upl_", "")
+    if action == "cancel":
+        state["status"] = UPLOAD_REVIEW_IDLE
+        await query.edit_message_text("❌ Upload review cancelled.")
+        return
+
+    await query.edit_message_reply_markup(reply_markup=None)
+    chat_id = update.effective_chat.id
+    if action == "accept":
+        await _save_current_upload_transaction(chat_id, context)
+        return
+    if action == "skip":
+        state["skipped_count"] = state.get("skipped_count", 0) + 1
+        state["cursor"] = state.get("cursor", 0) + 1
+        await _show_current_upload_review(chat_id, context)
+        return
+    if action == "transfer":
+        idx = state.get("cursor", 0)
+        if idx < len(state.get("pending", [])):
+            state["pending"][idx]["selected_type"] = "transfer"
+            state["pending"][idx]["selected_category_id"] = None
+        await _show_current_upload_review(chat_id, context)
+        return
+    if action == "categories":
+        idx = state.get("cursor", 0)
+        if idx < len(state.get("pending", [])):
+            tx = state["pending"][idx]
+            tx_type = tx.get("selected_type") or tx.get("suggested_type")
+            await _send_category_id_list(context, chat_id, tx_type)
+        await _show_current_upload_review(chat_id, context)
+        return
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with AsyncSessionLocal() as session:
@@ -885,22 +1165,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_path = f"uploads/{document.file_name}"
     await file.download_to_drive(file_path)
     
+    state = _get_upload_state(context)
+    in_review_upload_mode = state.get("status") == UPLOAD_REVIEW_AWAITING_FILE
+
     await update.message.reply_text(f"Received {document.file_name}. Processing...")
     
     try:
         # Determine Bank
         parser = BankParser()
-        filename_upper = document.file_name.upper()
-        bank_name = None
-        
-        # Simple heuristic mapping
-        # Ideally query DB for supported banks?
-        # But parser has config.
-        if "HSBC" in filename_upper:
-            bank_name = "HSBC"
-        elif "WISE" in filename_upper:
-            bank_name = "Wise"
-        else:
+        bank_name = _detect_bank_from_filename(document.file_name)
+        if not bank_name:
             await update.message.reply_text("Could not detect bank from filename. Please rename file to include 'HSBC' or 'Wise'.")
             return
 
@@ -919,24 +1193,47 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Use first account found (User could have multiple HSBC accounts, handling that is complex for Phase 1)
             account = accounts[0]
-            
-            # AI Instance
-            ai = CategorizerAI()
-            
-            new_count = 0
+            filtered_transactions = []
+            duplicate_count = 0
             for tx in transactions:
-                # Duplicate Check: Date, Amount, Description, Account
                 stmt = select(Transaction).where(
                     Transaction.date == tx["date"],
                     Transaction.amount == tx["amount"],
-                    Transaction.description == tx["description"], # Exact match description
+                    Transaction.description == tx["description"],
                     Transaction.account_id == account.id
                 )
                 existing = await session.execute(stmt)
                 if existing.scalar_one_or_none():
+                    duplicate_count += 1
                     continue
-                
-                # Categorize
+                filtered_transactions.append(tx)
+
+            if in_review_upload_mode:
+                pending = await _build_upload_review_queue(session, filtered_transactions)
+                state["status"] = UPLOAD_REVIEW_IN_PROGRESS
+                state["pending"] = pending
+                state["cursor"] = 0
+                state["saved_count"] = 0
+                state["skipped_count"] = 0
+                state["duplicate_count"] = duplicate_count
+                state["account_name"] = account.name
+                state["bank_name"] = bank_name
+                state["file_name"] = document.file_name
+
+                await update.message.reply_text(
+                    f"📤 Review session created.\n"
+                    f"Bank: {bank_name}\n"
+                    f"Account: {account.name}\n"
+                    f"To review: {len(pending)}\n"
+                    f"Duplicates skipped: {duplicate_count}"
+                )
+                await _show_current_upload_review(update.effective_chat.id, context)
+                return
+
+            # default auto-import mode
+            ai = CategorizerAI()
+            new_count = 0
+            for tx in filtered_transactions:
                 cat_id, confidence, reasoning, suggested_type = await ai.suggest_category(
                     tx["description"],
                     session,
@@ -945,7 +1242,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 tx_type = suggested_type or tx["type"]
                 if tx_type == "transfer":
                     cat_id = None
-                
                 new_tx = Transaction(
                     date=tx["date"],
                     description=tx["description"],
@@ -957,21 +1253,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 session.add(new_tx)
                 new_count += 1
-            
+
             await session.commit()
-            
-            msg = f"✅ Processing Complete!\n"
-            msg += f"Bank: {bank_name}\n"
-            msg += f"Account: {account.name}\n"
-            msg += f"New Transactions: {new_count}\n"
-            
+            msg = f"✅ Processing Complete!\nBank: {bank_name}\nAccount: {account.name}\nNew Transactions: {new_count}\nDuplicates skipped: {duplicate_count}"
             await update.message.reply_text(msg)
-            
-            # Trigger background reindex (or just do it here if small)
+
             if new_count > 0:
                 llm = LocalLLMPipeline()
-                res = await llm.reindex_transactions(session, since=None) 
-                # Optimization: pass 'since' if we tracked last sync time, but for now reindex all is safer
+                res = await llm.reindex_transactions(session, since=None)
                 await update.message.reply_text(f"🧠 Knowledge updated: {res['created']} new chunks.")
 
 
@@ -1001,6 +1290,45 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     """
     user_text = update.message.text
     if not user_text:
+        return
+
+    state = _get_upload_state(context)
+    if state.get("status") == UPLOAD_REVIEW_IN_PROGRESS:
+        text = user_text.strip()
+        if text.lower().startswith("cat "):
+            parts = text.split()
+            if len(parts) != 2 or not parts[1].isdigit():
+                await update.message.reply_text("Use `cat <id>`, for example `cat 12`.", parse_mode="Markdown")
+                return
+            cat_id = int(parts[1])
+            async with AsyncSessionLocal() as session:
+                row = await session.execute(select(Category).where(Category.id == cat_id))
+                cat = row.scalar_one_or_none()
+                if not cat:
+                    await update.message.reply_text(f"Category ID `{cat_id}` not found.", parse_mode="Markdown")
+                    return
+                idx = state.get("cursor", 0)
+                if idx >= len(state.get("pending", [])):
+                    await update.message.reply_text("No active transaction to update.")
+                    return
+                state["pending"][idx]["selected_category_id"] = cat.id
+                state["pending"][idx]["selected_type"] = cat.type
+                label = f"{cat.parent_name or 'Uncategorized'} > {cat.name} [{cat.type}]"
+                await update.message.reply_text(f"Override set to <code>{html.escape(label)}</code>.", parse_mode="HTML")
+            await _show_current_upload_review(update.effective_chat.id, context)
+            return
+        if text.lower() in {"categories", "list categories", "cat list"}:
+            idx = state.get("cursor", 0)
+            if idx < len(state.get("pending", [])):
+                tx = state["pending"][idx]
+                tx_type = tx.get("selected_type") or tx.get("suggested_type")
+                await _send_category_id_list(context, update.effective_chat.id, tx_type)
+            await _show_current_upload_review(update.effective_chat.id, context)
+            return
+        await update.message.reply_text(
+            "Upload review is active. Use buttons, reply `cat <id>`, or send `categories`.",
+            parse_mode="Markdown",
+        )
         return
 
     # Check for active conversational state
@@ -1190,6 +1518,7 @@ async def post_init(application):
     commands = [
         BotCommand("stats", "Quick summary of review queue"),
         BotCommand("review", "Start reviewing transactions"),
+        BotCommand("upload", "Upload CSV with decision-by-decision approval"),
         BotCommand("rulebook", "Manage AI categorization rules"),
         BotCommand("add", "Add a manual transaction"),
         BotCommand("accounts", "List all accounts"),
@@ -1218,10 +1547,12 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("categories", categories_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("review", review_command))
+    app.add_handler(CommandHandler("upload", upload_command))
     app.add_handler(CommandHandler("reindex", reindex_command))
     
     # Review Callbacks
     app.add_handler(CallbackQueryHandler(review_callback, pattern="^rev_"))
+    app.add_handler(CallbackQueryHandler(upload_review_callback, pattern="^upl_"))
     app.add_handler(CallbackQueryHandler(set_category_callback, pattern="^setcat_"))
     app.add_handler(CallbackQueryHandler(rulebook_callback, pattern="^rb_(list|del|main)"))
     app.add_handler(CallbackQueryHandler(account_callback, pattern="^acc_(list|del|main)"))
