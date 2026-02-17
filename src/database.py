@@ -11,17 +11,30 @@ from sqlalchemy import MetaData
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://bluecoins_user:bluecoins_password@localhost/bluecoins_db")
 
-engine = create_async_engine(
-    DATABASE_URL, 
-    echo=False, 
-    pool_pre_ping=True,
-    pool_recycle=300,
-    pool_size=5,
-    max_overflow=10,
-    connect_args={"statement_cache_size": 0}
-)
+is_sqlite = DATABASE_URL.startswith("sqlite")
+
+engine_kwargs = {
+    "echo": False,
+}
+
+if is_sqlite:
+    # SQLite does not support asyncpg connection args or postgres pool tuning.
+    engine_kwargs["connect_args"] = {}
+else:
+    engine_kwargs.update(
+        {
+            "pool_pre_ping": True,
+            "pool_recycle": 300,
+            "pool_size": 5,
+            "max_overflow": 10,
+            "connect_args": {"statement_cache_size": 0},
+        }
+    )
+
+engine = create_async_engine(DATABASE_URL, **engine_kwargs)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-Base = declarative_base(metadata=MetaData(schema="public"))
+schema_name = os.getenv("DB_SCHEMA") or None
+Base = declarative_base(metadata=MetaData(schema=schema_name))
 
 class Account(Base):
     __tablename__ = "accounts"

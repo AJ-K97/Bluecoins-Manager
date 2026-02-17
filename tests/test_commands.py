@@ -3,6 +3,7 @@ from sqlalchemy import select
 from src.database import Account, Category, Transaction
 from src.commands import add_account, add_category, add_transaction
 from datetime import datetime
+from unittest.mock import AsyncMock, patch
 
 @pytest.mark.asyncio
 async def test_add_account(db_session):
@@ -58,22 +59,22 @@ async def test_add_transaction_with_category(db_session):
 async def test_add_transaction_with_ai(db_session, mock_llm):
     """Verify adding a transaction without category uses AI."""
     await add_account(db_session, "Cash", "None")
-    
-    # We need to mock CategorizerAI.suggest_category if we don't want to call Ollama.
-    # But wait, conftest only mocks LocalLLMPipeline.
-    # CategorizerAI uses LocalLLMPipeline internally.
-    
+
     date = datetime(2024, 1, 1)
-    # If category_id is None, it triggers AI. 
-    # The policy might set state to 'force_review' if no good match is found.
-    success, msg, tx = await add_transaction(
-        db_session, 
-        date=date, 
-        amount=-20.0, 
-        description="Unknown Stuff", 
-        account_name="Cash"
-    )
+    with patch("src.commands.CategorizerAI") as mock_ai_cls:
+        mock_ai = mock_ai_cls.return_value
+        mock_ai.suggest_category = AsyncMock(
+            return_value=(None, 0.2, "No confident category match.", "expense")
+        )
+
+        # If category_id is None, add_transaction triggers AI.
+        success, msg, tx = await add_transaction(
+            db_session,
+            date=date,
+            amount=-20.0,
+            description="Unknown Stuff",
+            account_name="Cash",
+        )
     
     assert success
-    # If it hit the policy, it might be force_review
     assert tx.decision_state in ["auto_approved", "needs_review", "force_review"]

@@ -6,6 +6,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_user_id(value):
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
 async def log_interaction(
     session: AsyncSession,
     user_id: int,
@@ -22,8 +31,8 @@ async def log_interaction(
     """
     try:
         log_entry = InteractionLog(
-            user_id=user_id,
-            username=username,
+            user_id=_safe_user_id(user_id),
+            username=str(username) if username is not None else None,
             message_content=message_content,
             detected_intent=detected_intent,
             confidence_score=confidence_score,
@@ -36,3 +45,4 @@ async def log_interaction(
         await session.commit()
     except Exception as e:
         logger.error(f"Failed to log interaction: {e}")
+        await session.rollback()

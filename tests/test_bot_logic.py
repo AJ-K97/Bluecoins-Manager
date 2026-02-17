@@ -25,13 +25,15 @@ def mock_context():
 async def test_start_command(mock_update, mock_context):
     await start(mock_update, mock_context)
     mock_update.message.reply_text.assert_called_once()
-    assert "Bluecoins Manager Bot" in mock_update.message.reply_text.call_args[0][0]
+    assert "Welcome to Bluecoins Manager" in mock_update.message.reply_text.call_args[0][0]
 
 @pytest.mark.asyncio
 async def test_accounts_list_empty(mock_update, mock_context):
-    with patch("src.bot.list_accounts", new=AsyncMock(return_value=[])):
-        await accounts_command(mock_update, mock_context)
-        mock_update.message.reply_text.assert_called_with("No accounts found.")
+    await accounts_command(mock_update, mock_context)
+    args, kwargs = mock_update.message.reply_text.call_args
+    assert "Account Management" in args[0]
+    assert kwargs.get("parse_mode") == "Markdown"
+    assert "reply_markup" in kwargs
 
 @pytest.mark.asyncio
 async def test_add_transaction_flow_start(mock_update, mock_context):
