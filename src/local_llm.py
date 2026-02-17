@@ -90,9 +90,12 @@ class LocalLLMPipeline:
     def _transaction_to_chunk(self, tx: Transaction) -> Tuple[str, Dict[str, Any]]:
         parent = tx.category.parent_name if tx.category else None
         category = tx.category.name if tx.category else None
+        # Strict YYYY-MM-DD format for LLM context
+        date_str = tx.date.strftime("%Y-%m-%d") if tx.date else "Unknown Date"
+        
         meta = {
             "transaction_id": tx.id,
-            "date": tx.date.isoformat() if tx.date else None,
+            "date": date_str,
             "amount": tx.amount,
             "type": tx.type,
             "account": tx.account.name if tx.account else None,
@@ -102,7 +105,7 @@ class LocalLLMPipeline:
         }
         content = (
             f"Transaction #{tx.id}\n"
-            f"Date: {meta['date']}\n"
+            f"Date: {date_str}\n"
             f"Description: {tx.description}\n"
             f"Amount: {tx.amount}\n"
             f"Type: {tx.type}\n"

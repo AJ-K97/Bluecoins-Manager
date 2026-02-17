@@ -76,9 +76,10 @@ class BluecoinsPersona:
         instruction = (
             "\n**Instructions:**\n"
             "- Answer the user's question based *only* on the retrieved context below.\n"
-            "- If the valid context is empty or irrelevant, politely say you don't have that information.\n"
+            "- **Dates**: Use the EXACT dates provided in the context (YYYY-MM-DD). Do not convert to other formats or guess.\n"
+            "- **Math**: If asked for a total, you MUST list the individual amounts you are adding (e.g. `10.50 + 5.00 = 15.50`).\n"
+            "- **Accuracy**: If the valid context is empty or irrelevant, politely say you don't have that information. **Do NOT invent transactions.**\n"
             "- Prefer concrete numbers and short bullet points over long paragraphs.\n"
-            "- Mention specific account names or categories if they appear in the context.\n"
             "- **IMPORTANT**: Do NOT list the sources or transactions at the end. I will append the source list automatically.\n"
         )
         
