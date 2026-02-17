@@ -107,6 +107,18 @@ class AIMemory(Base):
     
     transaction = relationship("Transaction", back_populates="memory_entries")
 
+
+class MerchantKeywordAlias(Base):
+    __tablename__ = "merchant_keyword_aliases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    normalized_phrase = Column(String, index=True, nullable=False)
+    canonical_keyword = Column(String, index=True, nullable=False)
+    support_count = Column(Integer, nullable=False, default=0)
+    verified_count = Column(Integer, nullable=False, default=0)
+    last_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    metadata_json = Column(Text, nullable=True)
+
 class AIGlobalMemory(Base):
     __tablename__ = "ai_global_memory"
 
