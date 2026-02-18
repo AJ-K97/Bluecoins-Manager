@@ -594,6 +594,16 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
                 final_flags.append("type_category_mismatch")
 
         decision = evaluate_decision_policy(confidence, final_flags)
+        if is_verified:
+            decision_state = "auto_approved"
+            decision_reason = "User verified during import review."
+            decision_bucket = "manual_review"
+            decision_priority = 100
+        else:
+            decision_state = decision.state
+            decision_reason = decision.reason
+            decision_bucket = decision.bucket
+            decision_priority = decision.priority
 
         new_tx = Transaction(
             date=tx_data["date"],
@@ -606,10 +616,10 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
             # ai_reasoning=reasoning, # DEPRECATED
             raw_csv_row=tx_data["raw_csv_row"],
             is_verified=is_verified,
-            decision_state=decision.state,
-            decision_reason=decision.reason,
-            review_priority=100 if is_verified else decision.priority,
-            review_bucket=decision.bucket,
+            decision_state=decision_state,
+            decision_reason=decision_reason,
+            review_priority=decision_priority,
+            review_bucket=decision_bucket,
         )
         try:
             session.add(new_tx)
@@ -743,6 +753,18 @@ async def get_queue_stats(session):
     return result.all()
 
 
+def _finalize_as_verified(
+    tx,
+    reason="Finalized by user verification.",
+    bucket="manual_review",
+):
+    tx.is_verified = True
+    tx.decision_state = "auto_approved"
+    tx.review_bucket = bucket
+    tx.review_priority = 100
+    tx.decision_reason = reason
+
+
 async def recalc_queue_decisions(session, since=None):
     stmt = select(Transaction).options(selectinload(Transaction.category))
     if since:
@@ -752,6 +774,15 @@ async def recalc_queue_decisions(session, since=None):
 
     updated = 0
     for tx in txs:
+        if tx.is_verified:
+            reason = tx.decision_reason or "Finalized by verification."
+            if reason.startswith("Confidence "):
+                reason = "Finalized by verification."
+            _finalize_as_verified(tx, reason=reason, bucket="verified")
+            session.add(tx)
+            updated += 1
+            continue
+
         flags = []
         if tx.type != "transfer" and tx.category_id is None:
             flags.append("invalid_category_id")
@@ -763,8 +794,6 @@ async def recalc_queue_decisions(session, since=None):
         tx.review_bucket = decision.bucket
         tx.review_priority = decision.priority
         tx.decision_reason = decision.reason
-        if tx.is_verified:
-            tx.review_priority = 100
         session.add(tx)
         updated += 1
 
@@ -807,10 +836,11 @@ async def update_transaction_category(session, tx_id, category_id=None, set_tran
         tx.type = "transfer"
     elif selected_category:
         tx.type = selected_category.type
-    tx.is_verified = True
-    tx.review_priority = 100
-    if not tx.decision_state:
-        tx.decision_state = "needs_review"
+    _finalize_as_verified(
+        tx,
+        reason="User verified category during review.",
+        bucket="manual_review",
+    )
     session.add(tx)
     
     # Handle Reflection if changed
@@ -877,7 +907,18 @@ async def update_transaction_category(session, tx_id, category_id=None, set_tran
     return True, "Transaction category updated and verified."
 
 async def update_transaction_amount(session, tx_id, new_amount):
-    stmt = update(Transaction).where(Transaction.id == tx_id).values(amount=new_amount, is_verified=True)
+    stmt = (
+        update(Transaction)
+        .where(Transaction.id == tx_id)
+        .values(
+            amount=new_amount,
+            is_verified=True,
+            decision_state="auto_approved",
+            review_bucket="manual_review",
+            review_priority=100,
+            decision_reason="User verified amount during review.",
+        )
+    )
     await session.execute(stmt)
     await session.commit()
     return True, "Transaction amount updated and verified."
@@ -889,10 +930,11 @@ async def mark_transaction_verified(session, tx_id):
     tx = result.scalar_one_or_none()
     
     if tx:
-        tx.is_verified = True
-        tx.review_priority = 100
-        if not tx.decision_state:
-            tx.decision_state = "needs_review"
+        _finalize_as_verified(
+            tx,
+            reason="User marked transaction as verified.",
+            bucket="manual_review",
+        )
         session.add(tx)
         
         # Update Memory
