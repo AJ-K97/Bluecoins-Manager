@@ -13,7 +13,7 @@ from .menus import (
     manage_transactions_menu,
     reset_database_menu,
 )
-from .ui import _render_menu_view
+from .ui import _menu_help_panel, _render_menu_view
 from .workflows import bank_format_builder_menu, chat_wizard, import_wizard, inspect_pdf_text_menu
 
 
@@ -61,16 +61,19 @@ async def interactive_main():
                     f"Accounts: {stats['accounts']}  |  Categories: {stats['categories']}  |  Transactions: {stats['total_tx']}",
                     f"Verified: {stats['verified_tx']}  |  Unverified: {stats['unverified_tx']}  |  Needs Review: {stats['needs_review']}",
                 ],
-                tips_lines=[
-                    "Import Transactions: Parse CSV/PDF, categorize, and review.",
-                    "Review / Manage Transactions: Edit recent transactions and queue.",
-                    "Manage Categories / Accounts / Rulebook: Configure core behavior.",
-                    "Inspect PDF Text: Debug parser extraction before import.",
-                    "Use Enter to open a folder (submenu), Back/Exit to return.",
-                ],
+                pending=stats["needs_review"],
             )
             action = await inquirer.select(
                 message="Open Folder:",
+                long_instruction=_menu_help_panel(
+                    [
+                        "Import Transactions: Parse CSV/PDF, categorize, and review.",
+                        "Review / Manage Transactions: Edit recent transactions and queue.",
+                        "Manage Categories / Accounts / Rulebook: Configure core behavior.",
+                        "Inspect PDF Text: Debug parser extraction before import.",
+                        "Use Enter to open a folder (submenu), Back/Exit to return.",
+                    ]
+                ),
                 choices=[
                     Separator("=== Workflow ==="),
                     Choice(value="import", name="Import Transactions"),

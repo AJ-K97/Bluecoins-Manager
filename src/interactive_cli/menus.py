@@ -35,27 +35,46 @@ from src.commands import (
 from src.database import Account, Transaction
 
 from .common import TRANSFER_CHOICE, choose_category_tree
-from .ui import _Ansi, _err, _info, _ok, _pause, _render_menu_view, _style, _warn
+from .ui import (
+    _Ansi,
+    _confirm_destructive,
+    _err,
+    _info,
+    _menu_help_panel,
+    _ok,
+    _paged_table_view,
+    _render_menu_view,
+    _select_with_search,
+    _style,
+    _toast,
+    _warn,
+)
 
 
 async def manage_accounts_menu(session):
     while True:
         account_count = int(await session.scalar(select(func.count(Account.id))) or 0)
+        pending_tx = int(
+            await session.scalar(select(func.count(Transaction.id)).where(Transaction.is_verified.is_(False))) or 0
+        )
         _render_menu_view(
             path="Home / Accounts",
             summary_lines=[
                 f"Configured accounts: {account_count}",
                 "Create, rename, or remove account sources.",
             ],
-            tips_lines=[
-                "List Accounts: Quick inventory of available accounts.",
-                "Add Account: Register a new source statement account.",
-                "Edit Account: Rename account and cascade to linked transactions.",
-                "Delete Account: Remove account after confirmation.",
-            ],
+            pending=pending_tx,
         )
         action = await inquirer.select(
             message="Open Folder:",
+            long_instruction=_menu_help_panel(
+                [
+                    "List Accounts: Quick inventory of available accounts.",
+                    "Add Account: Register a new source statement account.",
+                    "Edit Account: Rename account and cascade to linked transactions.",
+                    "Delete Account: Remove account after confirmation.",
+                ]
+            ),
             choices=[
                 "List Accounts",
                 "Add Account",
@@ -72,19 +91,33 @@ async def manage_accounts_menu(session):
             accounts = await list_accounts(session)
             if not accounts:
                 _warn("No accounts found.")
-                await _pause()
             else:
-                _info("\nAccounts:")
-                for acc in accounts:
-                    print(f" - {acc.name} ({acc.institution})")
-                print("")
-                await _pause()
+                rows = []
+                for acc in sorted(accounts, key=lambda a: (a.name or "").lower()):
+                    linked = int(
+                        await session.scalar(
+                            select(func.count(Transaction.id)).where(Transaction.account_id == acc.id)
+                        )
+                        or 0
+                    )
+                    rows.append((acc.name, acc.institution, str(linked)))
+                await _paged_table_view(
+                    path="Home / Accounts / List",
+                    title="Accounts",
+                    headers=["Name", "Institution", "Linked Tx"],
+                    rows=rows,
+                    sort_options=[
+                        ("name", lambda r: (r[0] or "").lower()),
+                        ("institution", lambda r: (r[1] or "").lower()),
+                        ("linked_tx", lambda r: int(r[2] or 0)),
+                    ],
+                )
 
         elif action == "Add Account":
             name = await inquirer.text(message="Account Name:").execute_async()
             inst = await inquirer.text(message="Institution (e.g. HSBC):").execute_async()
             success, msg = await add_account(session, name, inst)
-            (_ok if success else _err)(f"\n{msg}\n")
+            await _toast(msg, level="ok" if success else "err")
 
         elif action == "Delete Account":
             accounts = await list_accounts(session)
@@ -95,15 +128,21 @@ async def manage_accounts_menu(session):
             choices = [Choice(value=acc.name, name=acc.name) for acc in accounts]
             choices.append(Choice(value=None, name="Cancel"))
 
-            target = await inquirer.select(message="Select Account to Delete:", choices=choices).execute_async()
+            target = await _select_with_search(
+                message="Select Account to Delete:",
+                choices=choices,
+                threshold=8,
+            )
 
             if target:
-                confirm = await inquirer.confirm(
-                    message=f"Are you sure you want to delete '{target}'?"
-                ).execute_async()
-                if confirm:
+                ok_delete = await _confirm_destructive(
+                    path="Home / Accounts / Delete",
+                    action_label=f"delete account '{target}'",
+                    typed_token="DELETE",
+                )
+                if ok_delete:
                     success, msg = await delete_account(session, target)
-                    (_ok if success else _err)(f"\n{msg}\n")
+                    await _toast(msg, level="ok" if success else "err")
 
         elif action == "Edit Account":
             accounts = await list_accounts(session)
@@ -113,7 +152,11 @@ async def manage_accounts_menu(session):
 
             choices = [Choice(value=acc.name, name=f"{acc.name} ({acc.institution})") for acc in accounts]
             choices.append(Choice(value=None, name="Cancel"))
-            current_name = await inquirer.select(message="Select Account to Edit:", choices=choices).execute_async()
+            current_name = await _select_with_search(
+                message="Select Account to Edit:",
+                choices=choices,
+                threshold=8,
+            )
             if not current_name:
                 continue
 
@@ -150,9 +193,9 @@ async def manage_accounts_menu(session):
                 new_institution=account.institution,
             )
             if success:
-                _ok(f"\n{msg} Updated {updated_count} linked transaction(s).\n")
+                await _toast(f"{msg} Updated {updated_count} linked transaction(s).", level="ok")
             else:
-                _err(f"\n{msg}\n")
+                await _toast(msg, level="err")
 
 
 async def manage_transactions_menu(session):
@@ -167,14 +210,17 @@ async def manage_transactions_menu(session):
                 f"Total transactions: {total_tx}",
                 f"Pending verification: {pending_tx}",
             ],
-            tips_lines=[
-                "View / Edit Recent: Inspect recent rows and manually adjust.",
-                "Review Queue: Process needs_review and force_review decisions.",
-                "Export to CSV: Export filtered transactions for Bluecoins import.",
-            ],
+            pending=pending_tx,
         )
         action = await inquirer.select(
             message="Open Folder:",
+            long_instruction=_menu_help_panel(
+                [
+                    "View / Edit Recent: Inspect recent rows and manually adjust.",
+                    "Review Queue: Process needs_review and force_review decisions.",
+                    "Export to CSV: Export filtered transactions for Bluecoins import.",
+                ]
+            ),
             choices=[
                 "View / Edit Recent Transactions",
                 "Review Queue",
@@ -190,7 +236,11 @@ async def manage_transactions_menu(session):
         acc_choices = [Choice(value=acc.id, name=acc.name) for acc in accounts]
         acc_choices.insert(0, Choice(value=None, name="All Accounts"))
 
-        account_id = await inquirer.select(message="Filter by Account:", choices=acc_choices).execute_async()
+        account_id = await _select_with_search(
+            message="Filter by Account:",
+            choices=acc_choices,
+            threshold=8,
+        )
 
         if action == "Export to CSV":
             start_str = await inquirer.text(message="Start Date (YYYY-MM-DD) or Enter for All:").execute_async()
@@ -208,7 +258,7 @@ async def manage_transactions_menu(session):
                 continue
 
             success, msg = export_to_bluecoins_csv(txs, output_path)
-            (_ok if success else _err)(f"\n{msg}\n")
+            await _toast(msg, level="ok" if success else "err")
         elif action == "Review Queue":
             await review_queue_menu(session, account_id=account_id)
 
@@ -217,6 +267,34 @@ async def manage_transactions_menu(session):
             if not txs:
                 _warn("No transactions found.")
                 continue
+
+            tx_rows = []
+            for t in txs:
+                parent_name, cat_name = get_transaction_category_display(t)
+                cat_type = t.category.type if t.category else t.type
+                tx_rows.append(
+                    (
+                        str(t.id),
+                        t.date.strftime("%Y-%m-%d"),
+                        t.type or "",
+                        f"{t.amount:.2f}",
+                        "Y" if t.is_verified else "N",
+                        format_category_label(parent_name, cat_name, cat_type),
+                        t.description or "",
+                    )
+                )
+            await _paged_table_view(
+                path="Home / Transactions / Recent",
+                title="Recent Transactions",
+                headers=["ID", "Date", "Type", "Amount", "V", "Category", "Description"],
+                rows=tx_rows,
+                sort_options=[
+                    ("date", lambda r: r[1]),
+                    ("amount", lambda r: float(r[3] or 0.0)),
+                    ("type", lambda r: (r[2] or "").lower()),
+                    ("verified", lambda r: (r[4] or "").lower()),
+                ],
+            )
 
             choices = []
             for t in txs[:50]:
@@ -231,10 +309,11 @@ async def manage_transactions_menu(session):
                 choices.append(Choice(value=t, name=label))
             choices.append(Choice(value=None, name="Back"))
 
-            selected_tx = await inquirer.select(
+            selected_tx = await _select_with_search(
                 message="Select Transaction to Edit:",
                 choices=choices,
-            ).execute_async()
+                threshold=15,
+            )
 
             if not selected_tx:
                 continue
@@ -258,20 +337,25 @@ async def manage_transactions_menu(session):
                 )
                 if selected_cat == TRANSFER_CHOICE:
                     await update_transaction_category(session, selected_tx.id, category_id=None, set_transfer=True)
-                    _ok("Updated!")
+                    await _toast("Transaction updated.", level="ok")
                 elif selected_cat:
                     await update_transaction_category(session, selected_tx.id, selected_cat.id)
-                    _ok("Updated!")
+                    await _toast("Transaction updated.", level="ok")
 
             elif tx_action == "Verify / Approve":
                 await mark_transaction_verified(session, selected_tx.id)
-                _ok("Verified!")
+                await _toast("Transaction verified.", level="ok")
 
             elif tx_action == "Delete Transaction":
-                confirm = await inquirer.confirm(message="Are you sure?").execute_async()
-                if confirm:
+                ok_delete = await _confirm_destructive(
+                    path="Home / Transactions / Delete",
+                    action_label=f"delete transaction #{selected_tx.id}",
+                    typed_token="DELETE",
+                    details=[selected_tx.description or ""],
+                )
+                if ok_delete:
                     await delete_transaction(session, selected_tx.id)
-                    _ok("Deleted.")
+                    await _toast("Transaction deleted.", level="ok")
 
 
 async def review_queue_menu(session, account_id=None):
@@ -299,16 +383,20 @@ async def review_queue_menu(session, account_id=None):
                 f"Rows in queue: {len(rows)}",
                 "Focus on needs_review and force_review transactions.",
             ],
-            tips_lines=[
-                "Accept & Verify: Confirms category/type and exits queue status.",
-                "Change Category: Manually set category and verify transaction.",
-                "Delete Transaction: Remove row from transaction history.",
-            ],
+            pending=len(rows),
         )
-        selected_tx = await inquirer.select(
+        selected_tx = await _select_with_search(
             message="Select Transaction:",
+            long_instruction=_menu_help_panel(
+                [
+                    "Accept & Verify: Confirms category/type and exits queue status.",
+                    "Change Category: Manually set category and verify transaction.",
+                    "Delete Transaction: Remove row from transaction history.",
+                ]
+            ),
             choices=choices,
-        ).execute_async()
+            threshold=18,
+        )
         if not selected_tx:
             return
 
@@ -324,7 +412,7 @@ async def review_queue_menu(session, account_id=None):
 
         if tx_action == "Accept & Verify":
             await mark_transaction_verified(session, selected_tx.id)
-            _ok("Verified!")
+            await _toast("Transaction verified.", level="ok")
             continue
 
         if tx_action == "Change Category":
@@ -336,37 +424,48 @@ async def review_queue_menu(session, account_id=None):
             )
             if selected_cat == TRANSFER_CHOICE:
                 await update_transaction_category(session, selected_tx.id, category_id=None, set_transfer=True)
-                _ok("Updated and verified.")
+                await _toast("Category updated and verified.", level="ok")
             elif selected_cat:
                 await update_transaction_category(session, selected_tx.id, selected_cat.id)
-                _ok("Updated and verified.")
+                await _toast("Category updated and verified.", level="ok")
             continue
 
         if tx_action == "Delete Transaction":
-            confirm = await inquirer.confirm(message="Are you sure?").execute_async()
-            if confirm:
+            ok_delete = await _confirm_destructive(
+                path="Home / Transactions / Review Queue / Delete",
+                action_label=f"delete transaction #{selected_tx.id}",
+                typed_token="DELETE",
+                details=[selected_tx.description or ""],
+            )
+            if ok_delete:
                 await delete_transaction(session, selected_tx.id)
-                _ok("Deleted.")
+                await _toast("Transaction deleted.", level="ok")
             continue
 
 
 async def manage_categories_menu(session):
     while True:
         cats = await get_all_categories(session)
+        pending_tx = int(
+            await session.scalar(select(func.count(Transaction.id)).where(Transaction.is_verified.is_(False))) or 0
+        )
         _render_menu_view(
             path="Home / Categories",
             summary_lines=[
                 f"Configured categories: {len(cats)}",
                 "Maintain parent groups and sub-category mappings.",
             ],
-            tips_lines=[
-                "List Categories: Print category tree grouped by type and parent.",
-                "Add Category: Create new category under a parent group.",
-                "Delete Category: Remove category with optional reassignment.",
-            ],
+            pending=pending_tx,
         )
         action = await inquirer.select(
             message="Open Folder:",
+            long_instruction=_menu_help_panel(
+                [
+                    "List Categories: Print category tree grouped by type and parent.",
+                    "Add Category: Create new category under a parent group.",
+                    "Delete Category: Remove category with optional reassignment.",
+                ]
+            ),
             choices=[
                 "List Categories",
                 "Add Category",
@@ -382,27 +481,29 @@ async def manage_categories_menu(session):
             cats = await get_all_categories(session)
             if not cats:
                 _warn("No categories found.")
-                await _pause()
                 continue
 
-            grouped = {}
-            for c in cats:
-                ctype = (c.type or "unknown").lower()
-                parent = c.parent_name or "Uncategorized"
-                grouped.setdefault(ctype, {}).setdefault(parent, []).append(c)
-            for ctype in grouped:
-                for parent in grouped[ctype]:
-                    grouped[ctype][parent] = sorted(grouped[ctype][parent], key=lambda x: x.name.lower())
-
-            _info("\nCategories:")
-            for ctype in sorted(grouped.keys()):
-                print(f"Type: {ctype.upper()}")
-                for parent in sorted(grouped[ctype].keys()):
-                    print(f"  📁 {parent} [{ctype}]")
-                    for c in grouped[ctype][parent]:
-                        print(f"     └── {c.name} [{ctype}]")
-            print("")
-            await _pause()
+            rows = [
+                (
+                    str(c.id),
+                    (c.type or "unknown"),
+                    (c.parent_name or "Uncategorized"),
+                    (c.name or ""),
+                )
+                for c in cats
+            ]
+            await _paged_table_view(
+                path="Home / Categories / List",
+                title="Categories",
+                headers=["ID", "Type", "Parent", "Category"],
+                rows=rows,
+                sort_options=[
+                    ("id", lambda r: int(r[0] or 0)),
+                    ("type", lambda r: (r[1] or "").lower()),
+                    ("parent", lambda r: (r[2] or "").lower()),
+                    ("category", lambda r: (r[3] or "").lower()),
+                ],
+            )
 
         elif action == "Add Category":
             cat_type = await inquirer.select(message="Category Type:", choices=["expense", "income"]).execute_async()
@@ -434,7 +535,7 @@ async def manage_categories_menu(session):
                 continue
 
             success, msg = await add_category(session, name, parent_name, cat_type)
-            (_ok if success else _err)(f"\n{msg}\n")
+            await _toast(msg, level="ok" if success else "err")
 
         elif action == "Delete Category":
             cats = await get_all_categories(session)
@@ -445,7 +546,11 @@ async def manage_categories_menu(session):
             choices = [Choice(value=c, name=format_category_obj_label(c)) for c in cats]
             choices.append(Choice(value=None, name="Cancel"))
 
-            target_cat = await inquirer.fuzzy(message="Select Category to Delete:", choices=choices).execute_async()
+            target_cat = await _select_with_search(
+                message="Select Category to Delete:",
+                choices=choices,
+                threshold=12,
+            )
 
             if not target_cat:
                 continue
@@ -487,45 +592,55 @@ async def manage_categories_menu(session):
                         continue
 
                     rc_choices = [Choice(value=c.id, name=format_category_obj_label(c)) for c in other_cats]
-                    reassign_id = await inquirer.fuzzy(
+                    reassign_id = await _select_with_search(
                         message="Select New Category for transactions:",
                         choices=rc_choices,
-                    ).execute_async()
+                        threshold=12,
+                    )
 
                     if not reassign_id:
                         continue
 
-            confirm = await inquirer.confirm(
-                message=f"Delete category '{format_category_obj_label(target_cat)}'?"
-            ).execute_async()
-            if confirm:
+            ok_delete = await _confirm_destructive(
+                path="Home / Categories / Delete",
+                action_label=f"delete category '{format_category_obj_label(target_cat)}'",
+                typed_token="DELETE",
+                details=[f"assigned_transactions={count}"],
+            )
+            if ok_delete:
                 success, msg = await delete_category(
                     session,
                     target_cat.id,
                     reassign_category_id=reassign_id,
                     delete_transactions=delete_txs,
                 )
-                (_ok if success else _err)(f"\n{msg}\n")
+                await _toast(msg, level="ok" if success else "err")
 
 
 async def manage_global_rulebook_menu(session):
     while True:
         active_rules = len(await get_global_memory_entries(session, include_inactive=False, limit=500))
+        pending_tx = int(
+            await session.scalar(select(func.count(Transaction.id)).where(Transaction.is_verified.is_(False))) or 0
+        )
         _render_menu_view(
             path="Home / AI Rulebook",
             summary_lines=[
                 f"Active global rules: {active_rules}",
                 "Persist coaching instructions used by categorization flows.",
             ],
-            tips_lines=[
-                "List Rules: Show active/inactive global memory instructions.",
-                "Add Rule: Persist a new high-level categorization rule.",
-                "Enable/Disable: Toggle rule applicability.",
-                "Delete Rule: Permanently remove a rule.",
-            ],
+            pending=pending_tx,
         )
         action = await inquirer.select(
             message="Open Folder:",
+            long_instruction=_menu_help_panel(
+                [
+                    "List Rules: Show active/inactive global memory instructions.",
+                    "Add Rule: Persist a new high-level categorization rule.",
+                    "Enable/Disable: Toggle rule applicability.",
+                    "Delete Rule: Permanently remove a rule.",
+                ]
+            ),
             choices=[
                 "List Rules",
                 "Add Rule",
@@ -543,22 +658,30 @@ async def manage_global_rulebook_menu(session):
             rules = await get_global_memory_entries(session, include_inactive=True, limit=500)
             if not rules:
                 _warn("No global rules found.")
-                await _pause()
                 continue
-            _info("\nGlobal AI Rulebook:")
+            rows = []
             for r in rules:
                 status = "ACTIVE" if r.is_active else "INACTIVE"
                 created = r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else "-"
-                style = _Ansi.GREEN if status == "ACTIVE" else _Ansi.DIM
-                print(_style(f"[{status}] #{r.id} ({created}) [{r.source}] {r.instruction}", style))
-            print("")
-            await _pause()
+                rows.append((str(r.id), status, created, r.source or "", r.instruction or ""))
+            await _paged_table_view(
+                path="Home / AI Rulebook / List",
+                title="Global Rules",
+                headers=["ID", "Status", "Created", "Source", "Instruction"],
+                rows=rows,
+                sort_options=[
+                    ("id", lambda r: int(r[0] or 0)),
+                    ("status", lambda r: (r[1] or "").lower()),
+                    ("created", lambda r: r[2]),
+                    ("source", lambda r: (r[3] or "").lower()),
+                ],
+            )
 
         elif action == "Add Rule":
             text = await inquirer.text(message="Rule text to persist:").execute_async()
             ok, msg = await add_global_memory_instruction(session, text, source="manual_rulebook")
             await session.commit()
-            (_ok if ok else _err)(f"\n{msg}\n")
+            await _toast(msg, level="ok" if ok else "err")
 
         elif action in {"Disable Rule", "Enable Rule"}:
             target_active = action == "Enable Rule"
@@ -574,13 +697,14 @@ async def manage_global_rulebook_menu(session):
 
             choices = [Choice(value=r.id, name=f"#{r.id} [{r.source}] {r.instruction[:90]}") for r in filtered]
             choices.append(Choice(value=None, name="Cancel"))
-            selected_id = await inquirer.fuzzy(
+            selected_id = await _select_with_search(
                 message=f"Select rule to {'enable' if target_active else 'disable'}:",
                 choices=choices,
-            ).execute_async()
+                threshold=12,
+            )
             if selected_id:
                 ok, msg = await set_global_memory_active(session, selected_id, target_active)
-                (_ok if ok else _err)(f"\n{msg}\n")
+                await _toast(msg, level="ok" if ok else "err")
 
         elif action == "Delete Rule":
             rules = await get_global_memory_entries(session, include_inactive=True, limit=500)
@@ -595,29 +719,43 @@ async def manage_global_rulebook_menu(session):
                 for r in rules
             ]
             choices.append(Choice(value=None, name="Cancel"))
-            selected_id = await inquirer.fuzzy(message="Select rule to delete:", choices=choices).execute_async()
+            selected_id = await _select_with_search(
+                message="Select rule to delete:",
+                choices=choices,
+                threshold=12,
+            )
             if selected_id:
-                confirm = await inquirer.confirm(message=f"Delete rule #{selected_id}?").execute_async()
-                if confirm:
+                ok_delete = await _confirm_destructive(
+                    path="Home / AI Rulebook / Delete",
+                    action_label=f"delete rule #{selected_id}",
+                    typed_token="DELETE",
+                )
+                if ok_delete:
                     ok, msg = await delete_global_memory_instruction(session, selected_id)
-                    (_ok if ok else _err)(f"\n{msg}\n")
+                    await _toast(msg, level="ok" if ok else "err")
 
 
 async def reset_database_menu(session):
+    pending_tx = int(
+        await session.scalar(select(func.count(Transaction.id)).where(Transaction.is_verified.is_(False))) or 0
+    )
     _render_menu_view(
         path="Home / Reset",
         summary_lines=[
             "Danger Zone: reset operations are destructive.",
             "Use table-level reset unless a full reset is required.",
         ],
-        tips_lines=[
-            "Reset Entire Database: Wipes and reseeds baseline data.",
-            "Reset Specific Tables: Safer targeted reset for selected tables.",
-            "Type RESET when prompted for irreversible operations.",
-        ],
+        pending=pending_tx,
     )
     action = await inquirer.select(
         message="Reset Options:",
+        long_instruction=_menu_help_panel(
+            [
+                "Reset Entire Database: Wipes and reseeds baseline data.",
+                "Reset Specific Tables: Safer targeted reset for selected tables.",
+                "Type RESET when prompted for irreversible operations.",
+            ]
+        ),
         choices=[
             "Reset Entire Database",
             "Reset Specific Tables",
@@ -629,25 +767,19 @@ async def reset_database_menu(session):
         return
 
     if action == "Reset Entire Database":
-        confirm_1 = await inquirer.confirm(message="Do you want to reset the entire database?").execute_async()
-        if not confirm_1:
-            return
-
-        confirm_text = await inquirer.text(message="Type RESET to confirm:").execute_async()
-        if confirm_text != "RESET":
-            _warn("Confirmation text mismatch. Reset cancelled.\n")
-            return
-
-        confirm_2 = await inquirer.confirm(
-            message="Final confirmation: This cannot be undone. Proceed?"
-        ).execute_async()
-        if not confirm_2:
+        ok_confirm = await _confirm_destructive(
+            path="Home / Reset / Entire Database",
+            action_label="reset entire database",
+            typed_token="RESET",
+            details=["This will wipe all resettable tables and reseed reference data."],
+        )
+        if not ok_confirm:
             return
 
         ok, msg = await reset_database()
-        (_ok if ok else _err)(f"\n{msg}")
+        await _toast(msg, level="ok" if ok else "err")
         _ok_seed, seed_msg = await seed_reference_data(session)
-        _info(f"{seed_msg}\n")
+        await _toast(seed_msg, level="info")
         return
 
     table_names = get_resettable_table_names()
@@ -659,14 +791,16 @@ async def reset_database_menu(session):
         _warn("No tables selected.\n")
         return
 
-    confirm = await inquirer.confirm(message=f"Reset selected tables ({', '.join(selected)})?").execute_async()
-    if not confirm:
+    ok_confirm = await _confirm_destructive(
+        path="Home / Reset / Selected Tables",
+        action_label=f"reset selected tables ({', '.join(selected)})",
+        typed_token="RESET",
+    )
+    if not ok_confirm:
         return
 
     ok, msg = await reset_selected_tables(session, selected)
     if ok:
-        _ok(f"\n{msg}\n")
+        await _toast(msg, level="ok")
     else:
-        _err("\nReset blocked:")
-        _err(msg)
-        print("")
+        await _toast(msg, level="err")

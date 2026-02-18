@@ -1,9 +1,10 @@
 import os
 import re
+import asyncio
 
 from InquirerPy import inquirer
 from InquirerPy.base.control import Choice
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from src.bank_config import list_bank_names, load_banks_payload, upsert_bank_format
@@ -17,7 +18,19 @@ from src.parser import BankParser, format_pdf_blocks_report, format_pdf_debug_re
 from src.database import Transaction
 
 from .review import import_review_callback, review_transactions
-from .ui import _Ansi, _err, _info, _ok, _render_menu_view, _style, _warn
+from .ui import (
+    _Ansi,
+    _err,
+    _info,
+    _menu_help_panel,
+    _ok,
+    _render_menu_view,
+    _run_with_spinner,
+    _select_with_search,
+    _style,
+    _toast,
+    _warn,
+)
 
 
 def _date_regex_hint_from_format(fmt):
@@ -43,26 +56,33 @@ def _build_guided_pdf_regex():
 
 
 async def import_wizard(session):
+    pending_tx = int(
+        await session.scalar(select(func.count(Transaction.id)).where(Transaction.is_verified.is_(False))) or 0
+    )
     _render_menu_view(
         path="Home / Import Transactions",
         summary_lines=[
             "Load CSV/PDF data, run categorization, then review and export.",
         ],
-        tips_lines=[
-            "If importing PDF, inspect parsed text/blocks before committing.",
-            "You can review each transaction during import or do bulk review after.",
-            "Export generated transactions to Bluecoins CSV at the end.",
-        ],
+        pending=pending_tx,
     )
     bank_names = list_bank_names()
     if not bank_names:
         _warn("No bank formats configured. Please add one via 'Manage Bank Formats'.")
         return
 
-    bank = await inquirer.select(
+    bank = await _select_with_search(
         message="Select Bank Format:",
+        long_instruction=_menu_help_panel(
+            [
+                "If importing PDF, inspect parsed text/blocks before committing.",
+                "You can review each transaction during import or do bulk review after.",
+                "Export generated transactions to Bluecoins CSV at the end.",
+            ]
+        ),
         choices=bank_names + [Choice(value=None, name="Cancel")],
-    ).execute_async()
+        threshold=8,
+    )
 
     if not bank:
         return
@@ -91,27 +111,31 @@ async def import_wizard(session):
         return
 
     choices = [Choice(value=acc.name, name=acc.name) for acc in accounts]
-    account_name = await inquirer.select(message="Associate with Account:", choices=choices).execute_async()
+    account_name = await _select_with_search(
+        message="Associate with Account:",
+        choices=choices,
+        threshold=8,
+    )
 
     do_interactive_review = await inquirer.confirm(
         message="Review each transaction as it is processed?"
     ).execute_async()
     callback = import_review_callback if do_interactive_review else None
 
-    _info("\nProcessing... (This may take a moment for AI categorization)\n")
-    success, msg, new_txs = await process_import(
-        session, bank, file_path, account_name, review_callback=callback
+    success, msg, new_txs = await _run_with_spinner(
+        "Importing + categorizing transactions",
+        process_import(session, bank, file_path, account_name, review_callback=callback),
     )
 
     if success:
-        _ok(f"\nSuccess: {msg}\n")
+        await _toast(msg, level="ok")
 
         if new_txs and not do_interactive_review:
             do_review = await inquirer.confirm(message="Review and Verify these transactions now?").execute_async()
             if do_review:
                 await review_transactions(session, new_txs)
     else:
-        _err(f"\nError: {msg}\n")
+        await _toast(msg, level="err")
         return
 
     do_export = await inquirer.confirm(message="Export to Bluecoins CSV now?").execute_async()
@@ -131,19 +155,17 @@ async def import_wizard(session):
             final_txs = res.scalars().all()
 
             success, msg = export_to_bluecoins_csv(final_txs, output_path)
-            (_ok if success else _err)(msg)
+            await _toast(msg, level="ok" if success else "err")
 
 
 async def bank_format_builder_menu():
+    pending_tx = 0
     _render_menu_view(
         path="Home / Bank Formats",
         summary_lines=[
             "Configure parser mappings for CSV and PDF statements.",
         ],
-        tips_lines=[
-            "Use guided PDF mode for debit/credit + balance style statements.",
-            "Keep multiple date formats to support mixed bank exports.",
-        ],
+        pending=pending_tx,
     )
     payload = load_banks_payload()
     existing = sorted(payload["banks"].keys())
@@ -162,6 +184,12 @@ async def bank_format_builder_menu():
 
     source_mode = await inquirer.select(
         message="What input format should this bank support?",
+        long_instruction=_menu_help_panel(
+            [
+                "Use guided PDF mode for debit/credit + balance style statements.",
+                "Keep multiple date formats to support mixed bank exports.",
+            ]
+        ),
         choices=[
             Choice(value="csv", name="CSV only"),
             Choice(value="pdf", name="PDF only"),
@@ -243,7 +271,7 @@ async def bank_format_builder_menu():
             cfg["pdf_amount_group"] = 3
 
     upsert_bank_format(bank_name, cfg)
-    _ok(f"\nSaved bank format '{bank_name}' to data/banks_config.json\n")
+    await _toast(f"Saved bank format '{bank_name}' to data/banks_config.json", level="ok")
     print(_style(str(cfg), _Ansi.DIM))
 
     if bank_name.upper() == "ANZ":
@@ -254,16 +282,16 @@ async def bank_format_builder_menu():
 
 
 async def chat_wizard(session):
+    pending_tx = int(
+        await session.scalar(select(func.count(Transaction.id)).where(Transaction.is_verified.is_(False))) or 0
+    )
     _render_menu_view(
         path="Home / Finance Chat",
         summary_lines=[
             "Ask natural-language questions about your transactions.",
             "Type 'exit' or 'q' to return.",
         ],
-        tips_lines=[
-            "Ask specific questions: categories, periods, top spenders, trends.",
-            "Chat runs read-only SQL generation for safe insights.",
-        ],
+        pending=pending_tx,
     )
 
     chat_ai = FinanceChatAI()
@@ -273,21 +301,18 @@ async def chat_wizard(session):
         if question.lower() in ["exit", "quit", "q"]:
             break
 
-        _info("Thinking...")
-        response = await chat_ai.chat(question, session)
+        response = await _run_with_spinner("Thinking", chat_ai.chat(question, session))
         print(_style("\nAI:", _Ansi.BOLD, _Ansi.MAGENTA) + f" {response}\n")
 
 
 async def inspect_pdf_text_menu(default_file_path=None, default_bank=None):
+    pending_tx = 0
     _render_menu_view(
         path="Home / PDF Inspect",
         summary_lines=[
             "Preview parsed statement text and export full debug reports.",
         ],
-        tips_lines=[
-            "Use blocks mode for multiline transaction assembly validation.",
-            "Export full report to compare parser tweaks over time.",
-        ],
+        pending=pending_tx,
     )
     file_path = default_file_path
     if not file_path:
@@ -300,8 +325,14 @@ async def inspect_pdf_text_menu(default_file_path=None, default_bank=None):
     if not file_path:
         return
 
-    mode = await inquirer.select(
+    mode = await _select_with_search(
         message="Display mode:",
+        long_instruction=_menu_help_panel(
+            [
+                "Use blocks mode for multiline transaction assembly validation.",
+                "Export full report to compare parser tweaks over time.",
+            ]
+        ),
         choices=[
             Choice(value="both", name="Raw + Cleaned (default)"),
             Choice(value="raw", name="Raw only"),
@@ -309,7 +340,8 @@ async def inspect_pdf_text_menu(default_file_path=None, default_bank=None):
             Choice(value="blocks", name="Blocks (assembled multiline transactions)"),
             Choice(value=None, name="Cancel"),
         ],
-    ).execute_async()
+        threshold=6,
+    )
     if not mode:
         return
 
@@ -329,17 +361,24 @@ async def inspect_pdf_text_menu(default_file_path=None, default_bank=None):
         if mode == "blocks":
             bank_name = default_bank
             if not bank_name:
-                bank_name = await inquirer.select(
+                bank_name = await _select_with_search(
                     message="Select bank format for block assembly:",
                     choices=list_bank_names() + [Choice(value=None, name="Cancel")],
-                ).execute_async()
+                    threshold=8,
+                )
             if not bank_name:
                 return
-            blocks_data = parser.extract_pdf_blocks_debug(file_path, bank_name)
+            blocks_data = await _run_with_spinner(
+                "Extracting PDF blocks",
+                asyncio.to_thread(parser.extract_pdf_blocks_debug, file_path, bank_name),
+            )
             report_preview = format_pdf_blocks_report(blocks_data, max_blocks=max_lines)
             full_report = format_pdf_blocks_report(blocks_data, max_blocks=None)
         else:
-            debug_data = parser.extract_pdf_debug(file_path, apply_cleaning=True)
+            debug_data = await _run_with_spinner(
+                "Extracting PDF text",
+                asyncio.to_thread(parser.extract_pdf_debug, file_path, apply_cleaning=True),
+            )
             report_preview = format_pdf_debug_report(debug_data, mode=mode, max_lines=max_lines)
             full_report = format_pdf_debug_report(debug_data, mode=mode, max_lines=None)
     except Exception as e:
@@ -362,4 +401,4 @@ async def inspect_pdf_text_menu(default_file_path=None, default_bank=None):
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(full_report)
-    _ok(f"\nSaved full debug report to {output_path}\n")
+    await _toast(f"Saved full debug report to {output_path}", level="ok")
