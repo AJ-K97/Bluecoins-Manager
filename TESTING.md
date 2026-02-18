@@ -14,6 +14,25 @@ Ensure you have the virtual environment activated and dependencies installed:
 PYTHONPATH=. ./venv/bin/pytest tests/
 ```
 
+## 🧰 Test Runners (Pytest + Unittest)
+
+This project supports both `pytest` and Python's built-in `unittest`.
+
+### Run with pytest (recommended for async + fixtures)
+```bash
+PYTHONPATH=. ./venv/bin/pytest tests/
+```
+
+### Run with unittest discovery
+```bash
+PYTHONPATH=. ./venv/bin/python -m unittest discover -s tests -p "test*.py"
+```
+
+Notes:
+- Many tests use `pytest` markers/fixtures (`@pytest.mark.asyncio`, `conftest.py` fixtures).
+- For that reason, keep `pytest` and `pytest-asyncio` installed even if you also run `unittest`.
+- `unittest` discovery remains useful for `unittest.TestCase`-style modules and smoke checks.
+
 ---
 
 ## 🏗️ Test Suite Structure

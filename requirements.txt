@@ -11,3 +11,5 @@ alembic # optional but good for migrations
 InquirerPy
 duckduckgo-search
 pypdf
+pytest
+pytest-asyncio
