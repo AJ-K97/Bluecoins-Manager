@@ -1,5 +1,6 @@
 import ollama
 import re
+from collections import Counter
 from sqlalchemy import select
 from src.database import Category, Transaction, AIMemory, AIGlobalMemory, AICategoryUnderstanding
 from src.keyword_resolver import KeywordResolver
@@ -18,7 +19,7 @@ class CategorizerAI:
     async def _chat_once(self, prompt):
         response = await self.client.chat(model=self.model, messages=[
             {'role': 'user', 'content': prompt}
-        ])
+        ], options={"temperature": 0.0})
         return response['message']['content'].strip()
 
     def _clean_description(self, description):
@@ -50,6 +51,67 @@ class CategorizerAI:
             href = r.get("href", "")
             lines.append(f"- {title}: {body} {href}".strip())
         return "\n".join(lines)
+
+    def _is_internal_transfer_text(self, description: str) -> bool:
+        text = (description or "").upper()
+        if "TRANSFER" not in text:
+            return False
+        # Guard against payroll/income phrases.
+        if any(k in text for k in {"SALARY", "PAYROLL", "WAGE", "BONUS"}):
+            return False
+        # Strong cues for own-account movement.
+        internal_markers = {
+            "JOINT ACCOUNT",
+            "JOINT BANK TRANSFE",
+            "INTERNET BANKING",
+            "OWN ACCOUNT",
+            "BETWEEN ACCOUNTS",
+            "ACCOUNT TRANSFER",
+        }
+        return any(m in text for m in internal_markers)
+
+    async def _get_exact_verified_precedent(self, description, session):
+        desc = (description or "").strip()
+        if not desc:
+            return None
+        stmt = (
+            select(Transaction)
+            .where(
+                Transaction.description.ilike(desc),
+                Transaction.is_verified.is_(True),
+            )
+            .order_by(Transaction.date.desc())
+            .limit(30)
+        )
+        res = await session.execute(stmt)
+        rows = res.scalars().all()
+        if not rows:
+            return None
+
+        keys = []
+        for tx in rows:
+            tx_type = (tx.type or "").lower()
+            if tx_type == "transfer" and tx.category_id is None:
+                keys.append(("transfer", None))
+            elif tx.category_id and tx_type in {"expense", "income"}:
+                keys.append((tx_type, int(tx.category_id)))
+
+        if not keys:
+            return None
+
+        counts = Counter(keys)
+        (top_type, top_cat), top_count = counts.most_common(1)[0]
+        ratio = top_count / max(1, len(keys))
+        # Require strong consensus to avoid locking onto mixed legacy data.
+        if ratio < 0.70:
+            return None
+
+        return {
+            "type": top_type,
+            "category_id": top_cat,
+            "confidence": min(0.99, 0.90 + (ratio * 0.09)),
+            "reasoning": f"Exact verified precedent match ({top_count}/{len(keys)} rows).",
+        }
 
     def _parse_json_payload(self, content):
         try:
@@ -136,6 +198,60 @@ Text:
             cat_lines.append(f"ID {c.id}: {parent} > {c.name} ({c.type})")
 
         cat_str = "\n".join(cat_lines)
+
+        # Deterministic fast-path:
+        # if exact verified precedent exists with a single unanimous category/type,
+        # return that as top candidate to avoid stochastic drift on repeated descriptions.
+        try:
+            exact_stmt = (
+                select(Transaction)
+                .where(
+                    Transaction.description.ilike(description.strip()),
+                    Transaction.is_verified.is_(True),
+                    Transaction.category_id.is_not(None),
+                )
+                .order_by(Transaction.date.desc())
+                .limit(20)
+            )
+            exact_res = await session.execute(exact_stmt)
+            exact_rows = exact_res.scalars().all()
+            if exact_rows:
+                pairs = [(tx.category_id, (tx.type or "").lower()) for tx in exact_rows if tx.category_id]
+                if pairs:
+                    pair_counts = Counter(pairs)
+                    (top_cat_id, top_type), top_count = pair_counts.most_common(1)[0]
+                    unanimous = len(pair_counts) == 1
+                    if unanimous and top_cat_id in cat_by_id:
+                        if not expected_type or top_type == expected_type:
+                            normalized = [
+                                {
+                                    "id": int(top_cat_id),
+                                    "type": top_type if top_type in {"expense", "income"} else cat_by_id[top_cat_id].type,
+                                    "confidence": 0.96,
+                                    "reasoning": "Exact verified precedent match in transaction history.",
+                                }
+                            ]
+                            used = {int(top_cat_id)}
+                            target_type = normalized[0]["type"]
+                            for c in sorted(categories, key=lambda x: (x.parent_name or "", x.name)):
+                                if c.id in used:
+                                    continue
+                                if target_type in {"expense", "income"} and c.type != target_type:
+                                    continue
+                                normalized.append(
+                                    {
+                                        "id": c.id,
+                                        "type": c.type,
+                                        "confidence": 0.2,
+                                        "reasoning": "Fallback candidate.",
+                                    }
+                                )
+                                used.add(c.id)
+                                if len(normalized) >= max(3, int(min_candidates)):
+                                    break
+                            return normalized
+        except Exception:
+            pass
 
         keyword_resolver = KeywordResolver()
         resolved_keyword = await keyword_resolver.resolve(description, session)
@@ -351,6 +467,25 @@ Text:
         Returns (category_id, confidence, reasoning, type)
         """
         try:
+            precedent = await self._get_exact_verified_precedent(description, session)
+            if precedent:
+                if precedent["type"] == "transfer":
+                    return None, precedent["confidence"], precedent["reasoning"], "transfer"
+                return (
+                    int(precedent["category_id"]),
+                    precedent["confidence"],
+                    precedent["reasoning"],
+                    precedent["type"],
+                )
+
+            if self._is_internal_transfer_text(description):
+                return (
+                    None,
+                    0.92,
+                    "Internal transfer cues detected (joint account/internet banking pattern).",
+                    "transfer",
+                )
+
             candidates = await self.suggest_category_candidates(
                 description,
                 session,

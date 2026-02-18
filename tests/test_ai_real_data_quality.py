@@ -151,8 +151,12 @@ async def test_suggest_candidates_prompt_includes_memory_understanding_and_rules
         }
     )
     ai = StubCategorizer([payload])
+    similar_but_not_exact = (
+        "UNITED ANKETELL NTH 11FEB26 ATMA896 09:39:21 4402 VISA AUD "
+        "UNITED ANKETELL NTH 331153 ANKETELL AU A99999999 ATM"
+    )
 
-    candidates = await ai.suggest_category_candidates(REAL_FUEL_TX, db_session, expected_type="expense")
+    candidates = await ai.suggest_category_candidates(similar_but_not_exact, db_session, expected_type="expense")
     assert candidates[0]["id"] == fuel.id
     assert len(candidates) >= 3
 
@@ -350,3 +354,67 @@ async def test_add_transaction_ai_reasoning_persists_to_memory_with_review_metad
     assert mem.ai_suggested_category_id == cat.id
     assert mem.policy_version is not None
     assert mem.threshold_used is not None
+
+
+@pytest.mark.asyncio
+async def test_suggest_category_prefers_exact_verified_transfer_precedent_over_income_guess(db_session):
+    account, _ = await _seed_core_reference_data(db_session)
+    desc = "TRANSFER FROM SOMANGILI SIVAKU JOINT BANK TRANSFE"
+
+    db_session.add(
+        Transaction(
+            date=datetime(2026, 1, 8),
+            description=desc,
+            amount=100.0,
+            type="transfer",
+            account_id=account.id,
+            category_id=None,
+            is_verified=True,
+        )
+    )
+    await db_session.commit()
+
+    ai = StubCategorizer(
+        [
+            json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "id": 999,
+                            "type": "income",
+                            "confidence": 0.99,
+                            "reasoning": "Should never be used if precedent works.",
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+    cat_id, conf, reason, tx_type = await ai.suggest_category(desc, db_session, expected_type="income")
+    assert tx_type == "transfer"
+    assert cat_id is None
+    assert conf >= 0.9
+    assert "Exact verified precedent match" in reason
+    assert ai.prompts == []  # no LLM call when precedent is exact and strong
+
+
+@pytest.mark.asyncio
+async def test_internal_transfer_heuristic_does_not_override_salary_rows(db_session):
+    _, cats = await _seed_core_reference_data(db_session)
+    salary = cats["Employer>Salary>income"]
+
+    payload = json.dumps(
+        {
+            "candidates": [
+                {"id": salary.id, "type": "income", "confidence": 0.95, "reasoning": "Salary signal."}
+            ]
+        }
+    )
+    ai = StubCategorizer([payload])
+    desc = "TRANSFER Aurizn Salary Aurizn Defence P 0272635 Z@LC03712 SYSTEM GENERATED"
+    cat_id, conf, reason, tx_type = await ai.suggest_category(desc, db_session, expected_type="income")
+
+    assert tx_type == "income"
+    assert cat_id == salary.id
+    assert conf > 0.9
+    assert ai.prompts  # salary should go through normal candidate path, not transfer shortcut
