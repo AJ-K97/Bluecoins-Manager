@@ -139,7 +139,22 @@ def test_export_to_bluecoins_csv_summarizes_item_and_cleans_notes(tmp_path):
     with output_path.open(newline="") as f:
         rows = list(csv.reader(f))
 
+    assert rows[0] == [
+        "(1)Type",
+        "(2)Date",
+        "(3)Item or Payee",
+        "(4)Amount",
+        "(5)Parent Category",
+        "(6)Category",
+        "(7)Account Type",
+        "(8)Account",
+        "(9)Notes",
+        "(10) Label",
+        "(11) Status",
+        "(12) Split",
+    ]
     row = rows[1]
+    assert row[0] == "e"
     assert row[2] == "CORFIELD FRESH IGA"
     assert row[8] == "CORFIELD FRESH IGA"
 
@@ -166,6 +181,28 @@ def test_export_to_bluecoins_csv_prefers_user_note_for_item_or_payee(tmp_path):
     row = rows[1]
     assert row[2] == "Desk organizer and pens"
     assert row[8] == "Desk organizer and pens | Source: OFFICEWORKS"
+
+
+def test_export_to_bluecoins_csv_item_or_payee_uses_merchant_only(tmp_path):
+    tx = SimpleNamespace(
+        type="expense",
+        date=datetime(2024, 2, 10),
+        description="PURCHASE CARD 8208 LIVINGSTON ORIENTAL CANNING",
+        amount=-18.40,
+        category=SimpleNamespace(parent_name="Food", name="Groceries"),
+        category_id=3,
+        account=SimpleNamespace(name="HSBC Main"),
+    )
+    output_path = tmp_path / "bluecoins_export_merchant_only.csv"
+
+    success, _ = export_to_bluecoins_csv([tx], str(output_path))
+    assert success
+
+    with output_path.open(newline="") as f:
+        rows = list(csv.reader(f))
+
+    row = rows[1]
+    assert row[2] == "LIVINGSTON ORIENTAL CANNING"
 
 
 @pytest.mark.asyncio

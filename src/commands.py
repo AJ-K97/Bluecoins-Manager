@@ -1102,6 +1102,21 @@ async def add_transaction(
     return True, f"{status_msg}: #{new_tx.id} {description} ({amount})", new_tx
 
 def export_to_bluecoins_csv(transactions, output_path):
+    header = [
+        "(1)Type",
+        "(2)Date",
+        "(3)Item or Payee",
+        "(4)Amount",
+        "(5)Parent Category",
+        "(6)Category",
+        "(7)Account Type",
+        "(8)Account",
+        "(9)Notes",
+        "(10) Label",
+        "(11) Status",
+        "(12) Split",
+    ]
+
     def _normalize_whitespace(text):
         return re.sub(r"\s+", " ", str(text or "").replace("\xa0", " ")).strip()
 
@@ -1134,7 +1149,32 @@ def export_to_bluecoins_csv(transactions, output_path):
         cleaned_desc = _clean_description_for_notes(tx.description)
         if not cleaned_desc:
             return "Transaction"
-        return " ".join(cleaned_desc.split()[:6])
+        tokens = cleaned_desc.split()
+        if not tokens:
+            return "Transaction"
+
+        prefix_tokens = {
+            "PURCHASE",
+            "PAYMENT",
+            "CARD",
+            "POS",
+            "DEBIT",
+            "CREDIT",
+            "VISA",
+            "MASTERCARD",
+            "MC",
+            "TXN",
+            "TRANSACTION",
+        }
+
+        idx = 0
+        while idx < len(tokens) and tokens[idx].upper() in prefix_tokens:
+            idx += 1
+        while idx < len(tokens) and re.fullmatch(r"\d{2,6}", tokens[idx]):
+            idx += 1
+
+        merchant_tokens = tokens[idx:] if idx < len(tokens) else tokens
+        return " ".join(merchant_tokens[:6])
 
     def _build_notes_value(tx):
         user_note = _normalize_whitespace(getattr(tx, "note", None))
@@ -1146,7 +1186,7 @@ def export_to_bluecoins_csv(transactions, output_path):
     try:
         with open(output_path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["Type", "Date", "Item or Payee", "Amount", "Parent Category", "Category", "Account Type", "Account", "Notes", "Label", "Status", "Split"])
+            writer.writerow(header)
             
             for tx in transactions:
                 parent_name, cat_name = get_transaction_category_display(tx)
@@ -1175,7 +1215,7 @@ def export_to_bluecoins_csv(transactions, output_path):
                 item_or_payee = _summarize_item_or_payee(tx)
 
                 writer.writerow([
-                    "Transfer" if tx.type == "transfer" else ("Expense" if tx.type == "expense" else "Income"),
+                    "t" if tx.type == "transfer" else ("e" if tx.type == "expense" else "i"),
                     tx.date.strftime("%m/%d/%Y"),
                     item_or_payee,
                     str(tx.amount),
