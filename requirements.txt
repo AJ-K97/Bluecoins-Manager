@@ -1,4 +1,5 @@
 sqlalchemy
+aiosqlite  # async sqlite driver used by tests
 asyncpg
 python-telegram-bot
 ollama

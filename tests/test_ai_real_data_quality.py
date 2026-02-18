@@ -1,0 +1,352 @@
+import json
+from datetime import datetime
+from uuid import uuid4
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from sqlalchemy import select
+
+from src.ai import CategorizerAI
+from src.commands import (
+    add_account,
+    add_category,
+    add_transaction,
+    rebuild_category_understanding,
+    update_transaction_category,
+)
+from src.database import (
+    AICategoryUnderstanding,
+    AIGlobalMemory,
+    AIMemory,
+    Account,
+    Category,
+    Transaction,
+)
+from src.patterns import extract_pattern_key_result
+
+
+REAL_FUEL_TX = (
+    "UNITED ANKETELL NTH 10FEB26 ATMA896 21:39:21 4402   VISA    AUD "
+    "UNITED ANKETELL NTH 331153 ANKETELL   AU A88879448 ATM"
+)
+REAL_GROCERY_TX = (
+    "VISA DEBIT PURCHASE CARD 8208 WOOLWORTHS/ NICHOLSON RD & CANNINGVALE"
+)
+REAL_TRANSFER_OUT_TX = "PAYMENT TO S KARLAPUDI #044193"
+REAL_TRANSFER_INTERNAL_TX = (
+    "TRANSFER LP SDB60271Y ANZ Joint Account 665889369 "
+    "Joint Bank Transfe YIB153034 INTERNET BANKING"
+)
+REAL_FOOD_TX = (
+    "HUNGRY JACKS 05JAN26 ATMA896 20:06:11 4402   VISA    AUD "
+    "Hungry Jacks 126058 Livingston  AU A88824047 ATM"
+)
+
+
+class StubCategorizer(CategorizerAI):
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.prompts = []
+        self.model = "test-model"
+        self.client = None
+
+    async def _chat_once(self, prompt):
+        self.prompts.append(prompt)
+        if not self.responses:
+            raise AssertionError("No stubbed response left for _chat_once")
+        return self.responses.pop(0)
+
+    def _run_web_search(self, query, max_results=3):
+        return []
+
+
+async def _seed_core_reference_data(session):
+    account = Account(name=f"ANZ Main {uuid4().hex[:8]}", institution="ANZ")
+    cats = [
+        Category(name="Food", parent_name="Entertainment", type="expense"),
+        Category(name="Fuel", parent_name="Transportation", type="expense"),
+        Category(name="Shopping", parent_name="Entertainment", type="expense"),
+        Category(name="Grocery", parent_name="Household", type="expense"),
+        Category(name="Salary", parent_name="Employer", type="income"),
+        Category(name="Transfer", parent_name="Others", type="expense"),
+    ]
+    session.add(account)
+    session.add_all(cats)
+    await session.flush()
+    return account, {f"{c.parent_name}>{c.name}>{c.type}": c for c in cats}
+
+
+def test_extract_pattern_key_real_transfer_payee():
+    result = extract_pattern_key_result(REAL_TRANSFER_OUT_TX)
+    assert "S KARLAPUDI" in result.keyword
+    assert result.source == "rule"
+    assert result.confidence >= 0.75
+
+
+def test_extract_pattern_key_real_supermarket_slash_format():
+    result = extract_pattern_key_result(REAL_GROCERY_TX)
+    assert result.keyword == "WOOLWORTHS"
+    assert result.source == "rule"
+    assert result.confidence >= 0.75
+
+
+def test_extract_pattern_key_real_internal_transfer_phrase():
+    result = extract_pattern_key_result(REAL_TRANSFER_INTERNAL_TX)
+    assert result.keyword.startswith("LP ANZ JOINT")
+    assert result.source == "rule"
+    assert result.confidence >= 0.55
+
+
+@pytest.mark.asyncio
+async def test_suggest_candidates_prompt_includes_memory_understanding_and_rules(db_session):
+    account, cats = await _seed_core_reference_data(db_session)
+    fuel = cats["Transportation>Fuel>expense"]
+    food = cats["Entertainment>Food>expense"]
+    shopping = cats["Entertainment>Shopping>expense"]
+
+    tx = Transaction(
+        date=datetime(2026, 2, 11),
+        description=REAL_FUEL_TX,
+        amount=63.02,
+        type="expense",
+        account_id=account.id,
+        category_id=fuel.id,
+        is_verified=True,
+    )
+    db_session.add(tx)
+    await db_session.flush()
+    db_session.add(
+        AIMemory(
+            transaction_id=tx.id,
+            pattern_key="UNITED ANKETELL NTH",
+            ai_suggested_category_id=fuel.id,
+            user_selected_category_id=fuel.id,
+            ai_reasoning="Fuel station merchant signal.",
+            reflection="When merchant is UNITED, categorize as Fuel.",
+        )
+    )
+    db_session.add(
+        AICategoryUnderstanding(
+            category_id=fuel.id,
+            understanding="Fuel profile from verified United/ Ampol transactions.",
+            sample_transactions_json=json.dumps({"samples": [REAL_FUEL_TX], "patterns": ["UNITED"]}),
+        )
+    )
+    db_session.add(
+        AIGlobalMemory(
+            instruction="Never use suburb/location tail as merchant intent.",
+            source="unit_test",
+            is_active=True,
+        )
+    )
+    await db_session.commit()
+
+    payload = json.dumps(
+        {
+            "candidates": [
+                {"id": fuel.id, "type": "expense", "confidence": 0.93, "reasoning": "United is fuel station."},
+                {"id": food.id, "type": "expense", "confidence": 0.40, "reasoning": "Fallback food."},
+                {"id": shopping.id, "type": "expense", "confidence": 0.30, "reasoning": "Fallback shopping."},
+            ]
+        }
+    )
+    ai = StubCategorizer([payload])
+
+    candidates = await ai.suggest_category_candidates(REAL_FUEL_TX, db_session, expected_type="expense")
+    assert candidates[0]["id"] == fuel.id
+    assert len(candidates) >= 3
+
+    prompt = ai.prompts[0]
+    assert "LEARNING/REFLECTION" in prompt
+    assert "Fuel profile from verified United/ Ampol transactions." in prompt
+    assert "Never use suburb/location tail as merchant intent." in prompt
+    assert "Global User Rulebook" in prompt
+
+
+@pytest.mark.asyncio
+async def test_suggest_candidates_repairs_and_filters_invalid_candidates_edge_cases(db_session):
+    _, cats = await _seed_core_reference_data(db_session)
+    food = cats["Entertainment>Food>expense"]
+    fuel = cats["Transportation>Fuel>expense"]
+    shopping = cats["Entertainment>Shopping>expense"]
+    salary = cats["Employer>Salary>income"]
+
+    repaired = json.dumps(
+        {
+            "candidates": [
+                {"id": food.id, "type": "expense", "confidence": 0.90, "reasoning": "Hungry Jacks is food."},
+                {"id": food.id, "type": "expense", "confidence": 0.89, "reasoning": "Duplicate should be removed."},
+                {"id": salary.id, "type": "income", "confidence": 0.88, "reasoning": "Wrong type for expected expense."},
+                {"id": 99999, "type": "expense", "confidence": 0.77, "reasoning": "Unknown category id."},
+                {"id": fuel.id, "type": "transfer", "confidence": 0.72, "reasoning": "Transfer should be filtered."},
+                {"id": shopping.id, "type": "expense", "confidence": 0.60, "reasoning": "Valid shopping backup."},
+            ]
+        }
+    )
+    ai = StubCategorizer(["not a json payload", repaired])
+
+    candidates = await ai.suggest_category_candidates(
+        REAL_FOOD_TX,
+        db_session,
+        min_candidates=3,
+        expected_type="expense",
+    )
+
+    assert len(ai.prompts) == 2  # original + repair prompt
+    assert len(candidates) >= 3
+    ids = [c["id"] for c in candidates]
+    assert len(ids) == len(set(ids))
+    assert all(c["type"] == "expense" for c in candidates)
+    assert food.id in ids
+    assert salary.id not in ids
+
+
+@pytest.mark.asyncio
+async def test_update_transaction_category_sets_reflection_and_finalized_decision_state(db_session):
+    account, cats = await _seed_core_reference_data(db_session)
+    fuel = cats["Transportation>Fuel>expense"]
+    food = cats["Entertainment>Food>expense"]
+
+    tx = Transaction(
+        date=datetime(2026, 2, 10),
+        description=REAL_FUEL_TX,
+        amount=7.50,
+        type="expense",
+        account_id=account.id,
+        category_id=fuel.id,
+        is_verified=False,
+        decision_state="needs_review",
+        review_priority=50,
+        review_bucket="conf_mid",
+    )
+    db_session.add(tx)
+    await db_session.flush()
+    db_session.add(
+        AIMemory(
+            transaction_id=tx.id,
+            pattern_key="UNITED ANKETELL NTH",
+            ai_suggested_category_id=fuel.id,
+            ai_reasoning="Fuel station signal",
+        )
+    )
+    await db_session.commit()
+
+    with patch("src.commands.CategorizerAI") as mock_ai_cls:
+        mock_ai = mock_ai_cls.return_value
+        mock_ai.generate_reflection = AsyncMock(
+            return_value="When merchant indicates food chain, use Food."
+        )
+        ok, msg = await update_transaction_category(db_session, tx.id, category_id=food.id)
+
+    assert ok is True
+    assert "updated and verified" in msg.lower()
+
+    tx_row = (
+        await db_session.execute(select(Transaction).where(Transaction.id == tx.id))
+    ).scalar_one()
+    mem_row = (
+        await db_session.execute(select(AIMemory).where(AIMemory.transaction_id == tx.id))
+    ).scalar_one()
+
+    assert tx_row.is_verified is True
+    assert tx_row.category_id == food.id
+    assert tx_row.decision_state == "auto_approved"
+    assert tx_row.review_priority == 100
+    assert tx_row.review_bucket == "manual_review"
+    assert mem_row.user_selected_category_id == food.id
+    assert mem_row.reflection == "When merchant indicates food chain, use Food."
+
+
+@pytest.mark.asyncio
+async def test_rebuild_category_understanding_from_real_transactions(db_session):
+    account, cats = await _seed_core_reference_data(db_session)
+    grocery = cats["Household>Grocery>expense"]
+
+    db_session.add_all(
+        [
+            Transaction(
+                date=datetime(2026, 1, 29),
+                description=REAL_GROCERY_TX,
+                amount=18.60,
+                type="expense",
+                account_id=account.id,
+                category_id=grocery.id,
+                is_verified=True,
+            ),
+            Transaction(
+                date=datetime(2026, 1, 24),
+                description="Tucker Fresh",
+                amount=5.99,
+                type="expense",
+                account_id=account.id,
+                category_id=grocery.id,
+                is_verified=True,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    updated = await rebuild_category_understanding(db_session, category_ids=[grocery.id])
+    await db_session.commit()
+    assert updated == 1
+
+    profile = (
+        await db_session.execute(
+            select(AICategoryUnderstanding).where(AICategoryUnderstanding.category_id == grocery.id)
+        )
+    ).scalar_one()
+
+    payload = json.loads(profile.sample_transactions_json)
+    assert "Category intent profile for" in profile.understanding
+    assert "Verified examples: 2" in profile.understanding
+    assert len(payload["samples"]) >= 2
+    assert isinstance(payload["patterns"], list)
+
+
+@pytest.mark.asyncio
+async def test_add_transaction_ai_reasoning_persists_to_memory_with_review_metadata(db_session):
+    account_name = f"Cash-{uuid4().hex[:8]}"
+    category_name = f"Food-{uuid4().hex[:6]}"
+
+    await add_account(db_session, account_name, "Manual")
+    await add_category(db_session, category_name, "Entertainment", "expense")
+    cat = (
+        await db_session.execute(
+            select(Category).where(
+                Category.name == category_name,
+                Category.parent_name == "Entertainment",
+                Category.type == "expense",
+            )
+        )
+    ).scalar_one()
+
+    with patch("src.commands.CategorizerAI") as mock_ai_cls:
+        mock_ai = mock_ai_cls.return_value
+        mock_ai.suggest_category = AsyncMock(
+            return_value=(
+                cat.id,
+                0.75,
+                "Merchant 'Hungry Jacks' indicates food/restaurant spend.",
+                "expense",
+            )
+        )
+        success, _, tx = await add_transaction(
+            db_session,
+            date=datetime(2026, 2, 16),
+            amount=31.30,
+            description=REAL_FOOD_TX,
+            account_name=account_name,
+        )
+
+    assert success is True
+    assert tx.category_id == cat.id
+    assert tx.decision_state == "needs_review"  # confidence band [0.70, 0.97)
+    assert tx.is_verified is False
+
+    mem = (
+        await db_session.execute(select(AIMemory).where(AIMemory.transaction_id == tx.id))
+    ).scalar_one()
+    assert "Hungry Jacks" in mem.ai_reasoning
+    assert mem.ai_suggested_category_id == cat.id
+    assert mem.policy_version is not None
+    assert mem.threshold_used is not None
