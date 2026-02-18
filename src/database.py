@@ -178,6 +178,52 @@ class LLMFineTuneExample(Base):
 
     transaction = relationship("Transaction", back_populates="finetune_examples")
 
+
+class CategoryBenchmarkItem(Base):
+    __tablename__ = "category_benchmark_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source_file = Column(String, nullable=True, index=True)
+    source_row_number = Column(Integer, nullable=True)
+    external_id = Column(String, nullable=True, index=True)
+
+    description = Column(String, nullable=False, index=True)
+    amount = Column(Float, nullable=True)
+    tx_type = Column(String, nullable=True, index=True)
+    date = Column(DateTime, nullable=True, index=True)
+    raw_row_json = Column(Text, nullable=True)
+
+    expected_category_id = Column(Integer, ForeignKey("categories.id"), nullable=True, index=True)
+    expected_parent_name = Column(String, nullable=True)
+    expected_category_name = Column(String, nullable=True)
+    expected_type = Column(String, nullable=True, index=True)
+    label_source = Column(String, nullable=True)
+
+    last_predicted_category_id = Column(Integer, nullable=True)
+    last_predicted_type = Column(String, nullable=True)
+    last_predicted_confidence = Column(Float, nullable=True)
+    last_predicted_reasoning = Column(Text, nullable=True)
+    last_evaluated_at = Column(DateTime, nullable=True, index=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    expected_category = relationship("Category")
+
+
+class CategoryBenchmarkRun(Base):
+    __tablename__ = "category_benchmark_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    model = Column(String, nullable=False, index=True)
+    total_items = Column(Integer, nullable=False, default=0)
+    evaluated_items = Column(Integer, nullable=False, default=0)
+    overall_score = Column(Float, nullable=False, default=0.0)  # 0..100
+    memory_score = Column(Float, nullable=False, default=0.0)   # 0..100
+    memory_coverage = Column(Float, nullable=False, default=0.0)  # 0..100
+    details_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
 class InteractionLog(Base):
     __tablename__ = "interaction_logs"
 

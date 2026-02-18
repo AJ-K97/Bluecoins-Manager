@@ -29,6 +29,15 @@ from src.commands import (
 )
 from src.local_llm import LocalLLMPipeline
 from src.ai_config import close_ollama_client
+from src.benchmark import (
+    clear_benchmark_item_label,
+    import_benchmark_csv,
+    list_benchmark_items,
+    list_benchmark_runs,
+    score_benchmark_dataset,
+    set_benchmark_item_label,
+    set_benchmark_item_label_category_id,
+)
 
 
 async def _run_with_spinner(label, coro):
@@ -351,6 +360,199 @@ async def queue_command(args):
             await review_queue_menu(session)
 
 
+async def benchmark_command(args):
+    from InquirerPy import inquirer
+    from InquirerPy.base.control import Choice
+    from src.interactive_cli.common import TRANSFER_CHOICE, choose_category_tree
+
+    async with AsyncSessionLocal() as session:
+        if args.benchmark_action == "import-csv":
+            ok, msg, _stats = await import_benchmark_csv(
+                session,
+                args.input,
+                source_name=args.source_name,
+            )
+            print(msg)
+            if not ok:
+                return
+        elif args.benchmark_action == "list":
+            rows = await list_benchmark_items(
+                session,
+                limit=args.limit,
+                unlabeled_only=args.unlabeled_only,
+                source_file=args.source_file,
+            )
+            if not rows:
+                print("No benchmark rows found.")
+                return
+            for row in rows:
+                if row.expected_type == "transfer":
+                    expected = "(Transfer) > (Transfer) [transfer]"
+                elif row.expected_parent_name and row.expected_category_name and row.expected_type:
+                    expected = f"{row.expected_parent_name} > {row.expected_category_name} [{row.expected_type}]"
+                else:
+                    expected = "UNLABELED"
+                print(
+                    f"#{row.id} src={row.source_file or '-'} row={row.source_row_number or '-'} "
+                    f"type={row.tx_type or '-'} expected={expected} | {row.description}"
+                )
+        elif args.benchmark_action == "label":
+            ok, msg = await set_benchmark_item_label(
+                session,
+                item_id=args.id,
+                parent_name=args.parent,
+                category_name=args.category,
+                tx_type=args.type,
+                set_transfer=args.set_transfer,
+            )
+            print(msg)
+            if not ok:
+                return
+        elif args.benchmark_action == "score":
+            ok, msg, summary = await _run_with_spinner(
+                "Scoring benchmark",
+                score_benchmark_dataset(
+                    session,
+                    model=args.model,
+                    limit=args.limit,
+                    source_file=args.source_file,
+                ),
+            )
+            print(msg)
+            if not ok or not summary:
+                return
+            print(f"run_id={summary['run_id']} model={summary['model']}")
+            print(
+                f"overall_score={summary['overall_score']:.2f}/100 "
+                f"({summary['correct']}/{summary['total']})"
+            )
+            print(
+                f"memory_score={summary['memory_score']:.2f}/100 "
+                f"coverage={summary['memory_coverage']:.2f}%"
+            )
+            for tx_type in ["expense", "income", "transfer"]:
+                score = summary["by_type"].get(tx_type)
+                score_text = f"{score:.2f}/100" if score is not None else "n/a"
+                print(f"{tx_type}_score={score_text}")
+
+            errors = summary.get("errors") or []
+            if errors and args.show_errors > 0:
+                print("\nTop errors:")
+                for err in errors[: max(1, int(args.show_errors))]:
+                    expected = err["expected"]
+                    predicted = err["predicted"]
+                    print(
+                        f"- #{err['id']} expected={expected['type']}:{expected['label']} "
+                        f"predicted={predicted['type']}:{predicted['category_id']} "
+                        f"conf={predicted['confidence']:.2f}"
+                    )
+        elif args.benchmark_action == "runs":
+            runs = await list_benchmark_runs(session, limit=args.limit)
+            if not runs:
+                print("No benchmark runs found.")
+                return
+            for run in runs:
+                print(
+                    f"#{run.id} {run.created_at.strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"model={run.model} overall={run.overall_score:.2f}/100 "
+                    f"memory={run.memory_score:.2f}/100 coverage={run.memory_coverage:.2f}% "
+                    f"n={run.evaluated_items}"
+                )
+        elif args.benchmark_action == "review":
+            rows = await list_benchmark_items(
+                session,
+                limit=args.limit,
+                unlabeled_only=args.unlabeled_only,
+                source_file=args.source_file,
+            )
+            if args.start_id:
+                rows = [r for r in rows if r.id >= int(args.start_id)]
+            if not rows:
+                print("No benchmark rows found for interactive review.")
+                return
+
+            idx = 0
+            updates = 0
+            total = len(rows)
+            viewed = 0
+            while idx < total:
+                row = rows[idx]
+                viewed += 1
+                if row.expected_type == "transfer":
+                    expected = "(Transfer) > (Transfer) [transfer]"
+                elif row.expected_parent_name and row.expected_category_name and row.expected_type:
+                    expected = f"{row.expected_parent_name} > {row.expected_category_name} [{row.expected_type}]"
+                else:
+                    expected = "UNLABELED"
+
+                print("")
+                print(f"[{idx + 1}/{total}] Benchmark #{row.id}")
+                print(f"source={row.source_file or '-'} row={row.source_row_number or '-'} external_id={row.external_id or '-'}")
+                print(f"type_hint={row.tx_type or '-'} amount={row.amount if row.amount is not None else '-'} date={row.date.strftime('%Y-%m-%d') if row.date else '-'}")
+                print(f"description: {row.description}")
+                print(f"current label: {expected}")
+
+                action = await inquirer.select(
+                    message="Benchmark review action:",
+                    choices=[
+                        Choice(value="pick", name="Pick Category (tree)"),
+                        Choice(value="transfer", name="Mark as Transfer"),
+                        Choice(value="clear", name="Clear Current Label"),
+                        Choice(value="next", name="Skip / Next"),
+                        Choice(value="prev", name="Previous"),
+                        Choice(value="quit", name="Quit Review"),
+                    ],
+                    default="pick",
+                ).execute_async()
+
+                if action == "quit":
+                    break
+                if action == "next":
+                    idx += 1
+                    continue
+                if action == "prev":
+                    idx = max(0, idx - 1)
+                    continue
+                if action == "clear":
+                    ok, msg = await clear_benchmark_item_label(session, row.id)
+                    print(msg)
+                    if ok:
+                        updates += 1
+                    idx += 1
+                    continue
+                if action == "transfer":
+                    ok, msg = await set_benchmark_item_label(session, item_id=row.id, set_transfer=True)
+                    print(msg)
+                    if ok:
+                        updates += 1
+                    idx += 1
+                    continue
+
+                selected_cat = await choose_category_tree(
+                    session,
+                    prompt_prefix=f"Benchmark #{row.id}",
+                    default_type=row.tx_type if row.tx_type in {"income", "expense"} else None,
+                    restrict_to_default_type=False,
+                )
+                if selected_cat is None:
+                    continue
+                if selected_cat == TRANSFER_CHOICE:
+                    ok, msg = await set_benchmark_item_label(session, item_id=row.id, set_transfer=True)
+                    print(msg)
+                    if ok:
+                        updates += 1
+                    idx += 1
+                    continue
+
+                ok, msg = await set_benchmark_item_label_category_id(session, row.id, selected_cat.id)
+                print(msg)
+                if ok:
+                    updates += 1
+                idx += 1
+
+            print(f"Interactive benchmark review completed. rows_seen={viewed} updates={updates}")
+
+
 async def main():
     parser = argparse.ArgumentParser(description="Financial CLI V2")
     subparsers = parser.add_subparsers(dest="command")
@@ -480,6 +682,41 @@ async def main():
     add_tx_parser.add_argument("--account", required=True)
     add_tx_parser.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"), help="YYYY-MM-DD")
 
+    # Benchmark dataset + scoring
+    benchmark_parser = subparsers.add_parser("benchmark")
+    benchmark_subparsers = benchmark_parser.add_subparsers(dest="benchmark_action", required=True)
+
+    benchmark_import = benchmark_subparsers.add_parser("import-csv")
+    benchmark_import.add_argument("--input", required=True, help="Path to CSV dataset.")
+    benchmark_import.add_argument("--source-name", help="Optional logical source name.")
+
+    benchmark_list = benchmark_subparsers.add_parser("list")
+    benchmark_list.add_argument("--limit", type=int, default=50)
+    benchmark_list.add_argument("--unlabeled-only", action="store_true")
+    benchmark_list.add_argument("--source-file", help="Filter by source name.")
+
+    benchmark_label = benchmark_subparsers.add_parser("label")
+    benchmark_label.add_argument("--id", required=True, type=int, help="Benchmark row id.")
+    benchmark_label.add_argument("--parent", help="Expected parent category name.")
+    benchmark_label.add_argument("--category", help="Expected sub category name.")
+    benchmark_label.add_argument("--type", choices=["expense", "income"], help="Category type.")
+    benchmark_label.add_argument("--set-transfer", action="store_true", help="Set expected type to transfer.")
+
+    benchmark_score = benchmark_subparsers.add_parser("score")
+    benchmark_score.add_argument("--model", default="llama3.1:8b", help="LLM model name")
+    benchmark_score.add_argument("--limit", type=int, help="Evaluate first N labeled rows.")
+    benchmark_score.add_argument("--source-file", help="Filter by source name.")
+    benchmark_score.add_argument("--show-errors", type=int, default=10, help="Print first N mismatches.")
+
+    benchmark_runs = benchmark_subparsers.add_parser("runs")
+    benchmark_runs.add_argument("--limit", type=int, default=20)
+
+    benchmark_review = benchmark_subparsers.add_parser("review")
+    benchmark_review.add_argument("--source-file", help="Filter by source name.")
+    benchmark_review.add_argument("--unlabeled-only", action="store_true", help="Only review unlabeled rows.")
+    benchmark_review.add_argument("--start-id", type=int, help="Start from benchmark row id (inclusive).")
+    benchmark_review.add_argument("--limit", type=int, help="Maximum rows to load for this session.")
+
     args = parser.parse_args()
 
     # Commands that do not require database connectivity.
@@ -510,6 +747,8 @@ async def main():
         await queue_command(args)
     elif args.command == "add-tx":
         await add_tx_command(args)
+    elif args.command == "benchmark":
+        await benchmark_command(args)
     else:
         parser.print_help()
 

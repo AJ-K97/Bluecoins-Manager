@@ -1,5 +1,4 @@
 from InquirerPy import inquirer
-from InquirerPy.separator import Separator
 from InquirerPy.base.control import Choice
 
 from src.commands import get_all_categories
@@ -44,18 +43,26 @@ async def choose_category_tree(session, prompt_prefix="Select Category", default
     if selected_type == TRANSFER_CHOICE:
         return TRANSFER_CHOICE
 
-    tree_choices = []
     parent_names = sorted(grouped[selected_type].keys())
+    flat_choices = []
     for parent in parent_names:
-        tree_choices.append(Separator(f"📁 {parent}"))
         children = grouped[selected_type][parent]
-        for idx, child in enumerate(children):
-            branch = "└─" if idx == len(children) - 1 else "├─"
-            tree_choices.append(Choice(value=child, name=f"  {branch} {child.name}"))
+        for child in children:
+            # Keep a searchable label so users can quickly filter by typing.
+            flat_choices.append(
+                Choice(
+                    value=child,
+                    name=f"{parent} > {child.name}",
+                )
+            )
 
-    tree_choices.append(Choice(value=None, name="Back"))
+    flat_choices.append(Choice(value=None, name="Back"))
 
-    return await inquirer.select(
-        message=f"{prompt_prefix}: Select Sub-Category ({selected_type.upper()})",
-        choices=tree_choices,
+    return await inquirer.fuzzy(
+        message=(
+            f"{prompt_prefix}: Select Sub-Category ({selected_type.upper()}) "
+            f"[Type to filter]"
+        ),
+        choices=flat_choices,
+        default="",
     ).execute_async()

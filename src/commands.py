@@ -20,6 +20,8 @@ from src.database import (
     LLMSkill,
     LLMFineTuneExample,
     MerchantKeywordAlias,
+    CategoryBenchmarkItem,
+    CategoryBenchmarkRun,
     Base,
     engine,
 )
@@ -264,12 +266,14 @@ RESETTABLE_MODELS = {
     "llm_knowledge_chunks": LLMKnowledgeChunk,
     "llm_skills": LLMSkill,
     "llm_finetune_examples": LLMFineTuneExample,
+    "category_benchmark_items": CategoryBenchmarkItem,
+    "category_benchmark_runs": CategoryBenchmarkRun,
 }
 
 # parent -> hard dependent children (FK/consistency must be addressed first if non-empty)
 RESET_HARD_DEPENDENCIES = {
     "accounts": ["transactions"],
-    "categories": ["transactions", "ai_category_understanding"],
+    "categories": ["transactions", "ai_category_understanding", "category_benchmark_items"],
     "transactions": ["ai_memory", "llm_finetune_examples"],
 }
 
@@ -279,6 +283,8 @@ RESET_DELETE_ORDER = [
     "llm_finetune_examples",
     "llm_knowledge_chunks",
     "ai_category_understanding",
+    "category_benchmark_runs",
+    "category_benchmark_items",
     "transactions",
     "accounts",
     "categories",

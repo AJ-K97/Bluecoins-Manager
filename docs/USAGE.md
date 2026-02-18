@@ -129,3 +129,9 @@ python3 main.py queue stats
 python3 main.py queue recalc --since 2026-01-01
 python3 main.py queue review
 ```
+
+## 5. 📊 Benchmarking Categorization Quality
+
+For a full benchmark workflow (CSV import, interactive row-by-row labeling, scoring 0-100, memory score tracking), see:
+
+- `docs/BENCHMARK_GUIDE.md`
