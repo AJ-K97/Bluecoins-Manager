@@ -1,14 +1,12 @@
-
-import ollama
 from sqlalchemy import text
 from src.database import get_db, AsyncSessionLocal
 
-from src.ai_config import get_ollama_client
+from src.ai_config import get_default_ollama_model, get_ollama_client
 
 class FinanceChatAI:
-    def __init__(self, model="llama3.1:8b"):
+    def __init__(self, model=None):
         self.client = get_ollama_client()
-        self.model = model
+        self.model = (model or get_default_ollama_model()).strip()
         
         # Schema for the LLM
         self.schema = """

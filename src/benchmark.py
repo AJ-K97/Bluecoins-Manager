@@ -9,6 +9,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import selectinload
 
 from src.ai import CategorizerAI
+from src.ai_config import get_default_ollama_model
 from src.parser import BankParser
 from src.database import (
     AICategoryUnderstanding,
@@ -448,11 +449,12 @@ async def _has_memory_support(session, resolver: KeywordResolver, description: s
 
 async def score_benchmark_dataset(
     session,
-    model: str = "llama3.1:8b",
+    model: Optional[str] = None,
     limit: Optional[int] = None,
     source_file: Optional[str] = None,
     progress_callback=None,
 ):
+    model = (model or get_default_ollama_model()).strip()
     source_filters = []
     if source_file:
         if isinstance(source_file, str):

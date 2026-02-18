@@ -1,4 +1,3 @@
-import ollama
 import re
 from collections import Counter
 from sqlalchemy import select
@@ -12,15 +11,15 @@ from src.database import (
 )
 from src.keyword_resolver import KeywordResolver
 
-from src.ai_config import get_ollama_client
+from src.ai_config import get_default_ollama_model, get_ollama_client
 
 class CategorizerAI:
-    def __init__(self, model="llama3.1:8b"):
+    def __init__(self, model=None):
         """
         Initialize with the Ollama model.
         Ensure 'ollama serve' is running and the model is pulled.
         """
-        self.model = model
+        self.model = (model or get_default_ollama_model()).strip()
         self.client = get_ollama_client()
 
     async def _chat_once(self, prompt):

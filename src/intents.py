@@ -1,12 +1,11 @@
 import json
 import re
-import ollama
 
-from src.ai_config import get_ollama_client
+from src.ai_config import get_default_ollama_model, get_ollama_client
 
 class IntentAI:
-    def __init__(self, model="llama3.1:8b"):
-        self.model = model
+    def __init__(self, model=None):
+        self.model = (model or get_default_ollama_model()).strip()
         self.client = get_ollama_client()
 
     async def classify(self, text: str):

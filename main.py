@@ -28,7 +28,13 @@ from src.commands import (
     add_transaction,
 )
 from src.local_llm import LocalLLMPipeline
-from src.ai_config import close_ollama_client
+from src.ai_config import (
+    close_ollama_client,
+    get_default_embedding_model,
+    get_default_ollama_model,
+    list_available_ollama_models,
+    set_default_ollama_model,
+)
 from src.benchmark import (
     clear_benchmark_item_label,
     import_benchmark_csv,
@@ -594,6 +600,45 @@ async def benchmark_command(args):
             print(f"Interactive benchmark review completed. rows_seen={viewed} updates={updates}")
 
 
+async def settings_command(args):
+    if args.settings_action != "ollama-model":
+        print("Unknown settings action.")
+        return
+
+    models = []
+    fetch_error = None
+    try:
+        models = await list_available_ollama_models()
+    except Exception as exc:
+        fetch_error = exc
+
+    if args.set_model:
+        selected = (args.set_model or "").strip()
+        if not selected:
+            print("Error: --set requires a non-empty model name.")
+            return
+        if models and selected not in models:
+            print(f"Warning: '{selected}' was not found in installed models; saving anyway.")
+        env_path = set_default_ollama_model(selected)
+        print(f"Saved OLLAMA_MODEL={selected} to {env_path}")
+
+    active_model = get_default_ollama_model()
+    print(f"Current OLLAMA_MODEL: {active_model}")
+    if fetch_error:
+        print(f"Warning: failed to fetch models from Ollama: {fetch_error}")
+        print("Check that Ollama is running and OLLAMA_HOST is reachable.")
+        return
+
+    if not models:
+        print("No Ollama models found. Pull one with: ollama pull <model>")
+        return
+
+    print("Available Ollama models:")
+    for model_name in models:
+        marker = "*" if model_name == active_model else " "
+        print(f"{marker} {model_name}")
+
+
 async def main():
     parser = argparse.ArgumentParser(description="Financial CLI V2")
     subparsers = parser.add_subparsers(dest="command")
@@ -642,7 +687,7 @@ async def main():
         help="Expected transaction type",
     )
     category_debug_parser.add_argument("--top-k", type=int, default=5, help="How many candidates to print")
-    category_debug_parser.add_argument("--model", default="llama3.1:8b", help="LLM model name")
+    category_debug_parser.add_argument("--model", default=get_default_ollama_model(), help="LLM model name")
 
     keyword_backfill_parser = subparsers.add_parser("keyword-backfill")
     keyword_backfill_parser.add_argument(
@@ -653,8 +698,8 @@ async def main():
 
     # Local LLM pipeline
     llm_parser = subparsers.add_parser("llm")
-    llm_parser.add_argument("--model", default="llama3.1:8b", help="Local chat model name")
-    llm_parser.add_argument("--embedding-model", default="nomic-embed-text", help="Embedding model name")
+    llm_parser.add_argument("--model", default=get_default_ollama_model(), help="Local chat model name")
+    llm_parser.add_argument("--embedding-model", default=get_default_embedding_model(), help="Embedding model name")
     llm_subparsers = llm_parser.add_subparsers(dest="llm_action", required=True)
 
     llm_reindex = llm_subparsers.add_parser("reindex")
@@ -748,7 +793,7 @@ async def main():
     benchmark_label.add_argument("--set-transfer", action="store_true", help="Set expected type to transfer.")
 
     benchmark_score = benchmark_subparsers.add_parser("score")
-    benchmark_score.add_argument("--model", default="llama3.1:8b", help="LLM model name")
+    benchmark_score.add_argument("--model", default=get_default_ollama_model(), help="LLM model name")
     benchmark_score.add_argument("--limit", type=int, help="Evaluate first N labeled rows.")
     benchmark_score.add_argument(
         "--source-file",
@@ -775,11 +820,27 @@ async def main():
     benchmark_review.add_argument("--start-id", type=int, help="Start from benchmark row id (inclusive).")
     benchmark_review.add_argument("--limit", type=int, help="Maximum rows to load for this session.")
 
+    # Runtime settings
+    settings_parser = subparsers.add_parser("settings")
+    settings_subparsers = settings_parser.add_subparsers(dest="settings_action", required=True)
+    ollama_model_parser = settings_subparsers.add_parser(
+        "ollama-model",
+        help="List installed Ollama models and optionally set the default one.",
+    )
+    ollama_model_parser.add_argument(
+        "--set",
+        dest="set_model",
+        help="Model name to save to .env as OLLAMA_MODEL",
+    )
+
     args = parser.parse_args()
 
     # Commands that do not require database connectivity.
     if args.command == "pdf-debug":
         await pdf_debug_command(args)
+        return
+    if args.command == "settings":
+        await settings_command(args)
         return
 
     await init_db()
