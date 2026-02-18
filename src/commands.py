@@ -488,6 +488,8 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
     
     new_txs = []
     new_tx_ids = []
+    # Cache AI decisions within one import run to keep identical descriptions consistent.
+    ai_decision_cache = {}
     skipped = 0
     verified_categories_touched = set()
     
@@ -519,14 +521,23 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
         reasoning = None
         tx_type = tx_data["type"] # Default from parser
         is_verified = False
-        
-        # AI Suggestion
-        print(f"Resolving '{tx_data['description']}' with AI...")
-        cat_id, confidence, reasoning, suggested_type = await ai.suggest_category(
-            tx_data["description"],
-            session,
-            expected_type=tx_data["type"] if tx_data["type"] in {"expense", "income"} else None,
+        cache_key = (
+            (tx_data.get("description") or "").strip().upper(),
+            (tx_data.get("type") or "").strip().lower(),
         )
+
+        # AI Suggestion
+        if cache_key in ai_decision_cache:
+            cat_id, confidence, reasoning, suggested_type = ai_decision_cache[cache_key]
+            print(f"Resolving '{tx_data['description']}' with AI... (cached)")
+        else:
+            print(f"Resolving '{tx_data['description']}' with AI...")
+            cat_id, confidence, reasoning, suggested_type = await ai.suggest_category(
+                tx_data["description"],
+                session,
+                expected_type=tx_data["type"] if tx_data["type"] in {"expense", "income"} else None,
+            )
+            ai_decision_cache[cache_key] = (cat_id, confidence, reasoning, suggested_type)
         if suggested_type:
             tx_type = suggested_type
         if tx_type == "transfer":
