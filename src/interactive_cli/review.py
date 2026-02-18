@@ -14,6 +14,7 @@ from src.commands import (
     get_category_display_from_values,
     mark_transaction_verified,
     update_transaction_category,
+    update_transaction_note,
 )
 from src.database import AIMemory, Transaction
 from src.patterns import extract_pattern_key_result
@@ -54,6 +55,7 @@ def _tx_data_from_row(tx):
         "description": tx.description or "",
         "type": tx.type,
         "raw_csv_row": tx.raw_csv_row or "",
+        "note": tx.note or "",
     }
 
 
@@ -272,6 +274,16 @@ async def review_transactions(session, transactions):
                     await session.refresh(tx, ["memory_entries"])
             continue
 
+        if action == "note":
+            new_note = await inquirer.text(
+                message="Transaction note (used as export Item/Payee when present):",
+                default=tx.note or "",
+            ).execute_async()
+            await update_transaction_note(session, tx.id, new_note)
+            await session.refresh(tx, ["memory_entries"])
+            print("Saved note.")
+            continue
+
         if action == "delete":
             confirm = await inquirer.confirm(message=f"Delete '{tx.description}'?").execute_async()
             if confirm:
@@ -307,6 +319,7 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
     effective_type = current_type
     effective_confidence = confidence
     effective_reasoning = reasoning
+    effective_note = (tx_data.get("note") or "").strip()
     change_log = []
     discussion_history = []
     locked_expected_type = tx_data["type"] if tx_data.get("type") in {"expense", "income"} else None
@@ -346,6 +359,7 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
             f"Date: {tx_data['date']}    Amount: {tx_data['amount']}",
             f"Type: {type_disp}",
             f"Description: {tx_data['description']}",
+            f"Note: {effective_note or '-'}",
             *block_section,
             f"AI Suggestion: {suggestion_label}",
             f"Confidence: {effective_confidence:.2f}",
@@ -361,6 +375,7 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
                 Choice(value="pick_suggested", name="Pick from Suggested Categories"),
                 Choice(value="change", name="Change Category"),
                 Choice(value="refresh", name="Refresh LLM Reasoning"),
+                Choice(value="note", name="Add/Edit Note"),
                 Choice(value="coach", name="Coach Model"),
                 Choice(value="discuss", name="Discuss Current Decision"),
                 Choice(value="skip", name="Skip Review (Accept as AI prediction)"),
@@ -375,7 +390,14 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
                     effective_reasoning = f"{effective_reasoning} [Review changes: {change_summary}]"
                 else:
                     effective_reasoning = f"Review changes: {change_summary}"
-            return effective_cat_id, True, effective_type, effective_confidence, effective_reasoning
+            return (
+                effective_cat_id,
+                True,
+                effective_type,
+                effective_confidence,
+                effective_reasoning,
+                effective_note,
+            )
 
         if action == "skip":
             if change_log:
@@ -384,7 +406,28 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
                     effective_reasoning = f"{effective_reasoning} [Review changes: {change_summary}]"
                 else:
                     effective_reasoning = f"Review changes: {change_summary}"
-            return effective_cat_id, False, effective_type, effective_confidence, effective_reasoning
+            return (
+                effective_cat_id,
+                False,
+                effective_type,
+                effective_confidence,
+                effective_reasoning,
+                effective_note,
+            )
+
+        if action == "note":
+            note_value = await inquirer.text(
+                message="Transaction note (used as export Item/Payee when present):",
+                default=effective_note,
+            ).execute_async()
+            new_note = (note_value or "").strip()
+            if new_note != effective_note:
+                if new_note:
+                    change_log.append("updated note")
+                else:
+                    change_log.append("cleared note")
+            effective_note = new_note
+            continue
 
         if action == "pick_suggested":
             if not suggestion_candidates:

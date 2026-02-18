@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import re
 import textwrap
 from datetime import datetime
 from collections import Counter
@@ -569,10 +570,13 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
         if review_callback:
             # We pass the raw data and AI suggestion. 
             # Callback returns final reviewed values:
-            # (cat_id, is_verified, tx_type, confidence, reasoning)
-            cat_id, is_verified, tx_type, confidence, reasoning = await review_callback(
-                tx_data, cat_id, confidence, tx_type, reasoning, session
-            )
+            # (cat_id, is_verified, tx_type, confidence, reasoning[, note])
+            reviewed = await review_callback(tx_data, cat_id, confidence, tx_type, reasoning, session)
+            if isinstance(reviewed, tuple) and len(reviewed) >= 6:
+                cat_id, is_verified, tx_type, confidence, reasoning, reviewed_note = reviewed[:6]
+                tx_data["note"] = (reviewed_note or "").strip() or None
+            else:
+                cat_id, is_verified, tx_type, confidence, reasoning = reviewed
             if tx_type == "transfer":
                 cat_id = None
         else:
@@ -631,6 +635,7 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
             decision_reason=decision_reason,
             review_priority=decision_priority,
             review_bucket=decision_bucket,
+            note=(tx_data.get("note") or "").strip() or None,
         )
         try:
             session.add(new_tx)
@@ -934,6 +939,20 @@ async def update_transaction_amount(session, tx_id, new_amount):
     await session.commit()
     return True, "Transaction amount updated and verified."
 
+
+async def update_transaction_note(session, tx_id, note):
+    stmt = select(Transaction).where(Transaction.id == tx_id)
+    result = await session.execute(stmt)
+    tx = result.scalar_one_or_none()
+    if not tx:
+        return False, "Transaction not found."
+
+    text = (note or "").strip()
+    tx.note = text if text else None
+    session.add(tx)
+    await session.commit()
+    return True, "Transaction note updated."
+
 async def mark_transaction_verified(session, tx_id):
     # Fetch existing transaction and memory
     stmt = select(Transaction).where(Transaction.id == tx_id)
@@ -975,7 +994,19 @@ async def delete_transaction(session, tx_id):
     await session.commit()
     return True, "Transaction deleted."
 
-async def add_transaction(session, date, amount, description, account_name, category_id=None, tx_type=None, confidence=None, decision_reason=None, is_verified=None):
+async def add_transaction(
+    session,
+    date,
+    amount,
+    description,
+    account_name,
+    category_id=None,
+    tx_type=None,
+    confidence=None,
+    decision_reason=None,
+    is_verified=None,
+    note=None,
+):
     # 1. Resolve Account
     stmt = select(Account).where(Account.name == account_name)
     result = await session.execute(stmt)
@@ -1040,7 +1071,8 @@ async def add_transaction(session, date, amount, description, account_name, cate
         decision_state=decision_state,
         decision_reason=decision_reason,
         review_priority=100 if is_verified else 50,
-        raw_csv_row="MANUAL_ENTRY"
+        raw_csv_row="MANUAL_ENTRY",
+        note=(note or "").strip() or None,
     )
     session.add(new_tx)
     await session.flush()
@@ -1070,6 +1102,47 @@ async def add_transaction(session, date, amount, description, account_name, cate
     return True, f"{status_msg}: #{new_tx.id} {description} ({amount})", new_tx
 
 def export_to_bluecoins_csv(transactions, output_path):
+    def _normalize_whitespace(text):
+        return re.sub(r"\s+", " ", str(text or "").replace("\xa0", " ")).strip()
+
+    def _clean_description_for_notes(description):
+        raw = _normalize_whitespace(description)
+        if not raw:
+            return ""
+
+        cleaned = raw
+        cleaned = re.sub(r"\b\d{2}[A-Z]{3}\d{2}\b", " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", " ", cleaned)
+        cleaned = re.sub(r"\b\d{1,2}:\d{2}(?::\d{2})?\b", " ", cleaned)
+        cleaned = re.sub(
+            r"\b(?:VISA|EFTPOS|DEBIT|CREDIT|AUD|INTERNET\s+BANKING|JOINT\s+BANK\s+TRANSFE?R?|ATMA\d*|POS)\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"\b(?=[A-Z0-9]{8,}\b)[A-Z0-9]*\d[A-Z0-9]*\b", " ", cleaned)
+        cleaned = _normalize_whitespace(cleaned).strip(" -|,/")
+        return cleaned or raw
+
+    def _summarize_item_or_payee(tx):
+        user_note = _normalize_whitespace(getattr(tx, "note", None))
+        if user_note:
+            return user_note
+        if tx.type == "transfer":
+            return "Transfer"
+
+        cleaned_desc = _clean_description_for_notes(tx.description)
+        if not cleaned_desc:
+            return "Transaction"
+        return " ".join(cleaned_desc.split()[:6])
+
+    def _build_notes_value(tx):
+        user_note = _normalize_whitespace(getattr(tx, "note", None))
+        cleaned_desc = _clean_description_for_notes(tx.description)
+        if user_note and cleaned_desc and user_note.lower() != cleaned_desc.lower():
+            return f"{user_note} | Source: {cleaned_desc}"
+        return user_note or cleaned_desc
+
     try:
         with open(output_path, "w", newline="") as f:
             writer = csv.writer(f)
@@ -1098,17 +1171,22 @@ def export_to_bluecoins_csv(transactions, output_path):
                 # Assuming it does.
                 
                 acc_name = tx.account.name if tx.account else "Unknown"
+                notes = _build_notes_value(tx)
+                item_or_payee = _summarize_item_or_payee(tx)
 
                 writer.writerow([
                     "Transfer" if tx.type == "transfer" else ("Expense" if tx.type == "expense" else "Income"),
                     tx.date.strftime("%m/%d/%Y"),
-                    tx.description,
+                    item_or_payee,
                     str(tx.amount),
                     parent_name,
                     cat_name,
                     "Bank",
                     acc_name,
-                    "", "", "", ""
+                    notes,
+                    "",
+                    "",
+                    "",
                 ])
         return True, f"Exported {len(transactions)} transactions to {output_path}"
     except Exception as e:

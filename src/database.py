@@ -83,6 +83,7 @@ class Transaction(Base):
     decision_reason = Column(Text, nullable=True)
     review_priority = Column(Integer, index=True, nullable=True)
     review_bucket = Column(String, index=True, nullable=True)
+    note = Column(Text, nullable=True)
     # ai_reasoning = Column(Text, nullable=True) # DEPRECATED: Moved to AIMemory table
 
 

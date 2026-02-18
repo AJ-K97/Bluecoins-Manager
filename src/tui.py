@@ -163,6 +163,7 @@ class TransactionReviewApp:
             ("class:details_title", " Details "),
             ("class:muted", f"- tx_id={tx.id} | {tx.date.strftime('%Y-%m-%d')} | confidence={confidence}%\n"),
             ("class:details_text", f" Description: {self._truncate(tx.description, self.DETAILS_WIDTH)}\n"),
+            ("class:details_text", f" Note: {self._truncate(getattr(tx, 'note', None) or '-', self.DETAILS_WIDTH)}\n"),
             ("class:details_text", f" Category: {category}\n"),
             ("class:details_text", f" AI Reasoning: {self._truncate(reason, self.DETAILS_WIDTH)}\n"),
             ("class:details_text", f" Reflection: {self._truncate(reflection, self.DETAILS_WIDTH)}\n"),
@@ -178,6 +179,8 @@ class TransactionReviewApp:
             ("class:footer", " verify  "),
             ("class:hotkey", "M"),
             ("class:footer", " modify category  "),
+            ("class:hotkey", "N"),
+            ("class:footer", " add/edit note  "),
             ("class:hotkey", "C"),
             ("class:footer", " coach model  "),
             ("class:hotkey", "D"),
@@ -230,6 +233,12 @@ class TransactionReviewApp:
                 return
             event.app.exit(result=('modify', self.transactions[self.selected_index]))
 
+        @kb.add('n')
+        def _(event):
+            if not self.transactions:
+                return
+            event.app.exit(result=('note', self.transactions[self.selected_index]))
+
         @kb.add('c')
         def _(event):
             if not self.transactions:
@@ -257,7 +266,7 @@ class TransactionReviewApp:
         # Layout
         header = Window(content=FormattedTextControl(self.get_header_text), height=2, wrap_lines=False)
         body = Window(content=FormattedTextControl(self.get_table_text), wrap_lines=False)
-        details_height = 6
+        details_height = 7
         details = Window(content=FormattedTextControl(self.get_details_text), height=details_height, wrap_lines=True)
         footer = Window(content=FormattedTextControl(self.get_footer_text), height=1, wrap_lines=False)
 

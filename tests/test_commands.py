@@ -1,7 +1,16 @@
 import pytest
+import csv
+from types import SimpleNamespace
 from sqlalchemy import select
 from src.database import Account, Category, Transaction
-from src.commands import add_account, add_category, add_transaction, update_account
+from src.commands import (
+    add_account,
+    add_category,
+    add_transaction,
+    export_to_bluecoins_csv,
+    update_account,
+    update_transaction_note,
+)
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
@@ -110,3 +119,72 @@ async def test_update_account_renames_and_updates_linked_transactions(db_session
     acc_res = await db_session.execute(select(Account).where(Account.id == original_account_id))
     updated_acc = acc_res.scalar_one()
     assert updated_acc.name == "New Name"
+
+
+def test_export_to_bluecoins_csv_summarizes_item_and_cleans_notes(tmp_path):
+    tx = SimpleNamespace(
+        type="expense",
+        date=datetime(2024, 1, 2),
+        description="VISA DEBIT CORFIELD FRESH IGA 28JAN26 23:30:46 REF12345678",
+        amount=-42.10,
+        category=SimpleNamespace(parent_name="Food", name="Groceries"),
+        category_id=1,
+        account=SimpleNamespace(name="HSBC Main"),
+    )
+    output_path = tmp_path / "bluecoins_export.csv"
+
+    success, _ = export_to_bluecoins_csv([tx], str(output_path))
+    assert success
+
+    with output_path.open(newline="") as f:
+        rows = list(csv.reader(f))
+
+    row = rows[1]
+    assert row[2] == "CORFIELD FRESH IGA"
+    assert row[8] == "CORFIELD FRESH IGA"
+
+
+def test_export_to_bluecoins_csv_prefers_user_note_for_item_or_payee(tmp_path):
+    tx = SimpleNamespace(
+        type="expense",
+        date=datetime(2024, 1, 2),
+        description="VISA DEBIT OFFICEWORKS 28JAN26 23:30:46 REF12345678",
+        note="Desk organizer and pens",
+        amount=-25.0,
+        category=SimpleNamespace(parent_name="Shopping", name="Office Supplies"),
+        category_id=2,
+        account=SimpleNamespace(name="HSBC Main"),
+    )
+    output_path = tmp_path / "bluecoins_export_with_note.csv"
+
+    success, _ = export_to_bluecoins_csv([tx], str(output_path))
+    assert success
+
+    with output_path.open(newline="") as f:
+        rows = list(csv.reader(f))
+
+    row = rows[1]
+    assert row[2] == "Desk organizer and pens"
+    assert row[8] == "Desk organizer and pens | Source: OFFICEWORKS"
+
+
+@pytest.mark.asyncio
+async def test_update_transaction_note(db_session):
+    await add_account(db_session, "Cash", "None")
+    date = datetime(2024, 1, 1)
+    success, _, tx = await add_transaction(
+        db_session,
+        date=date,
+        amount=-10.0,
+        description="Coffee",
+        account_name="Cash",
+    )
+    assert success
+
+    success, msg = await update_transaction_note(db_session, tx.id, "Team catch-up coffee")
+    assert success
+    assert msg == "Transaction note updated."
+
+    tx_res = await db_session.execute(select(Transaction).where(Transaction.id == tx.id))
+    updated_tx = tx_res.scalar_one()
+    assert updated_tx.note == "Team catch-up coffee"

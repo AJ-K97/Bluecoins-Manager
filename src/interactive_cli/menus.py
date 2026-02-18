@@ -31,6 +31,7 @@ from src.commands import (
     set_global_memory_active,
     update_account,
     update_transaction_category,
+    update_transaction_note,
 )
 from src.database import Account, Transaction
 
@@ -322,6 +323,7 @@ async def manage_transactions_menu(session):
                 message=f"Action for '{selected_tx.description}':",
                 choices=[
                     "Change Category",
+                    "Edit Note",
                     "Verify / Approve",
                     "Delete Transaction",
                     Choice(value=None, name="Cancel"),
@@ -341,6 +343,14 @@ async def manage_transactions_menu(session):
                 elif selected_cat:
                     await update_transaction_category(session, selected_tx.id, selected_cat.id)
                     await _toast("Transaction updated.", level="ok")
+
+            elif tx_action == "Edit Note":
+                new_note = await inquirer.text(
+                    message="Transaction note (used as export Item/Payee when present):",
+                    default=selected_tx.note or "",
+                ).execute_async()
+                success, msg = await update_transaction_note(session, selected_tx.id, new_note)
+                await _toast(msg, level="ok" if success else "err")
 
             elif tx_action == "Verify / Approve":
                 await mark_transaction_verified(session, selected_tx.id)
@@ -405,6 +415,7 @@ async def review_queue_menu(session, account_id=None):
             choices=[
                 "Accept & Verify",
                 "Change Category",
+                "Edit Note",
                 "Delete Transaction",
                 Choice(value=None, name="Cancel"),
             ],
@@ -428,6 +439,15 @@ async def review_queue_menu(session, account_id=None):
             elif selected_cat:
                 await update_transaction_category(session, selected_tx.id, selected_cat.id)
                 await _toast("Category updated and verified.", level="ok")
+            continue
+
+        if tx_action == "Edit Note":
+            new_note = await inquirer.text(
+                message="Transaction note (used as export Item/Payee when present):",
+                default=selected_tx.note or "",
+            ).execute_async()
+            success, msg = await update_transaction_note(session, selected_tx.id, new_note)
+            await _toast(msg, level="ok" if success else "err")
             continue
 
         if tx_action == "Delete Transaction":
