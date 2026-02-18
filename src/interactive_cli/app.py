@@ -13,7 +13,7 @@ from .menus import (
     manage_transactions_menu,
     reset_database_menu,
 )
-from .ui import _menu_panel
+from .ui import _render_menu_view
 from .workflows import bank_format_builder_menu, chat_wizard, import_wizard, inspect_pdf_text_menu
 
 
@@ -46,51 +46,31 @@ async def _main_menu_snapshot(session):
     }
 
 
-def _main_menu_message(stats):
-    width = 86
-    border = "+" + "-" * (width - 2) + "+"
-    title = " Bluecoins Manager  |  Interactive CLI "
-    title_pad = max((width - 2 - len(title)) // 2, 0)
-    title_line = "|" + (" " * title_pad) + title + (" " * (width - 2 - title_pad - len(title))) + "|"
-
-    def row(text=""):
-        return ("| " + text).ljust(width - 1) + "|"
-
-    lines = [
-        border,
-        title_line,
-        row(),
-        row("Data Snapshot"),
-        row(),
-        row(
-            f"Accounts: {stats['accounts']:<5}    Categories: {stats['categories']:<5}    "
-            f"Transactions: {stats['total_tx']:<8}"
-        ),
-        row(
-            f"Verified: {stats['verified_tx']:<8}    Unverified: {stats['unverified_tx']:<8}    "
-            f"Needs Review: {stats['needs_review']:<8}"
-        ),
-        row(),
-        row("Tip: Start with 'Import Transactions', then review and verify."),
-        row(),
-        border,
-        "Main Menu:",
-        "",
-    ]
-    return "\n".join(lines)
-
-
 async def interactive_main():
-    print("Welcome to Bluecoins Manager V2")
     await init_db()
 
     async with AsyncSessionLocal() as session:
-        _, seed_msg = await seed_reference_data(session)
-        print(seed_msg)
+        await seed_reference_data(session)
         while True:
             stats = await _main_menu_snapshot(session)
+            _render_menu_view(
+                path="Home",
+                summary_lines=[
+                    "Bluecoins Manager | Interactive CLI",
+                    "",
+                    f"Accounts: {stats['accounts']}  |  Categories: {stats['categories']}  |  Transactions: {stats['total_tx']}",
+                    f"Verified: {stats['verified_tx']}  |  Unverified: {stats['unverified_tx']}  |  Needs Review: {stats['needs_review']}",
+                ],
+                tips_lines=[
+                    "Import Transactions: Parse CSV/PDF, categorize, and review.",
+                    "Review / Manage Transactions: Edit recent transactions and queue.",
+                    "Manage Categories / Accounts / Rulebook: Configure core behavior.",
+                    "Inspect PDF Text: Debug parser extraction before import.",
+                    "Use Enter to open a folder (submenu), Back/Exit to return.",
+                ],
+            )
             action = await inquirer.select(
-                message=_main_menu_message(stats),
+                message="Open Folder:",
                 choices=[
                     Separator("=== Workflow ==="),
                     Choice(value="import", name="Import Transactions"),

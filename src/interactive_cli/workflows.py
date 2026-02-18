@@ -17,7 +17,7 @@ from src.parser import BankParser, format_pdf_blocks_report, format_pdf_debug_re
 from src.database import Transaction
 
 from .review import import_review_callback, review_transactions
-from .ui import _Ansi, _err, _info, _menu_panel, _ok, _style, _warn
+from .ui import _Ansi, _err, _info, _ok, _render_menu_view, _style, _warn
 
 
 def _date_regex_hint_from_format(fmt):
@@ -43,13 +43,16 @@ def _build_guided_pdf_regex():
 
 
 async def import_wizard(session):
-    _info(
-        _menu_panel(
-            "Import Transactions",
-            [
-                "Load CSV/PDF data, run categorization, then review and export.",
-            ],
-        )
+    _render_menu_view(
+        path="Home / Import Transactions",
+        summary_lines=[
+            "Load CSV/PDF data, run categorization, then review and export.",
+        ],
+        tips_lines=[
+            "If importing PDF, inspect parsed text/blocks before committing.",
+            "You can review each transaction during import or do bulk review after.",
+            "Export generated transactions to Bluecoins CSV at the end.",
+        ],
     )
     bank_names = list_bank_names()
     if not bank_names:
@@ -132,13 +135,15 @@ async def import_wizard(session):
 
 
 async def bank_format_builder_menu():
-    _info(
-        _menu_panel(
-            "Bank Format Builder",
-            [
-                "Configure parser mappings for CSV and PDF statements.",
-            ],
-        )
+    _render_menu_view(
+        path="Home / Bank Formats",
+        summary_lines=[
+            "Configure parser mappings for CSV and PDF statements.",
+        ],
+        tips_lines=[
+            "Use guided PDF mode for debit/credit + balance style statements.",
+            "Keep multiple date formats to support mixed bank exports.",
+        ],
     )
     payload = load_banks_payload()
     existing = sorted(payload["banks"].keys())
@@ -249,14 +254,16 @@ async def bank_format_builder_menu():
 
 
 async def chat_wizard(session):
-    _info(
-        _menu_panel(
-            "Finance Chat",
-            [
-                "Ask natural-language questions about your transactions.",
-                "Type 'exit' or 'q' to return.",
-            ],
-        )
+    _render_menu_view(
+        path="Home / Finance Chat",
+        summary_lines=[
+            "Ask natural-language questions about your transactions.",
+            "Type 'exit' or 'q' to return.",
+        ],
+        tips_lines=[
+            "Ask specific questions: categories, periods, top spenders, trends.",
+            "Chat runs read-only SQL generation for safe insights.",
+        ],
     )
 
     chat_ai = FinanceChatAI()
@@ -272,13 +279,15 @@ async def chat_wizard(session):
 
 
 async def inspect_pdf_text_menu(default_file_path=None, default_bank=None):
-    _info(
-        _menu_panel(
-            "Inspect PDF Text",
-            [
-                "Preview parsed statement text and export full debug reports.",
-            ],
-        )
+    _render_menu_view(
+        path="Home / PDF Inspect",
+        summary_lines=[
+            "Preview parsed statement text and export full debug reports.",
+        ],
+        tips_lines=[
+            "Use blocks mode for multiline transaction assembly validation.",
+            "Export full report to compare parser tweaks over time.",
+        ],
     )
     file_path = default_file_path
     if not file_path:

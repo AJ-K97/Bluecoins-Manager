@@ -35,20 +35,27 @@ from src.commands import (
 from src.database import Account, Transaction
 
 from .common import TRANSFER_CHOICE, choose_category_tree
-from .ui import _Ansi, _err, _info, _menu_panel, _ok, _style, _warn
+from .ui import _Ansi, _err, _info, _ok, _pause, _render_menu_view, _style, _warn
 
 
 async def manage_accounts_menu(session):
     while True:
         account_count = int(await session.scalar(select(func.count(Account.id))) or 0)
+        _render_menu_view(
+            path="Home / Accounts",
+            summary_lines=[
+                f"Configured accounts: {account_count}",
+                "Create, rename, or remove account sources.",
+            ],
+            tips_lines=[
+                "List Accounts: Quick inventory of available accounts.",
+                "Add Account: Register a new source statement account.",
+                "Edit Account: Rename account and cascade to linked transactions.",
+                "Delete Account: Remove account after confirmation.",
+            ],
+        )
         action = await inquirer.select(
-            message=_menu_panel(
-                "Accounts",
-                [
-                    f"Configured accounts: {account_count}",
-                    "Create, rename, or remove account sources.",
-                ],
-            ),
+            message="Open Folder:",
             choices=[
                 "List Accounts",
                 "Add Account",
@@ -65,11 +72,13 @@ async def manage_accounts_menu(session):
             accounts = await list_accounts(session)
             if not accounts:
                 _warn("No accounts found.")
+                await _pause()
             else:
                 _info("\nAccounts:")
                 for acc in accounts:
                     print(f" - {acc.name} ({acc.institution})")
                 print("")
+                await _pause()
 
         elif action == "Add Account":
             name = await inquirer.text(message="Account Name:").execute_async()
@@ -152,15 +161,20 @@ async def manage_transactions_menu(session):
         pending_tx = int(
             await session.scalar(select(func.count(Transaction.id)).where(Transaction.is_verified.is_(False))) or 0
         )
+        _render_menu_view(
+            path="Home / Transactions",
+            summary_lines=[
+                f"Total transactions: {total_tx}",
+                f"Pending verification: {pending_tx}",
+            ],
+            tips_lines=[
+                "View / Edit Recent: Inspect recent rows and manually adjust.",
+                "Review Queue: Process needs_review and force_review decisions.",
+                "Export to CSV: Export filtered transactions for Bluecoins import.",
+            ],
+        )
         action = await inquirer.select(
-            message=_menu_panel(
-                "Transactions",
-                [
-                    f"Total transactions: {total_tx}",
-                    f"Pending verification: {pending_tx}",
-                    "Inspect recent rows, review queue decisions, or export CSV.",
-                ],
-            ),
+            message="Open Folder:",
             choices=[
                 "View / Edit Recent Transactions",
                 "Review Queue",
@@ -279,14 +293,20 @@ async def review_queue_menu(session, account_id=None):
             choices.append(Choice(value=tx, name=label))
         choices.append(Choice(value=None, name="Back"))
 
+        _render_menu_view(
+            path="Home / Transactions / Review Queue",
+            summary_lines=[
+                f"Rows in queue: {len(rows)}",
+                "Focus on needs_review and force_review transactions.",
+            ],
+            tips_lines=[
+                "Accept & Verify: Confirms category/type and exits queue status.",
+                "Change Category: Manually set category and verify transaction.",
+                "Delete Transaction: Remove row from transaction history.",
+            ],
+        )
         selected_tx = await inquirer.select(
-            message=_menu_panel(
-                "Review Queue",
-                [
-                    f"Rows in queue: {len(rows)}",
-                    "Focus on needs_review and force_review transactions.",
-                ],
-            ),
+            message="Select Transaction:",
             choices=choices,
         ).execute_async()
         if not selected_tx:
@@ -333,14 +353,20 @@ async def review_queue_menu(session, account_id=None):
 async def manage_categories_menu(session):
     while True:
         cats = await get_all_categories(session)
+        _render_menu_view(
+            path="Home / Categories",
+            summary_lines=[
+                f"Configured categories: {len(cats)}",
+                "Maintain parent groups and sub-category mappings.",
+            ],
+            tips_lines=[
+                "List Categories: Print category tree grouped by type and parent.",
+                "Add Category: Create new category under a parent group.",
+                "Delete Category: Remove category with optional reassignment.",
+            ],
+        )
         action = await inquirer.select(
-            message=_menu_panel(
-                "Categories",
-                [
-                    f"Configured categories: {len(cats)}",
-                    "Maintain parent groups and sub-category mappings.",
-                ],
-            ),
+            message="Open Folder:",
             choices=[
                 "List Categories",
                 "Add Category",
@@ -356,6 +382,7 @@ async def manage_categories_menu(session):
             cats = await get_all_categories(session)
             if not cats:
                 _warn("No categories found.")
+                await _pause()
                 continue
 
             grouped = {}
@@ -375,6 +402,7 @@ async def manage_categories_menu(session):
                     for c in grouped[ctype][parent]:
                         print(f"     └── {c.name} [{ctype}]")
             print("")
+            await _pause()
 
         elif action == "Add Category":
             cat_type = await inquirer.select(message="Category Type:", choices=["expense", "income"]).execute_async()
@@ -483,14 +511,21 @@ async def manage_categories_menu(session):
 async def manage_global_rulebook_menu(session):
     while True:
         active_rules = len(await get_global_memory_entries(session, include_inactive=False, limit=500))
+        _render_menu_view(
+            path="Home / AI Rulebook",
+            summary_lines=[
+                f"Active global rules: {active_rules}",
+                "Persist coaching instructions used by categorization flows.",
+            ],
+            tips_lines=[
+                "List Rules: Show active/inactive global memory instructions.",
+                "Add Rule: Persist a new high-level categorization rule.",
+                "Enable/Disable: Toggle rule applicability.",
+                "Delete Rule: Permanently remove a rule.",
+            ],
+        )
         action = await inquirer.select(
-            message=_menu_panel(
-                "AI Rulebook",
-                [
-                    f"Active global rules: {active_rules}",
-                    "Persist coaching instructions used by categorization flows.",
-                ],
-            ),
+            message="Open Folder:",
             choices=[
                 "List Rules",
                 "Add Rule",
@@ -508,6 +543,7 @@ async def manage_global_rulebook_menu(session):
             rules = await get_global_memory_entries(session, include_inactive=True, limit=500)
             if not rules:
                 _warn("No global rules found.")
+                await _pause()
                 continue
             _info("\nGlobal AI Rulebook:")
             for r in rules:
@@ -516,6 +552,7 @@ async def manage_global_rulebook_menu(session):
                 style = _Ansi.GREEN if status == "ACTIVE" else _Ansi.DIM
                 print(_style(f"[{status}] #{r.id} ({created}) [{r.source}] {r.instruction}", style))
             print("")
+            await _pause()
 
         elif action == "Add Rule":
             text = await inquirer.text(message="Rule text to persist:").execute_async()
@@ -567,19 +604,20 @@ async def manage_global_rulebook_menu(session):
 
 
 async def reset_database_menu(session):
-    print(
-        "\n"
-        + _menu_panel(
-            "Danger Zone: Reset",
-            [
-                "These operations remove data and cannot be undone.",
-                "Use table-level reset unless a full reset is required.",
-            ],
-            width=90,
-        )
+    _render_menu_view(
+        path="Home / Reset",
+        summary_lines=[
+            "Danger Zone: reset operations are destructive.",
+            "Use table-level reset unless a full reset is required.",
+        ],
+        tips_lines=[
+            "Reset Entire Database: Wipes and reseeds baseline data.",
+            "Reset Specific Tables: Safer targeted reset for selected tables.",
+            "Type RESET when prompted for irreversible operations.",
+        ],
     )
     action = await inquirer.select(
-        message=_style("Reset Options:", _Ansi.BOLD, _Ansi.YELLOW),
+        message="Reset Options:",
         choices=[
             "Reset Entire Database",
             "Reset Specific Tables",

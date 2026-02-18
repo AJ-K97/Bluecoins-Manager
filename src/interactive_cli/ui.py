@@ -1,6 +1,7 @@
 import os
 import sys
 
+from InquirerPy import inquirer
 
 class _Ansi:
     RESET = "\033[0m"
@@ -28,9 +29,16 @@ def _supports_color():
 
 
 _COLOR_ENABLED = _supports_color()
+_DEFAULT_WIDTH = 96
 
 
-def _menu_panel(title, lines=None, width=86):
+def _clear_view():
+    if sys.stdout.isatty():
+        # Clear screen and move cursor to home.
+        print("\033[2J\033[H", end="")
+
+
+def _menu_panel(title, lines=None, width=_DEFAULT_WIDTH):
     lines = list(lines or [])
     border = "+" + "-" * (width - 2) + "+"
     title_text = f" {title} "
@@ -49,6 +57,16 @@ def _menu_panel(title, lines=None, width=86):
     out.append(border)
     out.append("")
     return "\n".join(out)
+
+
+def _render_menu_view(path, summary_lines=None, tips_lines=None, width=_DEFAULT_WIDTH):
+    _clear_view()
+    print(_menu_panel(f"View: {path}", summary_lines or [], width=width))
+    print(_menu_panel("Help & Tips", tips_lines or [], width=width))
+
+
+async def _pause(message="Press Enter to continue"):
+    await inquirer.text(message=message, default="").execute_async()
 
 
 def _ok(msg):
