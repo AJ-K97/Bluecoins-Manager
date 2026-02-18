@@ -3,6 +3,8 @@ import asyncio
 import csv
 import os
 import json
+import itertools
+import sys
 from datetime import datetime
 from sqlalchemy.exc import IntegrityError
 from src.database import init_db, AsyncSessionLocal
@@ -26,6 +28,22 @@ from src.commands import (
     add_transaction,
 )
 from src.local_llm import LocalLLMPipeline
+from src.ai_config import close_ollama_client
+
+
+async def _run_with_spinner(label, coro):
+    spinner = itertools.cycle(["|", "/", "-", "\\"])
+    task = asyncio.create_task(coro)
+    try:
+        while not task.done():
+            if sys.stdout.isatty():
+                print(f"\r{label} {next(spinner)}", end="", flush=True)
+            await asyncio.sleep(0.1)
+        result = await task
+    finally:
+        if sys.stdout.isatty():
+            print("\r\033[2K", end="", flush=True)
+    return result
 
 async def account_command(args):
     async with AsyncSessionLocal() as session:
@@ -46,7 +64,10 @@ async def account_command(args):
 
 async def convert_command(args):
     async with AsyncSessionLocal() as session:
-        success, msg = await process_import(session, args.bank, args.input, args.account, args.output)
+        success, msg = await _run_with_spinner(
+            "Importing + categorizing transactions",
+            process_import(session, args.bank, args.input, args.account, args.output),
+        )
         print(msg)
 
 
@@ -321,7 +342,10 @@ async def queue_command(args):
                 print(f"{state or 'none':<14} {bucket or 'none':<16} {count}")
         elif args.queue_action == "recalc":
             since = datetime.strptime(args.since, "%Y-%m-%d") if args.since else None
-            updated = await recalc_queue_decisions(session, since=since)
+            updated = await _run_with_spinner(
+                "Recalculating review decisions",
+                recalc_queue_decisions(session, since=since),
+            )
             print(f"Recalculated queue decision metadata for {updated} transactions.")
         elif args.queue_action == "review":
             await review_queue_menu(session)
@@ -489,5 +513,12 @@ async def main():
     else:
         parser.print_help()
 
+
+async def _run_main():
+    try:
+        await main()
+    finally:
+        await close_ollama_client()
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(_run_main())
