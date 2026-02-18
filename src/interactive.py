@@ -42,6 +42,58 @@ def _group_categories_by_type_and_parent(categories):
 TRANSFER_CHOICE = "__transfer_no_category__"
 
 
+class _Ansi:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    CYAN = "\033[36m"
+    BLUE = "\033[34m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    RED = "\033[31m"
+    MAGENTA = "\033[35m"
+
+
+def _style(text, *codes):
+    return f"{''.join(codes)}{text}{_Ansi.RESET}"
+
+
+def _menu_panel(title, lines=None, width=86):
+    lines = list(lines or [])
+    border = _style("+" + "-" * (width - 2) + "+", _Ansi.BLUE)
+    title_text = f" {title} "
+    title_pad = max((width - 2 - len(title_text)) // 2, 0)
+    title_line = "|" + (" " * title_pad) + title_text + (" " * (width - 2 - title_pad - len(title_text))) + "|"
+    title_line = _style(title_line, _Ansi.BOLD, _Ansi.CYAN)
+
+    def row(text=""):
+        return ("| " + text).ljust(width - 1) + "|"
+
+    out = [border, title_line, _style(row(), _Ansi.BLUE)]
+    for line in lines:
+        out.append(_style(row(line), _Ansi.BLUE))
+    out.append(_style(row(), _Ansi.BLUE))
+    out.append(border)
+    out.append("")
+    return "\n".join(out)
+
+
+def _ok(msg):
+    print(_style(msg, _Ansi.GREEN, _Ansi.BOLD))
+
+
+def _info(msg):
+    print(_style(msg, _Ansi.CYAN))
+
+
+def _warn(msg):
+    print(_style(msg, _Ansi.YELLOW, _Ansi.BOLD))
+
+
+def _err(msg):
+    print(_style(msg, _Ansi.RED, _Ansi.BOLD))
+
+
 async def choose_category_tree(session, prompt_prefix="Select Category", default_type=None, restrict_to_default_type=False):
     cats = await get_all_categories(session)
     if not cats:
@@ -365,8 +417,15 @@ async def review_transactions(session, transactions):
 
 async def manage_accounts_menu(session):
     while True:
+        account_count = int(await session.scalar(select(func.count(Account.id))) or 0)
         action = await inquirer.select(
-            message="Manage Accounts:",
+            message=_menu_panel(
+                "Accounts",
+                [
+                    f"Configured accounts: {account_count}",
+                    "Create, rename, or remove account sources.",
+                ],
+            ),
             choices=[
                 "List Accounts",
                 "Add Account",
@@ -382,9 +441,9 @@ async def manage_accounts_menu(session):
         if action == "List Accounts":
             accounts = await list_accounts(session)
             if not accounts:
-                print("No accounts found.")
+                _warn("No accounts found.")
             else:
-                print("\nAccounts:")
+                _info("\nAccounts:")
                 for acc in accounts:
                     print(f" - {acc.name} ({acc.institution})")
                 print("") 
@@ -393,12 +452,12 @@ async def manage_accounts_menu(session):
             name = await inquirer.text(message="Account Name:").execute_async()
             inst = await inquirer.text(message="Institution (e.g. HSBC):").execute_async()
             success, msg = await add_account(session, name, inst)
-            print(f"\n{msg}\n")
+            (_ok if success else _err)(f"\n{msg}\n")
             
         elif action == "Delete Account":
             accounts = await list_accounts(session)
             if not accounts:
-                print("No accounts to delete.")
+                _warn("No accounts to delete.")
                 continue
                 
             choices = [Choice(value=acc.name, name=acc.name) for acc in accounts]
@@ -413,12 +472,12 @@ async def manage_accounts_menu(session):
                 confirm = await inquirer.confirm(message=f"Are you sure you want to delete '{target}'?").execute_async()
                 if confirm:
                     success, msg = await delete_account(session, target)
-                    print(f"\n{msg}\n")
+                    (_ok if success else _err)(f"\n{msg}\n")
 
         elif action == "Edit Account":
             accounts = await list_accounts(session)
             if not accounts:
-                print("No accounts to edit.")
+                _warn("No accounts to edit.")
                 continue
 
             choices = [Choice(value=acc.name, name=f"{acc.name} ({acc.institution})") for acc in accounts]
@@ -433,7 +492,7 @@ async def manage_accounts_menu(session):
             acc_res = await session.execute(select(Account).where(Account.name == current_name))
             account = acc_res.scalar_one_or_none()
             if not account:
-                print("Account not found.")
+                _err("Account not found.")
                 continue
 
             new_name = await inquirer.text(
@@ -441,7 +500,7 @@ async def manage_accounts_menu(session):
                 default=account.name,
             ).execute_async()
             if not (new_name or "").strip():
-                print("Account name cannot be empty.")
+                _warn("Account name cannot be empty.")
                 continue
 
             linked_tx_count = await session.scalar(
@@ -456,7 +515,7 @@ async def manage_accounts_menu(session):
                 )
             ).execute_async()
             if not confirm:
-                print("Edit canceled.")
+                _info("Edit canceled.")
                 continue
 
             success, msg, updated_count = await update_account(
@@ -466,14 +525,25 @@ async def manage_accounts_menu(session):
                 new_institution=account.institution,
             )
             if success:
-                print(f"\n{msg} Updated {updated_count} linked transaction(s).\n")
+                _ok(f"\n{msg} Updated {updated_count} linked transaction(s).\n")
             else:
-                print(f"\n{msg}\n")
+                _err(f"\n{msg}\n")
 
 async def manage_transactions_menu(session):
     while True:
+        total_tx = int(await session.scalar(select(func.count(Transaction.id))) or 0)
+        pending_tx = int(
+            await session.scalar(select(func.count(Transaction.id)).where(Transaction.is_verified.is_(False))) or 0
+        )
         action = await inquirer.select(
-            message="Manage Transactions:",
+            message=_menu_panel(
+                "Transactions",
+                [
+                    f"Total transactions: {total_tx}",
+                    f"Pending verification: {pending_tx}",
+                    "Inspect recent rows, review queue decisions, or export CSV.",
+                ],
+            ),
             choices=[
                 "View / Edit Recent Transactions",
                 "Review Queue",
@@ -506,11 +576,11 @@ async def manage_transactions_menu(session):
             
             txs = await get_transactions(session, account_id=account_id, start_date=start_date)
             if not txs:
-                print("No transactions found.")
+                _warn("No transactions found.")
                 continue
             
             success, msg = export_to_bluecoins_csv(txs, output_path)
-            print(f"\n{msg}\n")
+            (_ok if success else _err)(f"\n{msg}\n")
         elif action == "Review Queue":
             await review_queue_menu(session, account_id=account_id)
             
@@ -518,7 +588,7 @@ async def manage_transactions_menu(session):
             # Fetch last 50
             txs = await get_transactions(session, account_id=account_id)
             if not txs:
-                print("No transactions found.")
+                _warn("No transactions found.")
                 continue
                 
             # Selection Menu
@@ -559,27 +629,27 @@ async def manage_transactions_menu(session):
                 )
                 if selected_cat == TRANSFER_CHOICE:
                     await update_transaction_category(session, selected_tx.id, category_id=None, set_transfer=True)
-                    print("Updated!")
+                    _ok("Updated!")
                 elif selected_cat:
                     await update_transaction_category(session, selected_tx.id, selected_cat.id)
-                    print("Updated!")
+                    _ok("Updated!")
             
             elif tx_action == "Verify / Approve":
                 await mark_transaction_verified(session, selected_tx.id)
-                print("Verified!")
+                _ok("Verified!")
 
             elif tx_action == "Delete Transaction":
                 confirm = await inquirer.confirm(message="Are you sure?").execute_async()
                 if confirm:
                     await delete_transaction(session, selected_tx.id)
-                    print("Deleted.")
+                    _ok("Deleted.")
 
 
 async def review_queue_menu(session, account_id=None):
     while True:
         rows = await get_queue_transactions(session, account_id=account_id, limit=200)
         if not rows:
-            print("No transactions pending review in queue.")
+            _warn("No transactions pending review in queue.")
             return
 
         choices = []
@@ -595,7 +665,13 @@ async def review_queue_menu(session, account_id=None):
         choices.append(Choice(value=None, name="Back"))
 
         selected_tx = await inquirer.select(
-            message="Review Queue: Select Transaction",
+            message=_menu_panel(
+                "Review Queue",
+                [
+                    f"Rows in queue: {len(rows)}",
+                    "Focus on needs_review and force_review transactions.",
+                ],
+            ),
             choices=choices,
         ).execute_async()
         if not selected_tx:
@@ -613,7 +689,7 @@ async def review_queue_menu(session, account_id=None):
 
         if tx_action == "Accept & Verify":
             await mark_transaction_verified(session, selected_tx.id)
-            print("Verified!")
+            _ok("Verified!")
             continue
 
         if tx_action == "Change Category":
@@ -625,24 +701,31 @@ async def review_queue_menu(session, account_id=None):
             )
             if selected_cat == TRANSFER_CHOICE:
                 await update_transaction_category(session, selected_tx.id, category_id=None, set_transfer=True)
-                print("Updated and verified.")
+                _ok("Updated and verified.")
             elif selected_cat:
                 await update_transaction_category(session, selected_tx.id, selected_cat.id)
-                print("Updated and verified.")
+                _ok("Updated and verified.")
             continue
 
         if tx_action == "Delete Transaction":
             confirm = await inquirer.confirm(message="Are you sure?").execute_async()
             if confirm:
                 await delete_transaction(session, selected_tx.id)
-                print("Deleted.")
+                _ok("Deleted.")
             continue
 
 
 async def manage_categories_menu(session):
     while True:
+        cats = await get_all_categories(session)
         action = await inquirer.select(
-            message="Manage Categories:",
+            message=_menu_panel(
+                "Categories",
+                [
+                    f"Configured categories: {len(cats)}",
+                    "Maintain parent groups and sub-category mappings.",
+                ],
+            ),
             choices=[
                 "List Categories",
                 "Add Category",
@@ -656,12 +739,12 @@ async def manage_categories_menu(session):
         if action == "List Categories":
             cats = await get_all_categories(session)
             if not cats:
-                print("No categories found.")
+                _warn("No categories found.")
                 continue
                 
             grouped = _group_categories_by_type_and_parent(cats)
                 
-            print("\nCategories:")
+            _info("\nCategories:")
             for ctype in sorted(grouped.keys()):
                 print(f"Type: {ctype.upper()}")
                 for parent in sorted(grouped[ctype].keys()):
@@ -686,7 +769,7 @@ async def manage_categories_menu(session):
                 cats = await get_all_categories(session)
                 parents = sorted(list(set(c.parent_name for c in cats if c.type == cat_type)))
                 if not parents:
-                    print(f"No existing {cat_type} parent categories. You must create one.")
+                    _warn(f"No existing {cat_type} parent categories. You must create one.")
                     parent_name = await inquirer.text(message="Enter New Parent Group Name:").execute_async()
                 else:
                     parent_name = await inquirer.fuzzy(
@@ -702,12 +785,12 @@ async def manage_categories_menu(session):
             if not name: continue
             
             success, msg = await add_category(session, name, parent_name, cat_type)
-            print(f"\n{msg}\n")
+            (_ok if success else _err)(f"\n{msg}\n")
             
         elif action == "Delete Category":
             cats = await get_all_categories(session)
             if not cats:
-                print("No categories to delete.")
+                _warn("No categories to delete.")
                 continue
                 
             # Select Category
@@ -736,7 +819,7 @@ async def manage_categories_menu(session):
             delete_txs = False
             
             if count > 0:
-                print(f"\n⚠️  Warning: This category has {count} transactions assigned to it.")
+                _warn(f"\nWarning: This category has {count} transactions assigned to it.")
                 sub_action = await inquirer.select(
                     message="How to handle these transactions?",
                     choices=[
@@ -757,7 +840,7 @@ async def manage_categories_menu(session):
                     # Filter out self
                     other_cats = [c for c in cats if c.id != target_cat.id]
                     if not other_cats:
-                        print("No other categories to reassign to!")
+                        _warn("No other categories to reassign to!")
                         continue
                         
                     rc_choices = [Choice(value=c.id, name=format_category_obj_label(c)) for c in other_cats]
@@ -772,13 +855,20 @@ async def manage_categories_menu(session):
             confirm = await inquirer.confirm(message=f"Delete category '{format_category_obj_label(target_cat)}'?").execute_async()
             if confirm:
                 success, msg = await delete_category(session, target_cat.id, reassign_category_id=reassign_id, delete_transactions=delete_txs)
-                print(f"\n{msg}\n")
+                (_ok if success else _err)(f"\n{msg}\n")
 
 
 async def manage_global_rulebook_menu(session):
     while True:
+        active_rules = len(await get_global_memory_entries(session, include_inactive=False, limit=500))
         action = await inquirer.select(
-            message="Manage AI Rulebook:",
+            message=_menu_panel(
+                "AI Rulebook",
+                [
+                    f"Active global rules: {active_rules}",
+                    "Persist coaching instructions used by categorization flows.",
+                ],
+            ),
             choices=[
                 "List Rules",
                 "Add Rule",
@@ -795,31 +885,32 @@ async def manage_global_rulebook_menu(session):
         if action == "List Rules":
             rules = await get_global_memory_entries(session, include_inactive=True, limit=500)
             if not rules:
-                print("No global rules found.")
+                _warn("No global rules found.")
                 continue
-            print("\nGlobal AI Rulebook:")
+            _info("\nGlobal AI Rulebook:")
             for r in rules:
                 status = "ACTIVE" if r.is_active else "INACTIVE"
                 created = r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else "-"
-                print(f"[{status}] #{r.id} ({created}) [{r.source}] {r.instruction}")
+                style = _Ansi.GREEN if status == "ACTIVE" else _Ansi.DIM
+                print(_style(f"[{status}] #{r.id} ({created}) [{r.source}] {r.instruction}", style))
             print("")
 
         elif action == "Add Rule":
             text = await inquirer.text(message="Rule text to persist:").execute_async()
             ok, msg = await add_global_memory_instruction(session, text, source="manual_rulebook")
             await session.commit()
-            print(f"\n{msg}\n")
+            (_ok if ok else _err)(f"\n{msg}\n")
 
         elif action in {"Disable Rule", "Enable Rule"}:
             target_active = action == "Enable Rule"
             rules = await get_global_memory_entries(session, include_inactive=True, limit=500)
             if not rules:
-                print("No rules available.")
+                _warn("No rules available.")
                 continue
             filtered = [r for r in rules if r.is_active != target_active]
             if not filtered:
                 state_name = "inactive" if target_active else "active"
-                print(f"No {state_name} rules found to modify.")
+                _warn(f"No {state_name} rules found to modify.")
                 continue
 
             choices = [
@@ -835,12 +926,12 @@ async def manage_global_rulebook_menu(session):
             ).execute_async()
             if selected_id:
                 ok, msg = await set_global_memory_active(session, selected_id, target_active)
-                print(f"\n{msg}\n")
+                (_ok if ok else _err)(f"\n{msg}\n")
 
         elif action == "Delete Rule":
             rules = await get_global_memory_entries(session, include_inactive=True, limit=500)
             if not rules:
-                print("No rules available.")
+                _warn("No rules available.")
                 continue
             choices = [
                 Choice(
@@ -857,12 +948,22 @@ async def manage_global_rulebook_menu(session):
                 confirm = await inquirer.confirm(message=f"Delete rule #{selected_id}?").execute_async()
                 if confirm:
                     ok, msg = await delete_global_memory_instruction(session, selected_id)
-                    print(f"\n{msg}\n")
+                    (_ok if ok else _err)(f"\n{msg}\n")
 
 async def reset_database_menu(session):
-    print("\n⚠️  Danger Zone: Reset Database / Tables")
+    print(
+        "\n"
+        + _menu_panel(
+            "Danger Zone: Reset",
+            [
+                "These operations remove data and cannot be undone.",
+                "Use table-level reset unless a full reset is required.",
+            ],
+            width=90,
+        )
+    )
     action = await inquirer.select(
-        message="Reset Options:",
+        message=_style("Reset Options:", _Ansi.BOLD, _Ansi.YELLOW),
         choices=[
             "Reset Entire Database",
             "Reset Specific Tables",
@@ -884,7 +985,7 @@ async def reset_database_menu(session):
             message="Type RESET to confirm:"
         ).execute_async()
         if confirm_text != "RESET":
-            print("Confirmation text mismatch. Reset cancelled.\n")
+            _warn("Confirmation text mismatch. Reset cancelled.\n")
             return
 
         confirm_2 = await inquirer.confirm(
@@ -894,9 +995,9 @@ async def reset_database_menu(session):
             return
 
         ok, msg = await reset_database()
-        print(f"\n{msg}")
+        (_ok if ok else _err)(f"\n{msg}")
         ok_seed, seed_msg = await seed_reference_data(session)
-        print(f"{seed_msg}\n")
+        _info(f"{seed_msg}\n")
         return
 
     table_names = get_resettable_table_names()
@@ -911,7 +1012,7 @@ async def reset_database_menu(session):
     ).execute_async()
 
     if not selected:
-        print("No tables selected.\n")
+        _warn("No tables selected.\n")
         return
 
     confirm = await inquirer.confirm(
@@ -922,10 +1023,10 @@ async def reset_database_menu(session):
 
     ok, msg = await reset_selected_tables(session, selected)
     if ok:
-        print(f"\n{msg}\n")
+        _ok(f"\n{msg}\n")
     else:
-        print("\nReset blocked:")
-        print(msg)
+        _err("\nReset blocked:")
+        _err(msg)
         print("")
 
 
@@ -1189,7 +1290,7 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
                 if user_msg.lower().startswith("/search"):
                     forced_search_query = user_msg[7:].strip()
                     if not forced_search_query:
-                        print("Usage: /search <query>")
+                        _warn("Usage: /search <query>")
                         continue
                     llm_message = (
                         "Use this explicit web search context to review the current decision. "
@@ -1209,7 +1310,7 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
 
                 discussion_history.append({"role": "user", "content": user_msg})
                 discussion_history.append({"role": "assistant", "content": model_reply})
-                print("\n" + box_text([f"Model: {model_reply}"]))
+                print("\n" + _style(box_text([f"Model: {model_reply}"]), _Ansi.MAGENTA))
 
             if discussion_history:
                 conversation_instruction = await ai.summarize_review_conversation(
@@ -1243,10 +1344,18 @@ async def import_review_callback(tx_data, current_cat_id, confidence, current_ty
             continue
 
 async def import_wizard(session):
+    _info(
+        _menu_panel(
+            "Import Transactions",
+            [
+                "Load CSV/PDF data, run categorization, then review and export.",
+            ],
+        )
+    )
     # 1. Select Bank
     bank_names = list_bank_names()
     if not bank_names:
-        print("No bank formats configured. Please add one via 'Manage Bank Formats'.")
+        _warn("No bank formats configured. Please add one via 'Manage Bank Formats'.")
         return
 
     bank = await inquirer.select(
@@ -1277,7 +1386,7 @@ async def import_wizard(session):
     # 3. Select Account
     accounts = await get_all_accounts(session)
     if not accounts:
-        print("No accounts found. Please creates one first.")
+        _warn("No accounts found. Please create one first.")
         return
         
     choices = [Choice(value=acc.name, name=acc.name) for acc in accounts]
@@ -1290,12 +1399,12 @@ async def import_wizard(session):
     do_interactive_review = await inquirer.confirm(message="Review each transaction as it is processed?").execute_async()
     callback = import_review_callback if do_interactive_review else None
 
-    print("\nProcessing... (This may take a moment for AI categorization)\n")
+    _info("\nProcessing... (This may take a moment for AI categorization)\n")
     # import logic
     success, msg, new_txs = await process_import(session, bank, file_path, account_name, review_callback=callback) # No export path yet
     
     if success:
-        print(f"\n✅ Success: {msg}\n")
+        _ok(f"\nSuccess: {msg}\n")
         
         # If we didn't do interactive review, maybe ask for bulk review?
         if new_txs and not do_interactive_review:
@@ -1303,7 +1412,7 @@ async def import_wizard(session):
             if do_review:
                 await review_transactions(session, new_txs)
     else:
-        print(f"\n❌ Error: {msg}\n")
+        _err(f"\nError: {msg}\n")
         return
 
     # 4. Output? (Post-Review Export)
@@ -1330,7 +1439,7 @@ async def import_wizard(session):
             final_txs = res.scalars().all()
             
             success, msg = export_to_bluecoins_csv(final_txs, output_path)
-            print(msg)
+            (_ok if success else _err)(msg)
 
 
 from src.chat import FinanceChatAI
@@ -1359,6 +1468,14 @@ def _build_guided_pdf_regex():
 
 
 async def bank_format_builder_menu():
+    _info(
+        _menu_panel(
+            "Bank Format Builder",
+            [
+                "Configure parser mappings for CSV and PDF statements.",
+            ],
+        )
+    )
     payload = load_banks_payload()
     existing = sorted(payload["banks"].keys())
 
@@ -1397,7 +1514,7 @@ async def bank_format_builder_menu():
     cfg = {"date_formats": date_formats}
 
     if source_mode in {"csv", "both"}:
-        print("\nCSV mapping\n-----------")
+        _info("\nCSV mapping\n-----------")
         cfg["date_column"] = await inquirer.text(message="Date column name:").execute_async()
         cfg["description_column"] = await inquirer.text(message="Description column name:").execute_async()
         cfg["amount_column"] = await inquirer.text(message="Amount column name:").execute_async()
@@ -1421,7 +1538,7 @@ async def bank_format_builder_menu():
             cfg["direction_out_value"] = await inquirer.text(message="Outgoing value (e.g. OUT):").execute_async()
 
     if source_mode in {"pdf", "both"}:
-        print("\nPDF mapping\n-----------")
+        _info("\nPDF mapping\n-----------")
         pdf_mode = await inquirer.select(
             message="PDF parse mode",
             choices=[
@@ -1440,7 +1557,7 @@ async def bank_format_builder_menu():
                 message="If only one amount is found, treat it as Debit (expense)?",
                 default=False,
             ).execute_async()
-            print("Generated regex for split credit/debit PDF lines.")
+            _ok("Generated regex for split credit/debit PDF lines.")
         else:
             default_date_re = _date_regex_hint_from_format(date_formats[0]) if date_formats else r"\d{1,2}\s+[A-Za-z]{3}\s+\d{4}"
             default_regex = rf"^({default_date_re})\s+(.+?)\s+(-?\$?[\d,]+\.\d{{2}})$"
@@ -1453,8 +1570,8 @@ async def bank_format_builder_menu():
             cfg["pdf_amount_group"] = 3
 
     upsert_bank_format(bank_name, cfg)
-    print(f"\nSaved bank format '{bank_name}' to data/banks_config.json\n")
-    print(cfg)
+    _ok(f"\nSaved bank format '{bank_name}' to data/banks_config.json\n")
+    print(_style(str(cfg), _Ansi.DIM))
 
     if bank_name.upper() == "ANZ":
         print(
@@ -1463,9 +1580,15 @@ async def bank_format_builder_menu():
         )
 
 async def chat_wizard(session):
-    print("\n💬 Chat with your Finance Data")
-    print("Ask questions like 'How much did I spend on Food last month?' or 'Show me top expenses'.")
-    print("Type 'exit' or 'q' to go back.\n")
+    _info(
+        _menu_panel(
+            "Finance Chat",
+            [
+                "Ask natural-language questions about your transactions.",
+                "Type 'exit' or 'q' to return.",
+            ],
+        )
+    )
     
     chat_ai = FinanceChatAI()
     
@@ -1474,12 +1597,20 @@ async def chat_wizard(session):
         if question.lower() in ['exit', 'quit', 'q']:
             break
             
-        print("🤖 Thinking...")
+        _info("Thinking...")
         response = await chat_ai.chat(question, session)
-        print(f"\nAI: {response}\n")
+        print(_style("\nAI:", _Ansi.BOLD, _Ansi.MAGENTA) + f" {response}\n")
 
 
 async def inspect_pdf_text_menu(default_file_path=None, default_bank=None):
+    _info(
+        _menu_panel(
+            "Inspect PDF Text",
+            [
+                "Preview parsed statement text and export full debug reports.",
+            ],
+        )
+    )
     file_path = default_file_path
     if not file_path:
         file_path = await inquirer.filepath(
@@ -1534,7 +1665,7 @@ async def inspect_pdf_text_menu(default_file_path=None, default_bank=None):
             report_preview = format_pdf_debug_report(debug_data, mode=mode, max_lines=max_lines)
             full_report = format_pdf_debug_report(debug_data, mode=mode, max_lines=None)
     except Exception as e:
-        print(f"\n❌ Error: {e}\n")
+        _err(f"\nError: {e}\n")
         return
 
     print("\n" + report_preview)
@@ -1553,7 +1684,7 @@ async def inspect_pdf_text_menu(default_file_path=None, default_bank=None):
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(full_report)
-    print(f"\nSaved full debug report to {output_path}\n")
+    _ok(f"\nSaved full debug report to {output_path}\n")
 
 
 async def _main_menu_snapshot(session):
