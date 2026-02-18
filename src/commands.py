@@ -543,6 +543,7 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
                 tx_data["description"],
                 session,
                 expected_type=tx_data["type"] if tx_data["type"] in {"expense", "income"} else None,
+                amount_hint=tx_data.get("amount"),
             )
             ai_decision_cache[cache_key] = (cat_id, confidence, reasoning, suggested_type)
         if suggested_type:
@@ -1048,7 +1049,11 @@ async def add_transaction(
     else:
         # Auto-Categorize
         ai = CategorizerAI()
-        cat_id, conf, reason, suggested_type = await ai.suggest_category(description, session)
+        cat_id, conf, reason, suggested_type = await ai.suggest_category(
+            description,
+            session,
+            amount_hint=amount,
+        )
         category_id = cat_id
         confidence = conf
         ai_reasoning = reason

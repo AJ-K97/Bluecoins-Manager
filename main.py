@@ -409,15 +409,44 @@ async def benchmark_command(args):
             if not ok:
                 return
         elif args.benchmark_action == "score":
-            ok, msg, summary = await _run_with_spinner(
-                "Scoring benchmark",
-                score_benchmark_dataset(
-                    session,
-                    model=args.model,
-                    limit=args.limit,
-                    source_file=args.source_file,
-                ),
+            def _truncate(text, size=52):
+                raw = (text or "").strip()
+                if len(raw) <= size:
+                    return raw
+                return raw[: size - 3] + "..."
+
+            async def _progress(update):
+                processed = int(update.get("processed") or 0)
+                total_rows = max(1, int(update.get("total") or 1))
+                pct = (processed / total_rows) * 100.0
+                marker = "OK" if update.get("is_correct") else "XX"
+                row_id = update.get("item_id")
+                desc = _truncate(update.get("description") or "")
+
+                if sys.stdout.isatty():
+                    width = 24
+                    filled = int((processed / total_rows) * width)
+                    bar = "#" * filled + "-" * (width - filled)
+                    line = (
+                        f"[{bar}] {processed:>3}/{total_rows:<3} {pct:6.2f}% "
+                        f"{marker} #{row_id} {desc}"
+                    )
+                    print(f"\r{line}", end="", flush=True)
+                else:
+                    print(
+                        f"[{processed}/{total_rows}] {pct:6.2f}% {marker} "
+                        f"#{row_id} {desc}"
+                    )
+
+            ok, msg, summary = await score_benchmark_dataset(
+                session,
+                model=args.model,
+                limit=args.limit,
+                source_file=args.source_file,
+                progress_callback=_progress,
             )
+            if sys.stdout.isatty():
+                print("")
             print(msg)
             if not ok or not summary:
                 return

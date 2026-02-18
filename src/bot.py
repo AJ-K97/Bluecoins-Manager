@@ -693,6 +693,7 @@ async def _build_upload_review_queue(session, transactions):
             tx["description"],
             session,
             expected_type=tx["type"] if tx["type"] in {"expense", "income"} else None,
+            amount_hint=tx.get("amount"),
         )
         tx_type = suggested_type or tx["type"]
         if tx_type == "transfer":
@@ -1311,6 +1312,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     tx["description"],
                     session,
                     expected_type=tx["type"] if tx["type"] in {"expense", "income"} else None,
+                    amount_hint=tx.get("amount"),
                 )
                 tx_type = suggested_type or tx["type"]
                 if tx_type == "transfer":

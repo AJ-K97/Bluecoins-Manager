@@ -35,7 +35,11 @@ class CategorizerAI:
         if not query or not str(query).strip():
             return []
         try:
-            from duckduckgo_search import DDGS
+            try:
+                from ddgs import DDGS
+            except Exception:
+                # Backward-compat fallback for older environments.
+                from duckduckgo_search import DDGS
             with DDGS() as ddgs:
                 return list(ddgs.text(str(query).strip(), max_results=max_results))
         except Exception:
@@ -113,6 +117,89 @@ class CategorizerAI:
             "reasoning": f"Exact verified precedent match ({top_count}/{len(keys)} rows).",
         }
 
+    def _amount_sign(self, amount):
+        if amount is None:
+            return None
+        try:
+            value = float(amount)
+        except Exception:
+            return None
+        if value > 0:
+            return "positive"
+        if value < 0:
+            return "negative"
+        return "zero"
+
+    async def _get_keyword_verified_precedent(self, description, session, expected_type=None, amount_hint=None):
+        """
+        Deterministic precedent by merchant keyword + amount sign + type.
+        Uses only verified rows.
+        """
+        resolver = KeywordResolver()
+        resolved = await resolver.resolve(description, session)
+        keyword = (resolved.keyword or "").strip()
+        if len(keyword) < 3 or keyword == "UNKNOWN" or float(resolved.confidence or 0.0) < 0.35:
+            return None
+
+        stmt = (
+            select(Transaction)
+            .where(
+                Transaction.is_verified.is_(True),
+                Transaction.category_id.is_not(None),
+                Transaction.description.ilike(f"%{keyword}%"),
+            )
+            .order_by(Transaction.date.desc())
+            .limit(120)
+        )
+        expected_type = (expected_type or "").strip().lower()
+        if expected_type in {"expense", "income"}:
+            stmt = stmt.where(Transaction.type == expected_type)
+
+        res = await session.execute(stmt)
+        rows = res.scalars().all()
+        if not rows:
+            return None
+
+        current_sign = self._amount_sign(amount_hint)
+        keys = []
+        for tx in rows:
+            tx_type = (tx.type or "").lower()
+            if tx_type not in {"expense", "income"} or not tx.category_id:
+                continue
+            tx_sign = self._amount_sign(tx.amount)
+            if current_sign and tx_sign and tx_sign != current_sign:
+                continue
+            keys.append((tx_type, int(tx.category_id)))
+
+        # If sign filter is too strict, relax sign matching.
+        if len(keys) < 3:
+            keys = []
+            for tx in rows:
+                tx_type = (tx.type or "").lower()
+                if tx_type not in {"expense", "income"} or not tx.category_id:
+                    continue
+                keys.append((tx_type, int(tx.category_id)))
+
+        if len(keys) < 3:
+            return None
+
+        counts = Counter(keys)
+        (top_type, top_cat), top_count = counts.most_common(1)[0]
+        ratio = top_count / max(1, len(keys))
+        if top_count < 3 or ratio < 0.70:
+            return None
+
+        conf = min(0.98, 0.82 + (ratio * 0.12) + (min(top_count, 10) * 0.004))
+        return {
+            "type": top_type,
+            "category_id": top_cat,
+            "confidence": conf,
+            "reasoning": (
+                f"Keyword verified precedent ({keyword}): "
+                f"{top_count}/{len(keys)} verified rows matched."
+            ),
+        }
+
     def _parse_json_payload(self, content):
         try:
             import json
@@ -181,6 +268,7 @@ Text:
         min_candidates=3,
         extra_instruction=None,
         expected_type=None,
+        amount_hint=None,
     ):
         """
         Suggest multiple candidate categories and types for a transaction.
@@ -192,12 +280,11 @@ Text:
             return []
 
         cat_by_id = {c.id: c for c in categories}
-        cat_lines = []
-        for c in sorted(categories, key=lambda x: (x.parent_name or "", x.name)):
-            parent = c.parent_name if c.parent_name else "No Parent"
-            cat_lines.append(f"ID {c.id}: {parent} > {c.name} ({c.type})")
-
-        cat_str = "\n".join(cat_lines)
+        expected_type = (expected_type or "").lower().strip()
+        if expected_type not in {"expense", "income"}:
+            expected_type = None
+        eligible_categories = [c for c in categories if not expected_type or c.type == expected_type]
+        eligible_by_id = {c.id: c for c in eligible_categories}
 
         # Deterministic fast-path:
         # if exact verified precedent exists with a single unanimous category/type,
@@ -233,7 +320,7 @@ Text:
                             ]
                             used = {int(top_cat_id)}
                             target_type = normalized[0]["type"]
-                            for c in sorted(categories, key=lambda x: (x.parent_name or "", x.name)):
+                            for c in sorted(eligible_categories, key=lambda x: (x.parent_name or "", x.name)):
                                 if c.id in used:
                                     continue
                                 if target_type in {"expense", "income"} and c.type != target_type:
@@ -258,19 +345,95 @@ Text:
         search_term = resolved_keyword.keyword
         history_str = "None"
 
+        profile_stmt = (
+            select(AICategoryUnderstanding, Category)
+            .join(Category, Category.id == AICategoryUnderstanding.category_id)
+            .order_by(Category.type.asc(), Category.parent_name.asc(), Category.name.asc())
+        )
+        profile_res = await session.execute(profile_stmt)
+        profile_rows = profile_res.all()
+
+        shortlist_target = min(len(eligible_categories), max(12, int(min_candidates) * 6, 24))
+        shortlisted_ids = []
+        shortlisted_set = set()
+
+        def _add_shortlisted(cid):
+            if cid in eligible_by_id and cid not in shortlisted_set:
+                shortlisted_ids.append(cid)
+                shortlisted_set.add(cid)
+
+        similar_verified_rows = []
         if len(search_term) > 2 and resolved_keyword.confidence >= 0.35:
-            stmt = select(Transaction, AIMemory).outerjoin(AIMemory, Transaction.id == AIMemory.transaction_id).where(
-                Transaction.description.ilike(f"%{search_term}%"),
-                Transaction.category_id.is_not(None)
-            ).order_by(Transaction.date.desc()).limit(5)
+            similar_stmt = (
+                select(Transaction)
+                .where(
+                    Transaction.description.ilike(f"%{search_term}%"),
+                    Transaction.category_id.is_not(None),
+                    Transaction.is_verified.is_(True),
+                )
+                .order_by(Transaction.date.desc())
+                .limit(120)
+            )
+            if expected_type:
+                similar_stmt = similar_stmt.where(Transaction.type == expected_type)
+            similar_res = await session.execute(similar_stmt)
+            similar_verified_rows = similar_res.scalars().all()
 
-            res = await session.execute(stmt)
-            rows = res.all()
+        if similar_verified_rows:
+            pair_counts = Counter(
+                (int(tx.category_id), (tx.type or "").lower())
+                for tx in similar_verified_rows
+                if tx.category_id and (tx.type or "").lower() in {"expense", "income"}
+            )
+            for (cat_id, _ctype), _count in pair_counts.most_common(shortlist_target):
+                _add_shortlisted(cat_id)
 
-            if rows:
+        keyword_tokens = [t for t in str(search_term or "").upper().split() if len(t) >= 4][:3]
+        if keyword_tokens:
+            for prof, cat in profile_rows:
+                if cat.id not in eligible_by_id:
+                    continue
+                profile_blob = f"{prof.understanding or ''} {prof.sample_transactions_json or ''}".upper()
+                if any(tok in profile_blob for tok in keyword_tokens):
+                    _add_shortlisted(cat.id)
+                    if len(shortlisted_ids) >= shortlist_target:
+                        break
+
+        for c in sorted(eligible_categories, key=lambda x: (x.parent_name or "", x.name)):
+            if len(shortlisted_ids) >= shortlist_target:
+                break
+            _add_shortlisted(c.id)
+
+        prompt_categories = [eligible_by_id[cid] for cid in shortlisted_ids] if shortlisted_ids else list(eligible_categories)
+        prompt_category_ids = {c.id for c in prompt_categories}
+        cat_lines = []
+        for c in sorted(prompt_categories, key=lambda x: (x.parent_name or "", x.name)):
+            parent = c.parent_name if c.parent_name else "No Parent"
+            cat_lines.append(f"ID {c.id}: {parent} > {c.name} ({c.type})")
+        cat_str = "\n".join(cat_lines)
+
+        if len(search_term) > 2 and resolved_keyword.confidence >= 0.35:
+            history_stmt = (
+                select(Transaction, AIMemory)
+                .outerjoin(AIMemory, Transaction.id == AIMemory.transaction_id)
+                .where(
+                    Transaction.description.ilike(f"%{search_term}%"),
+                    Transaction.category_id.is_not(None),
+                    Transaction.is_verified.is_(True),
+                )
+                .order_by(Transaction.date.desc())
+                .limit(8)
+            )
+            if expected_type:
+                history_stmt = history_stmt.where(Transaction.type == expected_type)
+
+            history_res = await session.execute(history_stmt)
+            history_rows = history_res.all()
+
+            if history_rows:
                 history_lines = []
-                for tx, mem in rows:
-                    cat_obj = next((c for c in categories if c.id == tx.category_id), None)
+                for tx, mem in history_rows:
+                    cat_obj = cat_by_id.get(tx.category_id)
                     if cat_obj:
                         cat_name = f"{cat_obj.parent_name or 'Uncategorized'} > {cat_obj.name} [{cat_obj.type}]"
                     else:
@@ -280,26 +443,23 @@ Text:
                     if mem and mem.reflection:
                         reflection_note = f"\n  - LEARNING/REFLECTION: {mem.reflection}"
 
-                    user_tag = "[USER VERIFIED]" if tx.is_verified else "[AI PREDICTION]"
-                    history_lines.append(f"- '{tx.description}' -> {cat_name} ({tx.type}) {user_tag}{reflection_note}")
+                    history_lines.append(
+                        f"- '{tx.description}' -> {cat_name} ({tx.type}) [USER VERIFIED]{reflection_note}"
+                    )
 
                 history_str = "\n".join(history_lines)
 
-        profile_stmt = (
-            select(AICategoryUnderstanding, Category)
-            .join(Category, Category.id == AICategoryUnderstanding.category_id)
-            .order_by(Category.type.asc(), Category.parent_name.asc(), Category.name.asc())
-        )
-        profile_res = await session.execute(profile_stmt)
-        profile_rows = profile_res.all()
         profiles_str = "None"
         if profile_rows:
             lines = []
             for p, c in profile_rows:
+                if c.id not in prompt_category_ids:
+                    continue
                 lines.append(
                     f"- ID {c.id}: {(c.parent_name or 'Uncategorized')} > {c.name} [{c.type}] :: {p.understanding}"
                 )
-            profiles_str = "\n".join(lines)
+            if lines:
+                profiles_str = "\n".join(lines)
 
         rule_stmt = select(AIGlobalMemory).where(AIGlobalMemory.is_active.is_(True)).order_by(AIGlobalMemory.created_at.desc()).limit(50)
         rule_res = await session.execute(rule_stmt)
@@ -314,14 +474,16 @@ Text:
             else:
                 global_rules_str += f"\n- {extra_instruction}"
 
-        expected_type = (expected_type or "").lower().strip()
-        if expected_type not in {"expense", "income"}:
-            expected_type = None
-
         merchant_hint = resolved_keyword.keyword
         merchant_hint_confidence = resolved_keyword.confidence
         merchant_hint_source = resolved_keyword.source
         clean_desc = self._clean_description(description)
+        amount_hint_text = "unknown"
+        if amount_hint is not None:
+            try:
+                amount_hint_text = f"{float(amount_hint):.2f}"
+            except Exception:
+                amount_hint_text = str(amount_hint)
         search_query = (
             self._clean_description(merchant_hint)
             if merchant_hint and merchant_hint != "UNKNOWN" and merchant_hint_confidence >= 0.35
@@ -339,6 +501,7 @@ merchant_hint: '{merchant_hint}'
 merchant_hint_confidence: '{merchant_hint_confidence:.2f}'
 merchant_hint_source: '{merchant_hint_source}'
 expected_type: '{expected_type or "unknown"}'
+amount_hint: '{amount_hint_text}'
 
 Web Search Context:
 {search_context}
@@ -367,6 +530,7 @@ Rules:
 - Prefer non-transfer category candidates unless the transaction is clearly an internal transfer.
 - If expected_type is "expense" or "income", all candidates MUST use that same type.
 - Treat merchant_hint as primary merchant/payee signal. Do NOT use suburb/city/country/location tails as merchant names.
+- Use amount_hint sign/size only as a weak tiebreaker.
 
 Return JSON object only:
 {{
@@ -416,7 +580,7 @@ Text:
 
                 if ctype == "transfer":
                     continue
-                if cid is None or cid not in cat_by_id:
+                if cid is None or cid not in eligible_by_id:
                     continue
                 if cat_by_id[cid].type != ctype:
                     continue
@@ -441,7 +605,7 @@ Text:
 
             if len(normalized) < max(3, int(min_candidates)):
                 used = {c["id"] for c in normalized}
-                for c in sorted(categories, key=lambda x: (x.parent_name or "", x.name)):
+                for c in sorted(prompt_categories, key=lambda x: (x.parent_name or "", x.name)):
                     if expected_type and c.type != expected_type:
                         continue
                     if c.id in used:
@@ -456,12 +620,29 @@ Text:
                     if len(normalized) >= max(3, int(min_candidates)):
                         break
 
+            if len(normalized) < max(3, int(min_candidates)):
+                used = {c["id"] for c in normalized}
+                for c in sorted(eligible_categories, key=lambda x: (x.parent_name or "", x.name)):
+                    if c.id in used:
+                        continue
+                    normalized.append(
+                        {
+                            "id": c.id,
+                            "type": c.type,
+                            "confidence": 0.15,
+                            "reasoning": "Global fallback candidate.",
+                        }
+                    )
+                    used.add(c.id)
+                    if len(normalized) >= max(3, int(min_candidates)):
+                        break
+
             return sorted(normalized, key=lambda x: x["confidence"], reverse=True)
         except Exception as e:
             print(f"AI Error: {e}")
             return []
 
-    async def suggest_category(self, description, session, extra_instruction=None, expected_type=None):
+    async def suggest_category(self, description, session, extra_instruction=None, expected_type=None, amount_hint=None):
         """
         Suggests category and type for the transaction.
         Returns (category_id, confidence, reasoning, type)
@@ -478,6 +659,20 @@ Text:
                     precedent["type"],
                 )
 
+            keyword_precedent = await self._get_keyword_verified_precedent(
+                description,
+                session,
+                expected_type=expected_type,
+                amount_hint=amount_hint,
+            )
+            if keyword_precedent:
+                return (
+                    int(keyword_precedent["category_id"]),
+                    keyword_precedent["confidence"],
+                    keyword_precedent["reasoning"],
+                    keyword_precedent["type"],
+                )
+
             if self._is_internal_transfer_text(description):
                 return (
                     None,
@@ -492,6 +687,7 @@ Text:
                 min_candidates=3,
                 extra_instruction=extra_instruction,
                 expected_type=expected_type,
+                amount_hint=amount_hint,
             )
             if not candidates:
                 return None, 0.0, "Unable to produce category suggestions.", "expense"

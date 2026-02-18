@@ -399,6 +399,75 @@ async def test_suggest_category_prefers_exact_verified_transfer_precedent_over_i
 
 
 @pytest.mark.asyncio
+async def test_suggest_category_prefers_keyword_verified_precedent_before_llm(db_session):
+    account, cats = await _seed_core_reference_data(db_session)
+    grocery = cats["Household>Grocery>expense"]
+    desc_seed = "ZXQSHOP MARKET 10FEB26 VISA AUD ZXQSHOP AU"
+
+    db_session.add_all(
+        [
+            Transaction(
+                date=datetime(2026, 2, 10),
+                description=desc_seed,
+                amount=-74.80,
+                type="expense",
+                account_id=account.id,
+                category_id=grocery.id,
+                is_verified=True,
+            ),
+            Transaction(
+                date=datetime(2026, 2, 11),
+                description="VISA DEBIT PURCHASE CARD 8208 ZXQSHOP MARKET/ SUBURB",
+                amount=-45.20,
+                type="expense",
+                account_id=account.id,
+                category_id=grocery.id,
+                is_verified=True,
+            ),
+            Transaction(
+                date=datetime(2026, 2, 12),
+                description="ZXQSHOP MARKET 12FEB26 VISA AUD ZXQSHOP AU",
+                amount=-31.10,
+                type="expense",
+                account_id=account.id,
+                category_id=grocery.id,
+                is_verified=True,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    ai = StubCategorizer(
+        [
+            json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "id": cats["Entertainment>Food>expense"].id,
+                            "type": "expense",
+                            "confidence": 0.99,
+                            "reasoning": "Should not be used when keyword precedent is strong.",
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+    cat_id, conf, reason, tx_type = await ai.suggest_category(
+        "ZXQSHOP MARKET 14FEB26 CARD 8208",
+        db_session,
+        expected_type="expense",
+        amount_hint=-27.50,
+    )
+
+    assert tx_type == "expense"
+    assert cat_id == grocery.id
+    assert conf >= 0.9
+    assert "Keyword verified precedent" in reason
+    assert ai.prompts == []  # no LLM call when deterministic keyword precedent is strong
+
+
+@pytest.mark.asyncio
 async def test_internal_transfer_heuristic_does_not_override_salary_rows(db_session):
     _, cats = await _seed_core_reference_data(db_session)
     salary = cats["Employer>Salary>income"]

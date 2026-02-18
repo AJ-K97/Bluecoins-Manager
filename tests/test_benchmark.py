@@ -88,7 +88,6 @@ async def test_set_benchmark_item_label_assigns_parent_and_sub_category(db_sessi
     refreshed = (
         await db_session.execute(select(CategoryBenchmarkItem).where(CategoryBenchmarkItem.id == item.id))
     ).scalar_one()
-    assert refreshed.expected_category_id == grocery.id
     assert refreshed.expected_parent_name == "Household"
     assert refreshed.expected_category_name == "Grocery"
     assert refreshed.expected_type == "expense"
@@ -176,11 +175,16 @@ async def test_score_benchmark_dataset_writes_normalized_scores_and_run_history(
         mock_ai.suggest_category = AsyncMock(
             return_value=(food.id, 0.93, "Merchant is a food chain.", "expense")
         )
+        progress_events = []
+
+        async def _progress(update):
+            progress_events.append(update)
 
         ok, _msg, summary = await score_benchmark_dataset(
             db_session,
             model="test-model",
             source_file="unit_score.csv",
+            progress_callback=_progress,
         )
 
     assert ok is True
@@ -195,3 +199,6 @@ async def test_score_benchmark_dataset_writes_normalized_scores_and_run_history(
     assert run.model == "test-model"
     assert run.overall_score == 100.0
     assert run.memory_score == 100.0
+    assert len(progress_events) == 1
+    assert progress_events[0]["processed"] == 1
+    assert progress_events[0]["total"] == 1

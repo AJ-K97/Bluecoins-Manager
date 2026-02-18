@@ -1,4 +1,5 @@
 import csv
+import inspect
 import json
 import os
 from datetime import datetime
@@ -73,9 +74,13 @@ async def _resolve_category(session, parent_name: str, category_name: str, tx_ty
         return rows[0], 1
 
     if tx_type in {"expense", "income"}:
-        return None, len(rows)
+        # When duplicate rows exist for same parent/name/type, pick deterministically.
+        return rows[0], len(rows)
 
-    # ambiguous without explicit type
+    # Without explicit type, ambiguity only matters if multiple types exist.
+    distinct_types = {str(r.type or "").lower() for r in rows}
+    if len(distinct_types) == 1:
+        return rows[0], len(rows)
     return None, len(rows)
 
 
@@ -344,6 +349,7 @@ async def score_benchmark_dataset(
     model: str = "llama3.1:8b",
     limit: Optional[int] = None,
     source_file: Optional[str] = None,
+    progress_callback=None,
 ):
     stmt = (
         select(CategoryBenchmarkItem)
@@ -403,6 +409,7 @@ async def score_benchmark_dataset(
             item.description,
             session,
             expected_type=candidate_expected_type,
+            amount_hint=item.amount,
         )
 
         is_correct = False
@@ -453,6 +460,23 @@ async def score_benchmark_dataset(
                     },
                 }
             )
+
+        if progress_callback:
+            payload = {
+                "processed": total,
+                "total": len(items),
+                "item_id": item.id,
+                "description": item.description,
+                "expected_type": expected_type,
+                "predicted_type": predicted_type,
+                "is_correct": is_correct,
+            }
+            try:
+                callback_result = progress_callback(payload)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+            except Exception:
+                pass
 
     if total == 0:
         return False, "No valid labeled benchmark rows found.", None
