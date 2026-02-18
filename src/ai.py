@@ -643,3 +643,26 @@ Reflection:
             return response['message']['content'].strip()
         except Exception:
             return "User corrected category."
+
+    async def generate_correctness_reflection(self, description, category_label, previous_reasoning):
+        """
+        Asks AI to explain why the current decision is correct for future reuse.
+        """
+        prompt = f"""
+Transaction: '{description}'
+Current category: {category_label}
+Current reasoning: {previous_reasoning}
+
+Task:
+Write a short "Reflection" rule for the Memory Bank explaining why this categorization is correct.
+Keep it concise (1 sentence), reusable, and focused on merchant/payee intent.
+
+Reflection:
+"""
+        try:
+            response = await self.client.chat(model=self.model, messages=[
+                {'role': 'user', 'content': prompt}
+            ])
+            return response['message']['content'].strip()
+        except Exception:
+            return "Current category verified by user as correct."

@@ -26,6 +26,7 @@ from src.commands import (
     add_transaction,
 )
 from src.local_llm import LocalLLMPipeline
+from src.ai_config import close_ollama_client
 
 async def account_command(args):
     async with AsyncSessionLocal() as session:
@@ -489,5 +490,12 @@ async def main():
     else:
         parser.print_help()
 
+
+async def _run_main():
+    try:
+        await main()
+    finally:
+        await close_ollama_client()
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(_run_main())

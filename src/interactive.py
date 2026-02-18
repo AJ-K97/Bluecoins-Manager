@@ -7,7 +7,7 @@ from sqlalchemy import select, func
 from InquirerPy import inquirer
 from InquirerPy.separator import Separator
 from InquirerPy.base.control import Choice
-from src.database import init_db, AsyncSessionLocal, Account, Transaction
+from src.database import init_db, AsyncSessionLocal, Account, Transaction, AIMemory
 from src.commands import (
     list_accounts, add_account, delete_account, update_account, process_import, get_all_accounts,
     get_transactions, update_transaction_category, delete_transaction, export_to_bluecoins_csv,
@@ -22,6 +22,7 @@ from src.commands import (
 from src.ai import CategorizerAI
 from src.bank_config import list_bank_names, load_banks_payload, upsert_bank_format
 from src.parser import BankParser, format_pdf_debug_report, format_pdf_blocks_report
+from src.patterns import extract_pattern_key_result
 
 from src.tui import TransactionReviewApp
 
@@ -85,6 +86,46 @@ async def choose_category_tree(session, prompt_prefix="Select Category", default
     ).execute_async()
 
 
+async def _get_or_create_latest_memory_entry(session, tx):
+    mem_stmt = (
+        select(AIMemory)
+        .where(AIMemory.transaction_id == tx.id)
+        .order_by(AIMemory.created_at.desc())
+        .limit(1)
+    )
+    mem_res = await session.execute(mem_stmt)
+    memory = mem_res.scalars().first()
+    if memory:
+        return memory
+
+    memory = AIMemory(
+        transaction_id=tx.id,
+        pattern_key=extract_pattern_key_result(tx.description).keyword,
+        ai_suggested_category_id=tx.category_id,
+        user_selected_category_id=tx.category_id,
+        ai_reasoning=tx.decision_reason or "",
+    )
+    session.add(memory)
+    await session.flush()
+    return memory
+
+
+def _tx_data_from_row(tx):
+    return {
+        "id": tx.id,
+        "date": tx.date.strftime("%Y-%m-%d") if tx.date else "",
+        "amount": tx.amount,
+        "description": tx.description or "",
+        "type": tx.type,
+        "raw_csv_row": tx.raw_csv_row or "",
+    }
+
+
+async def _category_label_for_tx(session, tx_type, category_id):
+    parent_name, cat_name = await get_category_display_from_values(session, tx_type, category_id)
+    return format_category_label(parent_name, cat_name, tx_type)
+
+
 async def review_transactions(session, transactions):
     """
     Interactive review of new transactions using custom TUI.
@@ -111,6 +152,8 @@ async def review_transactions(session, transactions):
     if not review_list:
         print("No transactions to review.")
         return
+
+    ai = CategorizerAI()
 
     # Callback for TUI actions
     async def on_update(tx, action):
@@ -141,12 +184,175 @@ async def review_transactions(session, transactions):
             )
             if selected_cat == TRANSFER_CHOICE:
                 await update_transaction_category(session, tx.id, category_id=None, set_transfer=True)
-                await session.refresh(tx, ['category'])
+                await session.refresh(tx, ['category', 'memory_entries'])
             elif selected_cat:
                 await update_transaction_category(session, tx.id, selected_cat.id)
-                await session.refresh(tx, ['category'])
-                
-        elif action == 'delete':
+                await session.refresh(tx, ['category', 'memory_entries'])
+            else:
+                continue
+
+            follow_up = await inquirer.select(
+                message="Post-change learning:",
+                choices=[
+                    Choice(value="coach", name="Coach model with explicit rule"),
+                    Choice(value="discuss", name="Discuss and synthesize guidance"),
+                    Choice(value="none", name="Done"),
+                ],
+                default="coach",
+            ).execute_async()
+            action = follow_up
+
+        if action == 'coach':
+            coaching_text = await inquirer.text(
+                message="Coaching instruction to save in global rulebook:"
+            ).execute_async()
+            coaching_text = (coaching_text or "").strip()
+            if not coaching_text:
+                continue
+
+            await add_global_memory_instruction(session, coaching_text, source="review_coaching")
+            await session.commit()
+            print("Saved coaching rule.")
+
+            rerun = await inquirer.confirm(
+                message="Re-run AI suggestion for this transaction using this coaching?",
+                default=True,
+            ).execute_async()
+            if rerun:
+                locked_expected_type = tx.type if tx.type in {"expense", "income"} else None
+                candidates = await ai.suggest_category_candidates(
+                    tx.description,
+                    session,
+                    min_candidates=3,
+                    extra_instruction=coaching_text,
+                    expected_type=locked_expected_type,
+                )
+                if candidates:
+                    top = candidates[0]
+                    suggested_label = await _category_label_for_tx(session, top["type"], top["id"])
+                    apply_top = await inquirer.confirm(
+                        message=f"Apply top coached suggestion now? {suggested_label}",
+                        default=False,
+                    ).execute_async()
+                    if apply_top:
+                        await update_transaction_category(session, tx.id, top["id"])
+                        await session.refresh(tx, ['category', 'memory_entries'])
+                        print("Applied coached suggestion.")
+            continue
+
+        if action == 'discuss':
+            print("\nDiscussion mode. Use /done to finish and /search <query> to force web lookup.")
+            discussion_history = []
+            tx_data = _tx_data_from_row(tx)
+
+            while True:
+                user_msg = await inquirer.text(message="You:").execute_async()
+                user_msg = (user_msg or "").strip()
+                if not user_msg:
+                    continue
+                if user_msg.lower() in {"/done", "done", "exit"}:
+                    break
+
+                forced_search_query = None
+                llm_message = user_msg
+                if user_msg.lower().startswith("/search"):
+                    forced_search_query = user_msg[7:].strip()
+                    if not forced_search_query:
+                        print("Usage: /search <query>")
+                        continue
+                    llm_message = (
+                        "Use this explicit web search context to evaluate the current decision. "
+                        f"Query: {forced_search_query}. Explain whether category/type should change and why."
+                    )
+
+                memory = await _get_or_create_latest_memory_entry(session, tx)
+                reply = await ai.discuss_transaction(
+                    tx_data=tx_data,
+                    current_type=tx.type,
+                    current_cat_id=tx.category_id,
+                    current_reasoning=memory.ai_reasoning or tx.decision_reason or "No reasoning.",
+                    session=session,
+                    user_message=llm_message,
+                    conversation_history=discussion_history,
+                    web_search_query=forced_search_query,
+                )
+                discussion_history.append({"role": "user", "content": user_msg})
+                discussion_history.append({"role": "assistant", "content": reply})
+                print(f"\nModel: {reply}\n")
+
+            if discussion_history:
+                guidance = await ai.summarize_review_conversation(
+                    tx_description=tx.description,
+                    conversation_history=discussion_history,
+                )
+                if guidance and guidance.strip():
+                    guidance_text = guidance.strip()
+                    print("\nSynthesized guidance:\n" + guidance + "\n")
+                    persist = await inquirer.confirm(
+                        message="Save this guidance in global rulebook?",
+                        default=True,
+                    ).execute_async()
+                    if persist:
+                        await add_global_memory_instruction(
+                            session,
+                            guidance_text,
+                            source="review_discussion",
+                        )
+                        await session.commit()
+                        print("Saved guidance rule.")
+
+                    rerun = await inquirer.confirm(
+                        message="Re-run AI suggestion for this transaction using this guidance?",
+                        default=True,
+                    ).execute_async()
+                    if rerun:
+                        locked_expected_type = tx.type if tx.type in {"expense", "income"} else None
+                        candidates = await ai.suggest_category_candidates(
+                            tx.description,
+                            session,
+                            min_candidates=3,
+                            extra_instruction=guidance_text,
+                            expected_type=locked_expected_type,
+                        )
+                        if candidates:
+                            top = candidates[0]
+                            suggested_label = await _category_label_for_tx(session, top["type"], top["id"])
+                            apply_top = await inquirer.confirm(
+                                message=f"Apply top discussion suggestion now? {suggested_label}",
+                                default=False,
+                            ).execute_async()
+                            if apply_top:
+                                await update_transaction_category(session, tx.id, top["id"])
+                                await session.refresh(tx, ['category', 'memory_entries'])
+                                print("Applied discussion suggestion.")
+            continue
+
+        if action == 'reflect':
+            current_label = await _category_label_for_tx(session, tx.type, tx.category_id)
+            memory = await _get_or_create_latest_memory_entry(session, tx)
+            prior_reasoning = memory.ai_reasoning or tx.decision_reason or "No prior reasoning."
+            reflection = await ai.generate_correctness_reflection(
+                tx.description,
+                current_label,
+                prior_reasoning,
+            )
+            memory.user_selected_category_id = tx.category_id
+            memory.reflection = reflection
+            session.add(memory)
+            await session.commit()
+            print(f"Saved reflection: {reflection}")
+
+            if not tx.is_verified:
+                verify_now = await inquirer.confirm(
+                    message="Mark this transaction as verified now?",
+                    default=True,
+                ).execute_async()
+                if verify_now:
+                    await mark_transaction_verified(session, tx.id)
+                    await session.refresh(tx, ['memory_entries'])
+            continue
+
+        if action == 'delete':
             confirm = await inquirer.confirm(message=f"Delete '{tx.description}'?").execute_async()
             if confirm:
                 await delete_transaction(session, tx.id)
