@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bluecoins Agent Graph</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="backdrop"></div>
+    <main class="shell">
+      <header class="header">
+        <div>
+          <h1>Agent Memory Graph</h1>
+          <p>Keyword to category links with confidence-based edge weight and reasoning.</p>
+        </div>
+        <div class="pill" id="statsPill">Loading graph...</div>
+      </header>
+
+      <section class="controls">
+        <label>
+          <span>Search</span>
+          <input id="searchInput" type="text" placeholder="keyword or category..." />
+        </label>
+        <label>
+          <span>Min Weight</span>
+          <input id="minWeightInput" type="number" min="0" step="0.1" value="0" />
+        </label>
+        <label>
+          <span>Edge Limit</span>
+          <input id="limitInput" type="number" min="25" max="1000" step="25" value="250" />
+        </label>
+        <label class="inline">
+          <input id="verifiedOnlyInput" type="checkbox" />
+          <span>Verified only</span>
+        </label>
+        <label class="inline">
+          <input id="showReasonsInput" type="checkbox" checked />
+          <span>Show reasons</span>
+        </label>
+        <button id="refreshBtn" type="button">Refresh</button>
+      </section>
+
+      <section class="graph-wrap">
+        <svg id="graphSvg" aria-label="Keyword category graph"></svg>
+        <aside id="detailPanel" class="detail-panel">
+          <h2>Selection</h2>
+          <div id="detailBody">Hover a node or edge to inspect details.</div>
+        </aside>
+      </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+    <script src="/graph.js"></script>
+  </body>
+</html>

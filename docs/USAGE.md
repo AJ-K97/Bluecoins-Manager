@@ -94,6 +94,18 @@ python3 main.py convert --bank HSBC --input path/to/file.csv --account "My Bank"
 ```
 This will also trigger the AI categorization for any unknown transactions!
 
+### C. Agent Memory Graph (Web)
+To visualize how keywords connect to categories (with edge reason + weight), run:
+```bash
+python3 main.py graph-web --host 127.0.0.1 --port 8787 --open-browser
+```
+Then open `http://127.0.0.1:8787`.
+
+Graph notes:
+- Nodes are keywords and categories.
+- Edge label is the top stored AI/review reasoning.
+- Edge thickness represents learned strength (occurrence count + confidence + verification ratio).
+
 ## 4. 🧠 Local LLM Pipeline (Private + Incremental)
 
 For a complete runbook on building a local model workflow that learns from your transactions and custom skills, see:
