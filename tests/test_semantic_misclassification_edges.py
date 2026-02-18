@@ -6,7 +6,7 @@ try:
     import pytest
 except ModuleNotFoundError:  # pragma: no cover - only for unittest-only envs
     raise unittest.SkipTest("pytest is required for this module")
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from src.ai import CategorizerAI
 from src.database import Category, MerchantKeywordAlias
@@ -139,6 +139,8 @@ async def test_resolver_prefers_high_verified_alias_when_phrase_is_ambiguous(db_
 async def test_resolver_near_match_with_generic_phrase_prefers_most_verified_alias(db_session):
     # With a highly generic phrase ("UNITED"), overlap is not enough to distinguish intent.
     # Current resolver behavior is to favor the more verified alias deterministically.
+    await db_session.execute(delete(MerchantKeywordAlias))
+    await db_session.commit()
     db_session.add_all(
         [
             MerchantKeywordAlias(

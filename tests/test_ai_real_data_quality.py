@@ -20,6 +20,7 @@ from src.database import (
     AIMemory,
     Account,
     Category,
+    CategoryBenchmarkItem,
     Transaction,
 )
 from src.patterns import extract_pattern_key_result
@@ -463,7 +464,10 @@ async def test_suggest_category_prefers_keyword_verified_precedent_before_llm(db
     assert tx_type == "expense"
     assert cat_id == grocery.id
     assert conf >= 0.9
-    assert "Keyword verified precedent" in reason
+    assert (
+        "Keyword verified precedent" in reason
+        or "Merchant category precedent" in reason
+    )
     assert ai.prompts == []  # no LLM call when deterministic keyword precedent is strong
 
 
@@ -487,3 +491,132 @@ async def test_internal_transfer_heuristic_does_not_override_salary_rows(db_sess
     assert cat_id == salary.id
     assert conf > 0.9
     assert ai.prompts  # salary should go through normal candidate path, not transfer shortcut
+
+
+@pytest.mark.asyncio
+async def test_external_transfer_markers_do_not_trigger_internal_transfer_shortcut(db_session):
+    _, cats = await _seed_core_reference_data(db_session)
+    expense_transfer = cats["Others>Transfer>expense"]
+
+    payload = json.dumps(
+        {
+            "candidates": [
+                {
+                    "id": expense_transfer.id,
+                    "type": "expense",
+                    "confidence": 0.88,
+                    "reasoning": "External transfer-like expense in configured taxonomy.",
+                }
+            ]
+        }
+    )
+    ai = StubCategorizer([payload])
+    desc = (
+        "TRANSFER RTP 067872 27775224 NOTPROVIDED HKBAAU2SXXXN20260118 "
+        "INTERNET BANKING"
+    )
+    cat_id, conf, _reason, tx_type = await ai.suggest_category(
+        desc,
+        db_session,
+        expected_type="expense",
+    )
+
+    assert tx_type == "expense"
+    assert cat_id == expense_transfer.id
+    assert conf >= 0.8
+    assert ai.prompts  # should pass through candidate path, not internal transfer shortcut
+
+
+@pytest.mark.asyncio
+async def test_probable_transfer_rail_shortcut_when_expected_type_unknown(db_session):
+    ai = StubCategorizer(
+        [
+            json.dumps(
+                {
+                    "candidates": [
+                        {"id": 999, "type": "income", "confidence": 0.99, "reasoning": "Should not be used."}
+                    ]
+                }
+            )
+        ]
+    )
+    desc = (
+        "TRANSFER RTP 774001 214179124 NOTPROVIDED HKBAAU2SXXXN20251201000000055578740 "
+        "Wise Transfer YRTM90673 INTERNET BANKING"
+    )
+    cat_id, conf, reason, tx_type = await ai.suggest_category(
+        desc,
+        db_session,
+        expected_type=None,
+    )
+    assert tx_type == "transfer"
+    assert cat_id is None
+    assert conf >= 0.9
+    assert "Probable transfer rails detected" in reason
+    assert ai.prompts == []  # deterministic shortcut; no LLM call
+
+
+@pytest.mark.asyncio
+async def test_merchant_category_precedent_uses_verified_and_benchmark_consensus(db_session):
+    account, cats = await _seed_core_reference_data(db_session)
+    shopping = cats["Entertainment>Shopping>expense"]
+
+    db_session.add_all(
+        [
+            Transaction(
+                date=datetime(2026, 1, 2),
+                description="SUPER CHEAP AUTO ROCKINGHAM",
+                amount=-45.0,
+                type="expense",
+                account_id=account.id,
+                category_id=shopping.id,
+                is_verified=True,
+            ),
+            CategoryBenchmarkItem(
+                description="SUPER CHEAP AUTO 08JAN26 VISA AUD SUPER CHEAP AUTO ROCKINGHAM AU",
+                expected_category_id=shopping.id,
+                expected_parent_name="Entertainment",
+                expected_category_name="Shopping",
+                expected_type="expense",
+                source_file="unit-merchant-precedent",
+                label_source="manual_label",
+            ),
+            CategoryBenchmarkItem(
+                description="SUPER CHEAP AUTO 20JAN26 VISA AUD SUPER CHEAP AUTO AU",
+                expected_category_id=shopping.id,
+                expected_parent_name="Entertainment",
+                expected_category_name="Shopping",
+                expected_type="expense",
+                source_file="unit-merchant-precedent",
+                label_source="manual_label",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    ai = StubCategorizer(
+        [
+            json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "id": cats["Transportation>Fuel>expense"].id,
+                            "type": "expense",
+                            "confidence": 0.99,
+                            "reasoning": "Should not be used when merchant precedent is strong.",
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+    cat_id, conf, reason, tx_type = await ai.suggest_category(
+        "SUPER CHEAP AUTO 08JAN26 ATMA896 19:26:19 VISA AUD ROCKINGHAM AU",
+        db_session,
+        expected_type="expense",
+    )
+    assert tx_type == "expense"
+    assert cat_id == shopping.id
+    assert conf >= 0.85
+    assert "Merchant category precedent" in reason
+    assert ai.prompts == []  # deterministic precedent path should avoid LLM call

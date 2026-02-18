@@ -32,6 +32,7 @@ from src.ai_config import close_ollama_client
 from src.benchmark import (
     clear_benchmark_item_label,
     import_benchmark_csv,
+    learn_aliases_from_benchmark,
     list_benchmark_items,
     list_benchmark_runs,
     score_benchmark_dataset,
@@ -371,6 +372,7 @@ async def benchmark_command(args):
                 session,
                 args.input,
                 source_name=args.source_name,
+                bank_name=args.bank,
             )
             print(msg)
             if not ok:
@@ -487,6 +489,16 @@ async def benchmark_command(args):
                     f"memory={run.memory_score:.2f}/100 coverage={run.memory_coverage:.2f}% "
                     f"n={run.evaluated_items}"
                 )
+        elif args.benchmark_action == "learn-aliases":
+            ok, msg, _stats = await learn_aliases_from_benchmark(
+                session,
+                source_file=args.source_file,
+                limit=args.limit,
+                include_transfer=args.include_transfer,
+            )
+            print(msg)
+            if not ok:
+                return
         elif args.benchmark_action == "review":
             rows = await list_benchmark_items(
                 session,
@@ -716,8 +728,12 @@ async def main():
     benchmark_subparsers = benchmark_parser.add_subparsers(dest="benchmark_action", required=True)
 
     benchmark_import = benchmark_subparsers.add_parser("import-csv")
-    benchmark_import.add_argument("--input", required=True, help="Path to CSV dataset.")
+    benchmark_import.add_argument("--input", required=True, help="Path to CSV or PDF dataset.")
     benchmark_import.add_argument("--source-name", help="Optional logical source name.")
+    benchmark_import.add_argument(
+        "--bank",
+        help="Optional bank config name (required for PDF, optional for bank-formatted CSV like Wise).",
+    )
 
     benchmark_list = benchmark_subparsers.add_parser("list")
     benchmark_list.add_argument("--limit", type=int, default=50)
@@ -734,11 +750,24 @@ async def main():
     benchmark_score = benchmark_subparsers.add_parser("score")
     benchmark_score.add_argument("--model", default="llama3.1:8b", help="LLM model name")
     benchmark_score.add_argument("--limit", type=int, help="Evaluate first N labeled rows.")
-    benchmark_score.add_argument("--source-file", help="Filter by source name.")
+    benchmark_score.add_argument(
+        "--source-file",
+        nargs="+",
+        help="Filter by source name(s). Supports multiple values and comma-separated lists.",
+    )
     benchmark_score.add_argument("--show-errors", type=int, default=10, help="Print first N mismatches.")
 
     benchmark_runs = benchmark_subparsers.add_parser("runs")
     benchmark_runs.add_argument("--limit", type=int, default=20)
+
+    benchmark_learn_aliases = benchmark_subparsers.add_parser("learn-aliases")
+    benchmark_learn_aliases.add_argument("--source-file", help="Filter by source name.")
+    benchmark_learn_aliases.add_argument("--limit", type=int, help="Maximum rows to process.")
+    benchmark_learn_aliases.add_argument(
+        "--include-transfer",
+        action="store_true",
+        help="Also learn aliases from transfer-labeled rows (default skips transfer).",
+    )
 
     benchmark_review = benchmark_subparsers.add_parser("review")
     benchmark_review.add_argument("--source-file", help="Filter by source name.")

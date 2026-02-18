@@ -2,7 +2,14 @@ import ollama
 import re
 from collections import Counter
 from sqlalchemy import select
-from src.database import Category, Transaction, AIMemory, AIGlobalMemory, AICategoryUnderstanding
+from src.database import (
+    Category,
+    Transaction,
+    AIMemory,
+    AIGlobalMemory,
+    AICategoryUnderstanding,
+    CategoryBenchmarkItem,
+)
 from src.keyword_resolver import KeywordResolver
 
 from src.ai_config import get_ollama_client
@@ -64,15 +71,74 @@ class CategorizerAI:
         if any(k in text for k in {"SALARY", "PAYROLL", "WAGE", "BONUS"}):
             return False
         # Strong cues for own-account movement.
-        internal_markers = {
+        strong_internal_markers = {
             "JOINT ACCOUNT",
             "JOINT BANK TRANSFE",
-            "INTERNET BANKING",
             "OWN ACCOUNT",
             "BETWEEN ACCOUNTS",
             "ACCOUNT TRANSFER",
+            "INTERNAL TRANSFER",
+            "TO SAVINGS",
+            "FROM SAVINGS",
         }
-        return any(m in text for m in internal_markers)
+        if any(m in text for m in strong_internal_markers):
+            return True
+
+        # External transfer markers should not be auto-classified as internal transfers.
+        external_markers = {
+            "RTP",
+            "SWIFT",
+            " BIC ",
+            "OSKO",
+            "PAYID",
+            "NOTPROVIDED",
+        }
+        if any(m in f" {text} " for m in external_markers):
+            return False
+
+        # INTERNET BANKING by itself is too broad; require at least one stronger co-cue.
+        if "INTERNET BANKING" in text:
+            co_cues = {"JOINT", "OWN", "BETWEEN ACCOUNTS", "SAVINGS"}
+            return any(c in text for c in co_cues)
+
+        return False
+
+    def _looks_like_probable_transfer(self, description: str) -> bool:
+        """
+        Detect probable transfer/payment-rail movements that should be typed as transfer
+        when expected type is unknown.
+        """
+        text = f" {(description or '').upper()} "
+        if "TRANSFER" not in text:
+            return False
+
+        transfer_rail_markers = {
+            " RTP ",
+            "WISE TRANSFER",
+            " OSKO ",
+            " PAYID ",
+            " SWIFT ",
+            " BIC ",
+            " NOTPROVIDED ",
+        }
+        if not any(m in text for m in transfer_rail_markers):
+            return False
+
+        # Avoid false positives for card-purchase statement noise.
+        card_purchase_markers = {
+            " VISA ",
+            " EFTPOS ",
+            " ATM ",
+            " CARD ",
+            " PURCHASE ",
+            " DEBIT ",
+            " CREDIT ",
+            " PAYPAL *",
+        }
+        if any(m in text for m in card_purchase_markers):
+            return False
+
+        return True
 
     async def _get_exact_verified_precedent(self, description, session):
         desc = (description or "").strip()
@@ -197,6 +263,97 @@ class CategorizerAI:
             "reasoning": (
                 f"Keyword verified precedent ({keyword}): "
                 f"{top_count}/{len(keys)} verified rows matched."
+            ),
+        }
+
+    async def _get_merchant_category_precedent(self, description, session, expected_type=None):
+        """
+        Consensus precedent across verified transactions + labeled benchmark rows.
+        """
+        resolver = KeywordResolver()
+        resolved = await resolver.resolve(description, session)
+        keyword = (resolved.keyword or "").strip().upper()
+        if len(keyword) < 3 or keyword in {
+            "UNKNOWN",
+            "TRANSFER",
+            "PAYMENT",
+            "VISA",
+            "DEBIT",
+            "CREDIT",
+            "PURCHASE",
+            "ATM",
+            "EFTPOS",
+            "CARD",
+        }:
+            return None
+
+        expected_type = (expected_type or "").strip().lower()
+        if expected_type not in {"expense", "income"}:
+            expected_type = None
+
+        weighted_counts = Counter()
+        verified_count = 0
+        benchmark_count = 0
+
+        tx_stmt = (
+            select(Transaction)
+            .where(
+                Transaction.is_verified.is_(True),
+                Transaction.category_id.is_not(None),
+                Transaction.description.ilike(f"%{keyword}%"),
+            )
+            .order_by(Transaction.date.desc())
+            .limit(200)
+        )
+        if expected_type:
+            tx_stmt = tx_stmt.where(Transaction.type == expected_type)
+        tx_res = await session.execute(tx_stmt)
+        tx_rows = tx_res.scalars().all()
+        for tx in tx_rows:
+            tx_type = (tx.type or "").lower()
+            if tx_type not in {"expense", "income"} or not tx.category_id:
+                continue
+            weighted_counts[(tx_type, int(tx.category_id))] += 2.0
+            verified_count += 1
+
+        bench_stmt = (
+            select(CategoryBenchmarkItem)
+            .where(
+                CategoryBenchmarkItem.expected_category_id.is_not(None),
+                CategoryBenchmarkItem.expected_type.in_(["expense", "income"]),
+                CategoryBenchmarkItem.description.ilike(f"%{keyword}%"),
+            )
+            .order_by(CategoryBenchmarkItem.id.desc())
+            .limit(300)
+        )
+        if expected_type:
+            bench_stmt = bench_stmt.where(CategoryBenchmarkItem.expected_type == expected_type)
+        bench_res = await session.execute(bench_stmt)
+        bench_rows = bench_res.scalars().all()
+        for row in bench_rows:
+            row_type = (row.expected_type or "").lower()
+            if row_type not in {"expense", "income"} or not row.expected_category_id:
+                continue
+            weighted_counts[(row_type, int(row.expected_category_id))] += 1.0
+            benchmark_count += 1
+
+        if not weighted_counts:
+            return None
+
+        (top_type, top_cat), top_weight = weighted_counts.most_common(1)[0]
+        total_weight = sum(weighted_counts.values())
+        ratio = top_weight / max(1.0, total_weight)
+        if top_weight < 3.0 or ratio < 0.68:
+            return None
+
+        conf = min(0.98, 0.84 + (ratio * 0.10) + (min(total_weight, 12.0) * 0.003))
+        return {
+            "type": top_type,
+            "category_id": top_cat,
+            "confidence": conf,
+            "reasoning": (
+                f"Merchant category precedent ({keyword}): "
+                f"consensus ratio {ratio:.2f} from verified={verified_count}, benchmark={benchmark_count}."
             ),
         }
 
@@ -648,6 +805,10 @@ Text:
         Returns (category_id, confidence, reasoning, type)
         """
         try:
+            normalized_expected_type = (expected_type or "").strip().lower()
+            if normalized_expected_type not in {"expense", "income"}:
+                normalized_expected_type = None
+
             precedent = await self._get_exact_verified_precedent(description, session)
             if precedent:
                 if precedent["type"] == "transfer":
@@ -659,10 +820,31 @@ Text:
                     precedent["type"],
                 )
 
+            if not normalized_expected_type and self._looks_like_probable_transfer(description):
+                return (
+                    None,
+                    0.90,
+                    "Probable transfer rails detected (RTP/Wise Transfer/OSKO style marker).",
+                    "transfer",
+                )
+
+            merchant_precedent = await self._get_merchant_category_precedent(
+                description,
+                session,
+                expected_type=normalized_expected_type,
+            )
+            if merchant_precedent:
+                return (
+                    int(merchant_precedent["category_id"]),
+                    merchant_precedent["confidence"],
+                    merchant_precedent["reasoning"],
+                    merchant_precedent["type"],
+                )
+
             keyword_precedent = await self._get_keyword_verified_precedent(
                 description,
                 session,
-                expected_type=expected_type,
+                expected_type=normalized_expected_type,
                 amount_hint=amount_hint,
             )
             if keyword_precedent:
@@ -686,7 +868,7 @@ Text:
                 session,
                 min_candidates=3,
                 extra_instruction=extra_instruction,
-                expected_type=expected_type,
+                expected_type=normalized_expected_type,
                 amount_hint=amount_hint,
             )
             if not candidates:

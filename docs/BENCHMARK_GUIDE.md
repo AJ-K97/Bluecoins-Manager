@@ -16,8 +16,11 @@ Outputs are normalized scores between `0` and `100`:
 
 ```bash
 python3 main.py benchmark import-csv --input /path/to/benchmark.csv --source-name batch-2026-02
+# For bank-formatted files (Wise/HSBC/ANZ) or PDFs:
+python3 main.py benchmark import-csv --input /path/to/file.pdf --bank ANZ --source-name anz-pdf
 python3 main.py benchmark list --limit 50
 python3 main.py benchmark review --source-file batch-2026-02 --unlabeled-only
+python3 main.py benchmark learn-aliases --source-file batch-2026-02
 python3 main.py benchmark score --model llama3.1:8b --source-file batch-2026-02 --show-errors 20
 python3 main.py benchmark runs --limit 20
 ```
@@ -28,10 +31,18 @@ python3 main.py benchmark runs --limit 20
 python3 main.py benchmark import-csv --input /path/to/benchmark.csv --source-name my-batch
 ```
 
+For PDF statements (and bank-formatted CSVs), pass `--bank`:
+
+```bash
+python3 main.py benchmark import-csv --input /path/to/statement.pdf --bank ANZ --source-name anz-statement
+python3 main.py benchmark import-csv --input /path/to/Wise_transaction-history.csv --bank Wise --source-name wise-history
+```
+
 Behavior:
 - Adds one benchmark row per CSV row.
 - Auto-labels rows when category columns resolve unambiguously.
 - Leaves unresolved rows as pending for manual review.
+- If no explicit `description` column exists (common in Wise exports), importer derives description from fields such as `Target name`, `Source name`, `Reference`, and `Note`.
 
 ## 2) Inspect current rows
 
@@ -104,6 +115,18 @@ python3 main.py benchmark runs --limit 20
 ```
 
 Use this to track score drift over time and compare models/prompt changes.
+
+## 7) Learn merchant aliases from benchmark labels
+
+Use this to strengthen merchant-key normalization from your curated benchmark labels.
+
+```bash
+python3 main.py benchmark learn-aliases --source-file my-batch
+```
+
+Options:
+- `--limit N`: process only first N labeled rows
+- `--include-transfer`: include transfer-labeled rows (default skips them)
 
 ## CSV Format
 

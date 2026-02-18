@@ -9,6 +9,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import selectinload
 
 from src.ai import CategorizerAI
+from src.parser import BankParser
 from src.database import (
     AICategoryUnderstanding,
     AIMemory,
@@ -27,6 +28,21 @@ def _normalize_header(name: str) -> str:
         text = text.replace(ch, " ")
     text = "_".join(x for x in text.split() if x)
     return text
+
+
+def _pick_field(field_map, *aliases):
+    for a in aliases:
+        key = _normalize_header(a)
+        if key in field_map:
+            return field_map[key]
+    return None
+
+
+def _row_value_by_aliases(row, field_map, *aliases):
+    col = _pick_field(field_map, *aliases)
+    if not col:
+        return ""
+    return str(row.get(col) or "").strip()
 
 
 def _normalize_tx_type(value: Optional[str]) -> Optional[str]:
@@ -58,6 +74,31 @@ def _parse_amount(value: Optional[str]):
         return None
 
 
+def _derive_description_from_row(row, field_map, explicit_col: Optional[str] = None) -> str:
+    if explicit_col:
+        text = str(row.get(explicit_col) or "").strip()
+        if text:
+            return text
+
+    # Wise and bank-export friendly fallback priority.
+    candidates = [
+        _row_value_by_aliases(row, field_map, "target_name"),
+        _row_value_by_aliases(row, field_map, "source_name"),
+        _row_value_by_aliases(row, field_map, "item_or_payee"),
+        _row_value_by_aliases(row, field_map, "item"),
+        _row_value_by_aliases(row, field_map, "payee"),
+        _row_value_by_aliases(row, field_map, "merchant"),
+        _row_value_by_aliases(row, field_map, "reference"),
+        _row_value_by_aliases(row, field_map, "note"),
+        _row_value_by_aliases(row, field_map, "category"),
+        _row_value_by_aliases(row, field_map, "created_by"),
+    ]
+    for c in candidates:
+        if c:
+            return c
+    return ""
+
+
 async def _resolve_category(session, parent_name: str, category_name: str, tx_type: Optional[str] = None):
     stmt = select(Category).where(
         Category.parent_name == parent_name,
@@ -84,11 +125,73 @@ async def _resolve_category(session, parent_name: str, category_name: str, tx_ty
     return None, len(rows)
 
 
-async def import_benchmark_csv(session, csv_path: str, source_name: Optional[str] = None):
+async def import_benchmark_csv(
+    session,
+    csv_path: str,
+    source_name: Optional[str] = None,
+    bank_name: Optional[str] = None,
+):
     if not os.path.exists(csv_path):
-        return False, f"CSV file not found: {csv_path}", None
+        return False, f"File not found: {csv_path}", None
 
     source_file = (source_name or os.path.basename(csv_path) or "benchmark.csv").strip()
+    ext = os.path.splitext(csv_path)[1].lower()
+
+    # If bank is provided, parse via bank-specific parser (supports CSV and PDF).
+    if bank_name:
+        parser = BankParser()
+        try:
+            parsed_rows = parser.parse(bank_name, csv_path)
+        except Exception as e:
+            return False, f"Failed to parse {csv_path} with bank '{bank_name}': {e}", None
+
+        added = 0
+        skipped = 0
+        for i, tx in enumerate(parsed_rows, start=1):
+            desc = str(tx.get("description") or "").strip()
+            if not desc:
+                skipped += 1
+                continue
+
+            session.add(
+                CategoryBenchmarkItem(
+                    source_file=source_file,
+                    source_row_number=i,
+                    external_id=None,
+                    description=desc,
+                    amount=tx.get("amount"),
+                    tx_type=_normalize_tx_type(tx.get("type")),
+                    date=tx.get("date"),
+                    raw_row_json=json.dumps(tx, default=str, ensure_ascii=True),
+                    expected_category_id=None,
+                    expected_parent_name=None,
+                    expected_category_name=None,
+                    expected_type=None,
+                    label_source="bank_parser",
+                )
+            )
+            added += 1
+
+        await session.commit()
+        stats = {
+            "added": added,
+            "skipped": skipped,
+            "labeled": 0,
+            "source_file": source_file,
+            "bank_name": bank_name,
+        }
+        msg = (
+            f"Imported benchmark rows from '{csv_path}' using bank parser '{bank_name}'. "
+            f"added={added} skipped={skipped} labeled=0"
+        )
+        return True, msg, stats
+
+    if ext == ".pdf":
+        return (
+            False,
+            "PDF import requires --bank (e.g. --bank ANZ).",
+            None,
+        )
 
     with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
@@ -96,42 +199,41 @@ async def import_benchmark_csv(session, csv_path: str, source_name: Optional[str
             return False, "CSV header not found.", None
 
         field_map = {_normalize_header(name): name for name in reader.fieldnames}
+        description_col = _pick_field(field_map, "description", "desc", "item_or_payee", "item", "payee", "merchant")
 
-        def pick(*aliases):
-            for a in aliases:
-                key = _normalize_header(a)
-                if key in field_map:
-                    return field_map[key]
-            return None
-
-        description_col = pick("description", "desc", "item_or_payee", "item", "payee", "merchant")
-        if not description_col:
-            return (
-                False,
-                "CSV must include a description column (e.g., description/desc/item_or_payee).",
-                None,
-            )
-
-        amount_col = pick("amount", "amt")
-        date_col = pick("date", "transaction_date")
-        tx_type_col = pick("type", "tx_type", "transaction_type")
-        external_id_col = pick("id", "external_id", "tx_id", "reference")
-        parent_col = pick("parent_category", "parent", "expected_parent")
-        category_col = pick("category", "sub_category", "subcategory", "expected_category")
-        expected_type_col = pick("expected_type", "label_type")
+        amount_col = _pick_field(
+            field_map,
+            "amount",
+            "amt",
+            "source_amount_after_fees",
+            "target_amount_after_fees",
+        )
+        date_col = _pick_field(field_map, "date", "transaction_date", "created_on", "finished_on")
+        tx_type_col = _pick_field(field_map, "type", "tx_type", "transaction_type")
+        direction_col = _pick_field(field_map, "direction")
+        external_id_col = _pick_field(field_map, "id", "external_id", "tx_id", "reference")
+        parent_col = _pick_field(field_map, "parent_category", "parent", "expected_parent")
+        category_col = _pick_field(field_map, "category", "sub_category", "subcategory", "expected_category")
+        expected_type_col = _pick_field(field_map, "expected_type", "label_type")
 
         added = 0
         skipped = 0
         labeled = 0
 
         for row_index, row in enumerate(reader, start=2):
-            description = (row.get(description_col) or "").strip()
+            description = _derive_description_from_row(row, field_map, explicit_col=description_col)
             if not description:
                 skipped += 1
                 continue
 
             amount = _parse_amount(row.get(amount_col)) if amount_col else None
             tx_type = _normalize_tx_type(row.get(tx_type_col)) if tx_type_col else None
+            if tx_type is None and direction_col:
+                direction = str(row.get(direction_col) or "").strip().upper()
+                if direction == "IN":
+                    tx_type = "income"
+                elif direction == "OUT":
+                    tx_type = "expense"
             date_value = _parse_date(row.get(date_col)) if date_col else None
             external_id = (row.get(external_id_col) or "").strip() if external_id_col else None
 
@@ -351,6 +453,18 @@ async def score_benchmark_dataset(
     source_file: Optional[str] = None,
     progress_callback=None,
 ):
+    source_filters = []
+    if source_file:
+        if isinstance(source_file, str):
+            source_filters = [x.strip() for x in source_file.split(",") if x.strip()]
+        elif isinstance(source_file, (list, tuple, set)):
+            for raw in source_file:
+                for token in str(raw or "").split(","):
+                    token = token.strip()
+                    if token:
+                        source_filters.append(token)
+    source_filters = list(dict.fromkeys(source_filters))
+
     stmt = (
         select(CategoryBenchmarkItem)
         .options(selectinload(CategoryBenchmarkItem.expected_category))
@@ -362,8 +476,8 @@ async def score_benchmark_dataset(
         )
         .order_by(CategoryBenchmarkItem.id.asc())
     )
-    if source_file:
-        stmt = stmt.where(CategoryBenchmarkItem.source_file == source_file)
+    if source_filters:
+        stmt = stmt.where(CategoryBenchmarkItem.source_file.in_(source_filters))
     if limit:
         stmt = stmt.limit(max(1, int(limit)))
 
@@ -545,3 +659,45 @@ async def list_benchmark_runs(session, limit: int = 20):
         stmt = stmt.limit(max(1, int(limit)))
     res = await session.execute(stmt)
     return res.scalars().all()
+
+
+async def learn_aliases_from_benchmark(
+    session,
+    source_file: Optional[str] = None,
+    limit: Optional[int] = None,
+    include_transfer: bool = False,
+):
+    resolver = KeywordResolver()
+    stmt = (
+        select(CategoryBenchmarkItem)
+        .where(
+            CategoryBenchmarkItem.description.is_not(None),
+            CategoryBenchmarkItem.description != "",
+            CategoryBenchmarkItem.expected_type.is_not(None),
+        )
+        .order_by(CategoryBenchmarkItem.id.asc())
+    )
+    if source_file:
+        stmt = stmt.where(CategoryBenchmarkItem.source_file == source_file)
+    if limit:
+        stmt = stmt.limit(max(1, int(limit)))
+
+    res = await session.execute(stmt)
+    rows = res.scalars().all()
+    if not rows:
+        return False, "No labeled benchmark rows found for alias learning.", None
+
+    seen = 0
+    learned = 0
+    for row in rows:
+        expected_type = (row.expected_type or "").strip().lower()
+        if expected_type not in {"expense", "income"} and not include_transfer:
+            continue
+        seen += 1
+        ok = await resolver.learn_from_verified(session, row.description, transaction_id=None)
+        if ok:
+            learned += 1
+
+    await session.commit()
+    stats = {"seen": seen, "learned_updates": learned, "source_file": source_file}
+    return True, f"Benchmark alias learning complete. seen={seen} learned_updates={learned}", stats
