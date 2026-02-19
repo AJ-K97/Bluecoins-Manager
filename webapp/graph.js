@@ -11,6 +11,7 @@ const state = {
   showNodeText: false,
   showInitialMissLinks: true,
   connectedNodeScale: 0.78,
+  nodeDrawerOpen: true,
   drawerOpen: true,
   qualityDrawerOpen: false,
   insightsDrawerOpen: false,
@@ -27,6 +28,9 @@ const state = {
   timelinePulse: 0,
   interactionPulseByNode: new Map(),
   backgroundFieldLastUpdateMs: 0,
+  nodeDetailRows: [],
+  nodeDetailPage: 0,
+  nodeDetailPageSize: 8,
   breathe: {
     enabled: true,
     globalPulse: true,
@@ -51,8 +55,20 @@ const MOTION_EASE = d3.easeCubicInOut;
 
 const svg = d3.select("#graphSvg");
 const statsPill = document.getElementById("statsPill");
-const detailBody = document.getElementById("detailBody");
+const nodeDetailPanel = document.getElementById("nodeDetailPanel");
+const nodeDetailTitle = document.getElementById("nodeDetailTitle");
+const nodeDetailSubtitle = document.getElementById("nodeDetailSubtitle");
+const nodeDetailMeta = document.getElementById("nodeDetailMeta");
+const nodeDetailBody = document.getElementById("nodeDetailBody");
+const nodeTxPanel = document.getElementById("nodeTxPanel");
+const nodeTxCount = document.getElementById("nodeTxCount");
+const nodeTxTableBody = document.getElementById("nodeTxTableBody");
+const nodeTxPrevBtn = document.getElementById("nodeTxPrevBtn");
+const nodeTxNextBtn = document.getElementById("nodeTxNextBtn");
+const nodeTxPageInfo = document.getElementById("nodeTxPageInfo");
 const detailPanel = document.getElementById("detailPanel");
+const workspace = document.getElementById("workspace");
+const externalPanels = document.getElementById("externalPanels");
 const qualityPanel = document.getElementById("qualityPanel");
 const insightsPanel = document.getElementById("insightsPanel");
 
@@ -92,6 +108,8 @@ const backgroundFieldIntensityRange = document.getElementById("backgroundFieldIn
 const backgroundFieldIntensityValue = document.getElementById("backgroundFieldIntensityValue");
 const drawerToggleBtn = document.getElementById("drawerToggleBtn");
 const drawerCloseBtn = document.getElementById("drawerCloseBtn");
+const nodeDrawerToggleBtn = document.getElementById("nodeDrawerToggleBtn");
+const nodeDetailCloseBtn = document.getElementById("nodeDetailCloseBtn");
 const qualityDrawerToggleBtn = document.getElementById("qualityDrawerToggleBtn");
 const qualityCloseBtn = document.getElementById("qualityCloseBtn");
 const insightsDrawerToggleBtn = document.getElementById("insightsDrawerToggleBtn");
@@ -403,21 +421,93 @@ function buildQueryString() {
   return params.toString();
 }
 
-function setDetailPanel(content) {
-  detailBody.textContent = content;
+function resetNodeTable() {
+  state.nodeDetailRows = [];
+  state.nodeDetailPage = 0;
+  if (nodeTxPanel) nodeTxPanel.classList.add("hidden");
+  if (nodeTxTableBody) nodeTxTableBody.innerHTML = "";
+  if (nodeTxCount) nodeTxCount.textContent = "0";
+  if (nodeTxPageInfo) nodeTxPageInfo.textContent = "Page 1 / 1";
+  if (nodeTxPrevBtn) nodeTxPrevBtn.disabled = true;
+  if (nodeTxNextBtn) nodeTxNextBtn.disabled = true;
+}
+
+function sortRowsByDateDesc(rows) {
+  return rows.sort((a, b) => {
+    const left = timelineMsFromDate(a.date) || 0;
+    const right = timelineMsFromDate(b.date) || 0;
+    return right - left;
+  });
+}
+
+function renderNodeTablePage() {
+  if (!nodeTxPanel || !nodeTxTableBody) return;
+  const rows = state.nodeDetailRows || [];
+  if (!rows.length) {
+    resetNodeTable();
+    return;
+  }
+
+  const pageSize = Math.max(1, Number(state.nodeDetailPageSize) || 8);
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  state.nodeDetailPage = Math.max(0, Math.min(state.nodeDetailPage, totalPages - 1));
+  const start = state.nodeDetailPage * pageSize;
+  const pageRows = rows.slice(start, start + pageSize);
+
+  nodeTxPanel.classList.remove("hidden");
+  nodeTxTableBody.innerHTML = pageRows
+    .map((row) => {
+      return `<tr>
+        <td>${escapeHtml(row.tx_id || "-")}</td>
+        <td>${escapeHtml(formatDate(row.date))}</td>
+        <td title="${escapeHtml(row.label || "-")}">${escapeHtml(row.label || "-")}</td>
+        <td>${row.amount === null || row.amount === undefined ? "-" : escapeHtml(formatAmount(Number(row.amount)))}</td>
+        <td>${escapeHtml(Number(row.weight || 0).toFixed(2))}</td>
+      </tr>`;
+    })
+    .join("");
+  if (nodeTxCount) nodeTxCount.textContent = `${rows.length}`;
+  if (nodeTxPageInfo) nodeTxPageInfo.textContent = `Page ${state.nodeDetailPage + 1} / ${totalPages}`;
+  if (nodeTxPrevBtn) nodeTxPrevBtn.disabled = state.nodeDetailPage <= 0;
+  if (nodeTxNextBtn) nodeTxNextBtn.disabled = state.nodeDetailPage >= totalPages - 1;
+}
+
+function setDetailPanel(payload) {
+  const safe = payload || {};
+  if (nodeDetailTitle) nodeDetailTitle.textContent = safe.title || "Selection";
+  if (nodeDetailSubtitle) nodeDetailSubtitle.textContent = safe.subtitle || "";
+  if (nodeDetailMeta) {
+    const chips = (safe.chips || []).slice(0, 8);
+    nodeDetailMeta.innerHTML = chips.map((item) => `<span class="node-detail-chip">${escapeHtml(item)}</span>`).join("");
+  }
+  if (nodeDetailBody) {
+    const paragraphs = (safe.body || []).filter(Boolean);
+    nodeDetailBody.innerHTML = paragraphs.map((line) => `<div>${escapeHtml(line)}</div>`).join("");
+  }
+
+  const txRows = safe.txRows || [];
+  if (!txRows.length) {
+    resetNodeTable();
+  } else {
+    state.nodeDetailRows = sortRowsByDateDesc(txRows.slice());
+    state.nodeDetailPage = 0;
+    renderNodeTablePage();
+  }
 }
 
 function setDefaultDetail() {
-  setDetailPanel(
-    [
-      "Hover a node or edge to inspect details.",
+  setDetailPanel({
+    title: "Selection",
+    subtitle: "Hover a node or edge to inspect details.",
+    chips: ["Graph Explorer", "Read-only Analysis"],
+    body: [
       "Click a node to lock focus and zoom. Click blank canvas to clear focus.",
-      "",
       "Merchant nodes connect to categories.",
       "Small satellite nodes are transactions linked by keyword.",
       "Subtle red links show initial LLM category guesses that were later corrected.",
-    ].join("\n"),
-  );
+    ],
+    txRows: [],
+  });
 }
 
 function updateStats(stats) {
@@ -450,6 +540,7 @@ function persistSettings() {
       showNodeText: state.showNodeText,
       showInitialMissLinks: state.showInitialMissLinks,
       connectedNodeScale: state.connectedNodeScale,
+      nodeDrawerOpen: state.nodeDrawerOpen,
       drawerOpen: state.drawerOpen,
       qualityDrawerOpen: state.qualityDrawerOpen,
       insightsDrawerOpen: state.insightsDrawerOpen,
@@ -471,6 +562,7 @@ function loadPersistedSettings() {
     if (typeof parsed.showEdgeText === "boolean") state.showEdgeText = parsed.showEdgeText;
     if (typeof parsed.showNodeText === "boolean") state.showNodeText = parsed.showNodeText;
     if (typeof parsed.showInitialMissLinks === "boolean") state.showInitialMissLinks = parsed.showInitialMissLinks;
+    if (typeof parsed.nodeDrawerOpen === "boolean") state.nodeDrawerOpen = parsed.nodeDrawerOpen;
     if (typeof parsed.drawerOpen === "boolean") state.drawerOpen = parsed.drawerOpen;
     if (typeof parsed.qualityDrawerOpen === "boolean") state.qualityDrawerOpen = parsed.qualityDrawerOpen;
     if (typeof parsed.insightsDrawerOpen === "boolean") state.insightsDrawerOpen = parsed.insightsDrawerOpen;
@@ -590,7 +682,14 @@ function setDrawerOpen(isOpen) {
   state.drawerOpen = Boolean(isOpen);
   if (!detailPanel || !drawerToggleBtn) return;
   detailPanel.classList.toggle("collapsed", !state.drawerOpen);
-  drawerToggleBtn.classList.toggle("hidden", state.drawerOpen);
+  updateWorkspaceLayout();
+  persistSettings();
+}
+
+function setNodeDrawerOpen(isOpen) {
+  state.nodeDrawerOpen = Boolean(isOpen);
+  if (!nodeDetailPanel || !nodeDrawerToggleBtn) return;
+  nodeDetailPanel.classList.toggle("collapsed", !state.nodeDrawerOpen);
   persistSettings();
 }
 
@@ -598,7 +697,7 @@ function setQualityDrawerOpen(isOpen) {
   state.qualityDrawerOpen = Boolean(isOpen);
   if (!qualityPanel || !qualityDrawerToggleBtn) return;
   qualityPanel.classList.toggle("collapsed", !state.qualityDrawerOpen);
-  qualityDrawerToggleBtn.classList.toggle("hidden", state.qualityDrawerOpen);
+  updateWorkspaceLayout();
   persistSettings();
 }
 
@@ -606,8 +705,17 @@ function setInsightsDrawerOpen(isOpen) {
   state.insightsDrawerOpen = Boolean(isOpen);
   if (!insightsPanel || !insightsDrawerToggleBtn) return;
   insightsPanel.classList.toggle("collapsed", !state.insightsDrawerOpen);
-  insightsDrawerToggleBtn.classList.toggle("hidden", state.insightsDrawerOpen);
+  updateWorkspaceLayout();
   persistSettings();
+}
+
+function updateWorkspaceLayout() {
+  if (!workspace) return;
+  const hasExternal = state.drawerOpen || state.qualityDrawerOpen || state.insightsDrawerOpen;
+  workspace.classList.toggle("has-side-panel", hasExternal);
+  if (externalPanels) {
+    externalPanels.classList.toggle("hidden", !hasExternal);
+  }
 }
 
 async function fetchJsonOrThrow(url, label) {
@@ -1066,23 +1174,139 @@ function applyVisualState(options = {}) {
 }
 
 function renderNodeDetails(node, edgeData, visibleEdgeIds = null) {
-  if (node.kind === "transaction") {
-    setDetailPanel(
-      [
-        "Transaction Node",
-        `${node.label || "-"}`,
-        `Date: ${formatDate(node.date)}`,
-        `Amount: ${formatAmount(node.amount)}`,
-        `Type: ${node.tx_type || "unknown"}`,
-      ].join("\n"),
-    );
-    return;
-  }
-
+  const selections = state.selections;
+  const nodeById = new Map((selections?.nodeData || []).map((item) => [item.id, item]));
   const nodeEdges = edgeData.filter((edge) => {
     if (visibleEdgeIds && !visibleEdgeIds.has(edge.id)) return false;
     return sourceId(edge) === node.id || targetId(edge) === node.id;
   });
+  const txRows = [];
+  nodeEdges.forEach((edge) => {
+    if (edge.edge_type !== "transaction_keyword") return;
+    const sid = sourceId(edge);
+    const tid = targetId(edge);
+    const txNodeId = sid === node.id ? tid : sid;
+    const txNode = nodeById.get(txNodeId);
+    txRows.push({
+      tx_id: edge.transaction_id || txNode?.transaction_id || txNode?.id || "-",
+      date: edge.transaction_date || txNode?.date || null,
+      label: edge.transaction_label || txNode?.label || "",
+      amount: txNode?.amount ?? null,
+      weight: edge.weight || 0,
+    });
+  });
+
+  if (node.kind === "transaction") {
+    setDetailPanel({
+      title: node.label || "Transaction",
+      subtitle: "Transaction Node",
+      chips: ["Transaction", `Date ${formatDate(node.date)}`],
+      body: [`Amount: ${formatAmount(node.amount)}`, `Type: ${node.tx_type || "unknown"}`],
+      txRows: [
+        {
+          tx_id: node.id,
+          date: node.date || null,
+          label: node.label || "",
+          amount: node.amount ?? null,
+          weight: 1,
+        },
+      ],
+    });
+    return;
+  }
+
+  if (node.kind === "category") {
+    const keywordEdges = nodeEdges.filter((edge) => {
+      return edge.edge_type === "keyword_category" || edge.edge_type === "llm_initial_category";
+    });
+    const keywordNodeIds = new Set();
+    const merchantRollups = new Map();
+    let confTotal = 0;
+    let confCount = 0;
+    let verifiedTotal = 0;
+    let verifiedCount = 0;
+    let initialMissTotal = 0;
+
+    keywordEdges.forEach((edge) => {
+      const sid = sourceId(edge);
+      const tid = targetId(edge);
+      const keywordNodeId = sid === node.id ? tid : sid;
+      keywordNodeIds.add(keywordNodeId);
+      const keywordNode = nodeById.get(keywordNodeId);
+      const label = edge.keyword || keywordNode?.label || keywordNodeId || "Unknown";
+      const entry = merchantRollups.get(keywordNodeId) || {
+        label,
+        weight: 0,
+        txCount: 0,
+        missCount: 0,
+      };
+      entry.weight += Number(edge.weight || 0);
+      if (edge.edge_type === "llm_initial_category") {
+        entry.missCount += Number(edge.miss_count || edge.count || 0);
+        initialMissTotal += Number(edge.miss_count || edge.count || 0);
+      }
+      if (edge.edge_type === "keyword_category") {
+        confTotal += Number(edge.avg_confidence || 0);
+        confCount += 1;
+        verifiedTotal += Number(edge.verified_ratio || 0);
+        verifiedCount += 1;
+      }
+      merchantRollups.set(keywordNodeId, entry);
+    });
+
+    const categoryTxEdges = edgeData.filter((edge) => {
+      if (visibleEdgeIds && !visibleEdgeIds.has(edge.id)) return false;
+      if (edge.edge_type !== "transaction_keyword") return false;
+      const sid = sourceId(edge);
+      const tid = targetId(edge);
+      const keywordNodeId = sid.startsWith?.("keyword::") ? sid : tid.startsWith?.("keyword::") ? tid : null;
+      return keywordNodeId && keywordNodeIds.has(keywordNodeId);
+    });
+
+    categoryTxEdges.forEach((edge) => {
+      const sid = sourceId(edge);
+      const tid = targetId(edge);
+      const keywordNodeId = sid.startsWith?.("keyword::") ? sid : tid.startsWith?.("keyword::") ? tid : null;
+      const txNodeId = keywordNodeId === sid ? tid : sid;
+      const txNode = nodeById.get(txNodeId);
+      const rollup = keywordNodeId ? merchantRollups.get(keywordNodeId) : null;
+      if (rollup) rollup.txCount += 1;
+      txRows.push({
+        tx_id: edge.transaction_id || txNode?.transaction_id || txNode?.id || "-",
+        date: edge.transaction_date || txNode?.date || null,
+        label: edge.transaction_label || txNode?.label || "",
+        amount: txNode?.amount ?? null,
+        weight: edge.weight || 0,
+      });
+    });
+
+    const topMerchants = Array.from(merchantRollups.values())
+      .sort((a, b) => b.weight - a.weight)
+      .slice(0, 6)
+      .map((entry) => `${entry.label} (w ${entry.weight.toFixed(2)} | tx ${entry.txCount})`);
+    const avgConfidence = confCount ? confTotal / confCount : 0;
+    const avgVerified = verifiedCount ? verifiedTotal / verifiedCount : 0;
+
+    setDetailPanel({
+      title: node.label,
+      subtitle: "CATEGORY NODE",
+      chips: [
+        `Keywords ${merchantRollups.size}`,
+        `Transactions ${txRows.length}`,
+        `Avg conf ${avgConfidence.toFixed(2)}`,
+        `Verified ${(avgVerified * 100).toFixed(0)}%`,
+        initialMissTotal > 0 ? `Initial misses ${initialMissTotal}` : "",
+      ].filter(Boolean),
+      body: [
+        topMerchants.length ? `Top merchants: ${topMerchants.join(" | ")}` : "No merchant links in this time window.",
+        initialMissTotal > 0
+          ? "Initial miss links represent early wrong categories that decayed as corrections accumulated."
+          : "No residual initial-miss pressure currently visible.",
+      ],
+      txRows,
+    });
+    return;
+  }
 
   const topEdges = nodeEdges
     .filter((edge) => edge.edge_type === "keyword_category")
@@ -1098,50 +1322,54 @@ function renderNodeDetails(node, edgeData, visibleEdgeIds = null) {
     .map((edge) => `${edge.keyword} -> ${edge.category_label} [initial miss x${edge.miss_count}]`);
 
   const txCount = nodeEdges.filter((edge) => edge.edge_type === "transaction_keyword").length;
-
-  setDetailPanel(
-    [
-      node.label,
-      `${node.kind.toUpperCase()} NODE`,
-      `Connections: ${nodeEdges.length}`,
-      txCount > 0 ? `Transactions linked: ${txCount}` : "",
-      initialMissEdges.length > 0 ? `Initial LLM miss links: ${initialMissEdges.length}` : "",
-      "",
-      topEdges.length ? topEdges.join("\n") : "No category connections in this time window",
-      initialMissEdges.length ? "Initial LLM links:" : "",
-      initialMissEdges.length ? initialMissEdges.join("\n") : "",
-    ]
-      .filter(Boolean)
-      .join("\n"),
-  );
+  setDetailPanel({
+    title: node.label,
+    subtitle: `${node.kind.toUpperCase()} NODE`,
+    chips: [
+      `Connections ${nodeEdges.length}`,
+      `Transactions ${txCount}`,
+      initialMissEdges.length > 0 ? `Initial misses ${initialMissEdges.length}` : "",
+    ].filter(Boolean),
+    body: [
+      topEdges.length ? `Top links: ${topEdges.join(" | ")}` : "No category connections in this time window.",
+      initialMissEdges.length ? `Initial LLM links: ${initialMissEdges.join(" | ")}` : "",
+    ].filter(Boolean),
+    txRows,
+  });
 }
 
 function renderEdgeDetails(edge) {
   if (edge.edge_type === "llm_initial_category") {
-    setDetailPanel(
-      [
-        "Initial LLM Category Guess",
-        `Keyword: ${edge.keyword}`,
+    setDetailPanel({
+      title: "Initial LLM Category Guess",
+      subtitle: edge.keyword || "Unknown keyword",
+      chips: [`Misses ${edge.miss_count || edge.count || 0}`, `Residual ${Math.round((Number(edge.decay_strength || 0) || 0) * 100)}%`],
+      body: [
         `Suggested category: ${edge.category_label}`,
         `First seen: ${formatDate(edge.first_seen_date)}`,
-        `Miss count: ${edge.miss_count || edge.count || 0}`,
         `Corrective decisions: ${edge.correction_count || 0}`,
-        `Residual strength: ${Math.round((Number(edge.decay_strength || 0) || 0) * 100)}%`,
-      ].join("\n"),
-    );
+      ],
+      txRows: [],
+    });
     return;
   }
 
   if (edge.edge_type === "transaction_keyword") {
-    setDetailPanel(
-      [
-        "Transaction -> Merchant Keyword",
-        `Keyword: ${edge.keyword}`,
-        `Transaction ID: ${edge.transaction_id}`,
-        `Date: ${formatDate(edge.transaction_date)}`,
-        `Weight: ${edge.weight.toFixed(2)}`,
-      ].join("\n"),
-    );
+    setDetailPanel({
+      title: "Transaction -> Merchant Keyword",
+      subtitle: edge.keyword || "Keyword link",
+      chips: [`Weight ${edge.weight.toFixed(2)}`],
+      body: [`Transaction ID: ${edge.transaction_id}`, `Date: ${formatDate(edge.transaction_date)}`],
+      txRows: [
+        {
+          tx_id: edge.transaction_id || "-",
+          date: edge.transaction_date || null,
+          label: edge.transaction_label || "",
+          amount: null,
+          weight: edge.weight || 0,
+        },
+      ],
+    });
     return;
   }
 
@@ -1150,18 +1378,17 @@ function renderEdgeDetails(edge) {
       .map((item) => `- (${item.count}) ${item.text}`)
       .join("\n") || "- No explicit reason captured.";
 
-  setDetailPanel(
-    [
-      `${edge.keyword} -> ${edge.category_label}`,
-      `First seen: ${formatDate(edge.first_seen_date)}`,
-      `Weight: ${edge.weight.toFixed(2)}`,
-      `Confidence: ${edge.avg_confidence.toFixed(2)}`,
-      `Verified: ${(edge.verified_ratio * 100).toFixed(0)}%`,
-      "",
-      "Reasons:",
-      reasonRollup,
-    ].join("\n"),
-  );
+  setDetailPanel({
+    title: `${edge.keyword} -> ${edge.category_label}`,
+    subtitle: "Keyword -> Category Link",
+    chips: [
+      `Weight ${edge.weight.toFixed(2)}`,
+      `Confidence ${edge.avg_confidence.toFixed(2)}`,
+      `Verified ${(edge.verified_ratio * 100).toFixed(0)}%`,
+    ],
+    body: [`First seen: ${formatDate(edge.first_seen_date)}`, `Reasons: ${reasonRollup}`],
+    txRows: [],
+  });
 }
 
 function focusNodeWithZoom(node) {
@@ -1778,7 +2005,13 @@ function renderGraph(graph) {
   state.currentZoomTransform = d3.zoomIdentity;
 
   if (!nodeData.length || !edgeData.length) {
-    setDetailPanel("No graph edges found. Import or review transactions to build memory links.");
+    setDetailPanel({
+      title: "Selection",
+      subtitle: "No graph edges found",
+      chips: ["Empty graph"],
+      body: ["Import or review transactions to build memory links."],
+      txRows: [],
+    });
     setupTimeline(graph, nodeData, edgeData);
     return;
   }
@@ -2105,7 +2338,13 @@ async function loadGraph() {
   stopTimelinePlayback();
   stopBreathingLoop();
   statsPill.textContent = "Loading graph...";
-  setDetailPanel("Loading keyword-category memory links...");
+  setDetailPanel({
+    title: "Selection",
+    subtitle: "Loading keyword-category memory links...",
+    chips: ["Loading"],
+    body: [],
+    txRows: [],
+  });
   const query = buildQueryString();
 
   try {
@@ -2117,7 +2356,13 @@ async function loadGraph() {
     loadInsights();
   } catch (error) {
     statsPill.textContent = "Failed to load graph";
-    setDetailPanel(`Could not load graph data.\n${error.message}`);
+    setDetailPanel({
+      title: "Selection",
+      subtitle: "Could not load graph data.",
+      chips: ["Load error"],
+      body: [error.message],
+      txRows: [],
+    });
     clearQualityPanels("Graph load failed. Quality metrics unavailable.");
     clearInsightsPanels("Graph load failed. Insights unavailable.");
   }
@@ -2343,6 +2588,18 @@ if (drawerCloseBtn) {
   });
 }
 
+if (nodeDrawerToggleBtn) {
+  nodeDrawerToggleBtn.addEventListener("click", () => {
+    setNodeDrawerOpen(!state.nodeDrawerOpen);
+  });
+}
+
+if (nodeDetailCloseBtn) {
+  nodeDetailCloseBtn.addEventListener("click", () => {
+    setNodeDrawerOpen(false);
+  });
+}
+
 if (qualityDrawerToggleBtn) {
   qualityDrawerToggleBtn.addEventListener("click", () => {
     setQualityDrawerOpen(true);
@@ -2362,6 +2619,20 @@ if (insightsDrawerToggleBtn) {
     setInsightsDrawerOpen(true);
     setDrawerOpen(false);
     setQualityDrawerOpen(false);
+  });
+}
+
+if (nodeTxPrevBtn) {
+  nodeTxPrevBtn.addEventListener("click", () => {
+    state.nodeDetailPage = Math.max(0, state.nodeDetailPage - 1);
+    renderNodeTablePage();
+  });
+}
+
+if (nodeTxNextBtn) {
+  nodeTxNextBtn.addEventListener("click", () => {
+    state.nodeDetailPage += 1;
+    renderNodeTablePage();
   });
 }
 
@@ -2485,6 +2756,7 @@ syncConnectedNodeScaleLabel();
 syncBreathingLabels();
 updateSettingsSectionSummaries();
 updateTimelineLabel();
+setNodeDrawerOpen(state.nodeDrawerOpen);
 setDrawerOpen(state.drawerOpen);
 setQualityDrawerOpen(state.qualityDrawerOpen);
 setInsightsDrawerOpen(state.insightsDrawerOpen);

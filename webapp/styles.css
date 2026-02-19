@@ -123,6 +123,39 @@ body {
     var(--bg-canvas);
 }
 
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 0;
+  gap: 0.74rem;
+  align-items: stretch;
+}
+
+.workspace.has-side-panel {
+  grid-template-columns: minmax(0, 1fr) minmax(350px, 36vw);
+}
+
+.external-panels {
+  min-width: 0;
+  width: 0;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+  transition: opacity 180ms ease;
+  display: flex;
+  flex-direction: column;
+}
+
+.external-panels.hidden {
+  display: none;
+}
+
+.workspace.has-side-panel .external-panels {
+  opacity: 1;
+  width: 100%;
+  pointer-events: auto;
+  overflow: visible;
+}
+
 #graphSvg {
   width: 100%;
   height: min(79vh, 980px);
@@ -132,6 +165,7 @@ body {
 }
 
 .detail-panel,
+.node-detail-panel,
 .quality-panel,
 .insights-panel {
   position: absolute;
@@ -144,6 +178,15 @@ body {
   box-shadow: var(--shadow-2);
   transition: transform 210ms ease, opacity 180ms ease;
   z-index: 14;
+}
+
+.node-detail-panel {
+  width: min(420px, calc(100% - 2rem));
+  right: 1rem;
+  padding: 0.75rem 0.88rem 0.8rem;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
 }
 
 .detail-panel {
@@ -163,6 +206,7 @@ body {
   overflow: hidden;
 }
 
+.node-detail-panel.collapsed,
 .detail-panel.collapsed,
 .quality-panel.collapsed,
 .insights-panel.collapsed {
@@ -207,7 +251,7 @@ body {
   border: 1px solid var(--line);
   background: var(--surface-2);
   color: var(--ink-soft);
-  font-size: 0.75rem;
+  font-size: 0.92rem;
   font-family: "Space Mono", monospace;
   line-height: 1;
   cursor: pointer;
@@ -222,18 +266,53 @@ body {
 
 .drawer-toggle {
   position: absolute;
-  right: 1rem;
+  right: 3.2rem;
   top: 1rem;
-  z-index: 12;
+  z-index: 28;
   box-shadow: var(--shadow-1);
 }
 
+.node-toggle {
+  right: 1rem;
+}
+
 .quality-toggle {
-  top: 3.2rem;
+  right: 5.4rem;
+  top: 1rem;
 }
 
 .insights-toggle {
-  top: 5.38rem;
+  right: 7.6rem;
+  top: 1rem;
+}
+
+.external-panels .detail-panel,
+.external-panels .quality-panel,
+.external-panels .insights-panel {
+  position: relative;
+  right: auto;
+  top: auto;
+  width: 100%;
+  max-height: min(79vh, 980px);
+  transform: none;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.external-panels .detail-panel,
+.external-panels .quality-panel,
+.external-panels .insights-panel {
+  display: none;
+}
+
+.external-panels .detail-panel:not(.collapsed),
+.external-panels .quality-panel:not(.collapsed),
+.external-panels .insights-panel:not(.collapsed) {
+  display: flex;
+}
+
+.external-panels .detail-panel:not(.collapsed) {
+  display: block;
 }
 
 .drawer-toggle.hidden {
@@ -262,11 +341,122 @@ body {
   letter-spacing: 0.01em;
 }
 
+.node-detail-subtitle {
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+  line-height: 1.54;
+}
+
 #detailBody {
   color: var(--ink-soft);
   font-size: 0.84rem;
   line-height: 1.54;
   white-space: pre-wrap;
+}
+
+.node-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.36rem;
+  margin-top: 0.58rem;
+}
+
+.node-detail-chip {
+  border: 1px solid #c9d8e5;
+  background: #eff6fb;
+  color: #42627b;
+  border-radius: 999px;
+  padding: 0.2rem 0.46rem;
+  font-size: 0.68rem;
+  font-family: "Space Mono", monospace;
+}
+
+.node-detail-body {
+  margin-top: 0.56rem;
+  color: #486175;
+  font-size: 0.79rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.node-tx-panel {
+  margin-top: 0.72rem;
+  border: 1px solid #d3dfeb;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.78);
+  padding: 0.48rem;
+}
+
+.node-tx-panel.hidden {
+  display: none;
+}
+
+.node-tx-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.36rem;
+}
+
+.node-tx-head h3 {
+  margin: 0;
+  font-family: "Space Mono", monospace;
+  font-size: 0.69rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: #5a7387;
+}
+
+.node-tx-count {
+  font-size: 0.66rem;
+  color: #648094;
+  font-family: "Space Mono", monospace;
+}
+
+.node-tx-table-wrap {
+  max-height: 230px;
+  overflow: auto;
+  border: 1px solid #d9e5ef;
+  border-radius: 8px;
+  background: #f9fcff;
+}
+
+.node-tx-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.72rem;
+}
+
+.node-tx-table th,
+.node-tx-table td {
+  border-bottom: 1px solid #e2eaf1;
+  padding: 0.25rem 0.34rem;
+  text-align: left;
+  color: #476074;
+}
+
+.node-tx-table th {
+  position: sticky;
+  top: 0;
+  background: #eef6fc;
+  font-family: "Space Mono", monospace;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.node-tx-pagination {
+  margin-top: 0.42rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.42rem;
+}
+
+.node-tx-pagination span {
+  font-size: 0.69rem;
+  color: #577186;
+  font-family: "Space Mono", monospace;
 }
 
 .settings-block {
@@ -411,12 +601,14 @@ body {
 
 .quality-block::-webkit-scrollbar,
 .insights-block::-webkit-scrollbar,
+.node-detail-panel::-webkit-scrollbar,
 .detail-panel::-webkit-scrollbar {
   width: 10px;
 }
 
 .quality-block::-webkit-scrollbar-track,
 .insights-block::-webkit-scrollbar-track,
+.node-detail-panel::-webkit-scrollbar-track,
 .detail-panel::-webkit-scrollbar-track {
   border-radius: 999px;
   background: rgba(196, 212, 225, 0.54);
@@ -424,6 +616,7 @@ body {
 
 .quality-block::-webkit-scrollbar-thumb,
 .insights-block::-webkit-scrollbar-thumb,
+.node-detail-panel::-webkit-scrollbar-thumb,
 .detail-panel::-webkit-scrollbar-thumb {
   border-radius: 999px;
   border: 2px solid rgba(198, 213, 224, 0.48);
@@ -906,6 +1099,19 @@ body {
 }
 
 @media (max-width: 1080px) {
+  .workspace,
+  .workspace.has-side-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .external-panels,
+  .workspace.has-side-panel .external-panels {
+    width: 100%;
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .node-detail-panel,
   .detail-panel,
   .quality-panel,
   .insights-panel {
@@ -918,6 +1124,7 @@ body {
     pointer-events: auto;
   }
 
+  .node-detail-panel.collapsed,
   .detail-panel.collapsed,
   .quality-panel.collapsed,
   .insights-panel.collapsed {
@@ -933,16 +1140,23 @@ body {
   }
 
   .drawer-toggle {
+    right: 3.6rem;
+    top: 0.8rem;
+  }
+
+  .node-toggle {
     right: 0.8rem;
     top: 0.8rem;
   }
 
   .quality-toggle {
-    top: 3.65rem;
+    right: 6.4rem;
+    top: 0.8rem;
   }
 
   .insights-toggle {
-    top: 6.48rem;
+    right: 9.2rem;
+    top: 0.8rem;
   }
 
   .bottom-dock {

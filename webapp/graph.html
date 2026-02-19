@@ -25,43 +25,98 @@
         <div class="pill" id="statsPill">Loading graph...</div>
       </header>
 
-      <section class="graph-wrap" aria-label="Graph Canvas">
-        <svg id="graphSvg" aria-label="Keyword category graph"></svg>
-        <button id="drawerToggleBtn" class="drawer-toggle" type="button" aria-label="Open Settings">
-          S
-        </button>
-        <button
-          id="qualityDrawerToggleBtn"
-          class="drawer-toggle quality-toggle"
-          type="button"
+      <section id="workspace" class="workspace">
+        <section class="graph-wrap" aria-label="Graph Canvas">
+          <svg id="graphSvg" aria-label="Keyword category graph"></svg>
+          <button id="nodeDrawerToggleBtn" class="drawer-toggle node-toggle" type="button" aria-label="Open Node Details">
+            ◉
+          </button>
+          <button id="drawerToggleBtn" class="drawer-toggle" type="button" aria-label="Open Settings">
+            ⚙
+          </button>
+          <button
+            id="qualityDrawerToggleBtn"
+            class="drawer-toggle quality-toggle"
+            type="button"
           aria-label="Open Model Quality"
         >
-          Q
+          ◫
         </button>
-        <button
-          id="insightsDrawerToggleBtn"
-          class="drawer-toggle insights-toggle"
-          type="button"
+          <button
+            id="insightsDrawerToggleBtn"
+            class="drawer-toggle insights-toggle"
+            type="button"
           aria-label="Open Agent Insights"
         >
-          I
+          ⌬
         </button>
 
-        <aside id="detailPanel" class="detail-panel">
+          <aside id="nodeDetailPanel" class="node-detail-panel">
           <div class="detail-sticky">
             <div class="panel-head">
               <div class="panel-chip">NODE_DETAILS</div>
+              <button id="nodeDetailCloseBtn" class="drawer-close" type="button" aria-label="Close Node Details">
+                ×
+              </button>
+            </div>
+            <div class="heading-row">
+              <h2 id="nodeDetailTitle">Selection</h2>
+              <button class="help-trigger" type="button" data-help-key="selection_panel" aria-label="Help: Selection panel">
+                ?
+              </button>
+            </div>
+            <div id="nodeDetailSubtitle" class="node-detail-subtitle">Hover a node or edge to inspect details.</div>
+          </div>
+          <div id="nodeDetailMeta" class="node-detail-meta"></div>
+          <div id="nodeDetailBody" class="node-detail-body"></div>
+          <div id="nodeTxPanel" class="node-tx-panel hidden">
+            <div class="node-tx-head">
+              <h3>Linked Transactions</h3>
+              <span id="nodeTxCount" class="node-tx-count">0</span>
+            </div>
+            <div class="node-tx-table-wrap">
+              <table class="node-tx-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Date</th>
+                    <th>Description</th>
+                    <th>Amount</th>
+                    <th>Weight</th>
+                  </tr>
+                </thead>
+                <tbody id="nodeTxTableBody"></tbody>
+              </table>
+            </div>
+            <div class="node-tx-pagination">
+              <button id="nodeTxPrevBtn" class="dock-icon-button" type="button" aria-label="Previous transactions page">
+                ←
+              </button>
+              <span id="nodeTxPageInfo">Page 1 / 1</span>
+              <button id="nodeTxNextBtn" class="dock-icon-button" type="button" aria-label="Next transactions page">
+                →
+              </button>
+            </div>
+          </div>
+          </aside>
+        </section>
+
+        <aside id="externalPanels" class="external-panels">
+          <aside id="detailPanel" class="detail-panel">
+          <div class="detail-sticky">
+            <div class="panel-head">
+              <div class="panel-chip">SETTINGS</div>
               <button id="drawerCloseBtn" class="drawer-close" type="button" aria-label="Close Settings">
                 ×
               </button>
             </div>
             <div class="heading-row">
-              <h2>Selection</h2>
-              <button class="help-trigger" type="button" data-help-key="selection_panel" aria-label="Help: Selection panel">
+              <h2>Settings</h2>
+              <button class="help-trigger" type="button" data-help-key="settings_overview" aria-label="Help: Graph settings">
                 ?
               </button>
             </div>
-            <div id="detailBody">Hover a node or edge to inspect details.</div>
+            <div class="node-detail-subtitle">Display and analysis controls for graph interpretation.</div>
           </div>
           <div class="settings-block settings-groups">
             <div class="heading-row compact">
@@ -201,9 +256,9 @@
               </div>
             </details>
           </div>
-        </aside>
+          </aside>
 
-        <aside id="qualityPanel" class="quality-panel collapsed">
+          <aside id="qualityPanel" class="quality-panel collapsed">
           <div class="panel-head">
             <div class="panel-chip">MODEL_QUALITY</div>
             <button id="qualityCloseBtn" class="drawer-close" type="button" aria-label="Close Model Quality">
@@ -260,9 +315,9 @@
             </div>
             <div id="qualityReplay" class="quality-replay"></div>
           </div>
-        </aside>
+          </aside>
 
-        <aside id="insightsPanel" class="insights-panel collapsed">
+          <aside id="insightsPanel" class="insights-panel collapsed">
           <div class="panel-head">
             <div class="panel-chip">AGENT_INSIGHTS</div>
             <button id="insightsCloseBtn" class="drawer-close" type="button" aria-label="Close Agent Insights">
@@ -319,6 +374,7 @@
               <div id="insightsStabilityTable" class="quality-table-wrap"></div>
             </details>
           </div>
+          </aside>
         </aside>
       </section>
 
