@@ -790,6 +790,43 @@ function focusNodeWithZoom(node) {
   svg.transition().duration(320).call(state.zoomBehavior.transform, transform);
 }
 
+function createZoomReactiveGrid(defs, width, height) {
+  const pattern = defs
+    .append("pattern")
+    .attr("id", "graphGridPattern")
+    .attr("patternUnits", "userSpaceOnUse")
+    .attr("width", 34)
+    .attr("height", 34)
+    .attr("patternTransform", "translate(0,0) scale(1)");
+
+  pattern
+    .append("path")
+    .attr("d", "M 34 0 L 0 0 0 34")
+    .attr("fill", "none")
+    .attr("stroke", "rgba(114, 124, 130, 0.22)")
+    .attr("stroke-width", 1);
+
+  const gridRect = svg
+    .append("rect")
+    .attr("x", 0)
+    .attr("y", 0)
+    .attr("width", width)
+    .attr("height", height)
+    .attr("fill", "url(#graphGridPattern)")
+    .attr("pointer-events", "none")
+    .attr("opacity", 0.5);
+
+  function updateGridTransform(transform) {
+    if (!pattern) return;
+    const x = Number(transform?.x || 0);
+    const y = Number(transform?.y || 0);
+    const k = Number(transform?.k || 1);
+    pattern.attr("patternTransform", `translate(${x},${y}) scale(${k})`);
+  }
+
+  return { gridRect, updateGridTransform };
+}
+
 function clearQualityPanels(message) {
   if (qualitySummary) qualitySummary.textContent = message;
   if (qualityCategoryTable) qualityCategoryTable.innerHTML = "";
@@ -1144,6 +1181,7 @@ function renderGraph(graph) {
     .attr("width", "140%")
     .attr("height", "140%");
   noise.append("feGaussianBlur").attr("in", "SourceGraphic").attr("stdDeviation", 0.2);
+  const grid = createZoomReactiveGrid(defs, width, height);
 
   const viewport = svg.append("g").attr("class", "viewport");
 
@@ -1152,10 +1190,12 @@ function renderGraph(graph) {
     .scaleExtent([0.25, 4.4])
     .on("zoom", (event) => {
       viewport.attr("transform", event.transform);
+      if (grid?.updateGridTransform) grid.updateGridTransform(event.transform);
       updateZoomIndicator(event.transform);
     });
   state.zoomBehavior = zoomBehavior;
   svg.call(zoomBehavior).on("dblclick.zoom", null);
+  if (grid?.updateGridTransform) grid.updateGridTransform(d3.zoomIdentity);
   updateZoomIndicator(d3.zoomIdentity);
 
   const [minWeight, maxWeight] = d3.extent(edgeData, (d) => d.weight);
