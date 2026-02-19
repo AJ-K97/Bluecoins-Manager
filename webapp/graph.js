@@ -22,6 +22,7 @@ const state = {
   timelineTimer: null,
   lastVisibleNodeIds: new Set(),
   lastVisibleEdgeIds: new Set(),
+  currentZoomTransform: null,
   animationFrameId: null,
   timelinePulse: 0,
   interactionPulseByNode: new Map(),
@@ -708,7 +709,7 @@ function applyVisualState(options = {}) {
   const selections = state.selections;
   if (!selections) return;
 
-  const { nodeGroup, nodeRing, nodeCore, nodeLabel, link, edgeLabel, strokeScale } = selections;
+  const { nodeGroup, nodeHit, nodeRing, nodeCore, nodeLabel, link, edgeLabel, strokeScale } = selections;
   const visibility = collectVisibilitySets();
   const shouldAnimateTimeline = Boolean(options.animateTimeline);
   const newlyVisibleNodeIds = new Set();
@@ -751,6 +752,14 @@ function applyVisualState(options = {}) {
       if (activeNodeIds.has(d.id)) return 1;
       return d.kind === "transaction" ? 0.16 : 0.2;
     });
+
+  if (nodeHit) {
+    nodeHit.attr("r", (d) => {
+      const base = nodeRadius(d);
+      if (d.kind === "transaction") return Math.max(8, base + 3.5);
+      return Math.max(14, base + 8.5);
+    });
+  }
 
   nodeRing
     .attr("stroke", (d) => {
@@ -1557,6 +1566,7 @@ function renderGraph(graph) {
   state.pinnedNodeId = null;
   state.tagNodeId = null;
   state.backgroundFieldLastUpdateMs = 0;
+  state.currentZoomTransform = d3.zoomIdentity;
 
   if (!nodeData.length || !edgeData.length) {
     setDetailPanel("No graph edges found. Import or review transactions to build memory links.");
@@ -1582,9 +1592,11 @@ function renderGraph(graph) {
     .zoom()
     .scaleExtent([0.25, 4.4])
     .on("zoom", (event) => {
+      state.currentZoomTransform = event.transform;
       viewport.attr("transform", event.transform);
       if (grid?.updateGridTransform) grid.updateGridTransform(event.transform);
       updateZoomIndicator(event.transform);
+      updateFloatingTagPosition();
     });
   state.zoomBehavior = zoomBehavior;
   svg.call(zoomBehavior).on("dblclick.zoom", null);
@@ -1621,6 +1633,16 @@ function renderGraph(graph) {
     .join("g")
     .attr("class", "graph-node");
 
+  const nodeHit = nodeGroup
+    .append("circle")
+    .attr("class", "node-hit")
+    .attr("r", (d) => {
+      if (d.kind === "transaction") return Math.max(8, nodeRadius(d) + 3.5);
+      return Math.max(14, nodeRadius(d) + 8.5);
+    })
+    .attr("fill", "transparent")
+    .style("pointer-events", "all");
+
   const nodeRing = nodeGroup
     .append("circle")
     .attr("class", "node-ring")
@@ -1640,10 +1662,11 @@ function renderGraph(graph) {
     .attr("class", "graph-node-label")
     .text((d) => d.label);
 
-  const floatingTag = viewport
+  const floatingTag = svg
     .append("g")
     .attr("class", "floating-node-tag")
-    .style("display", "none");
+    .style("display", null)
+    .style("visibility", "hidden");
   const floatingTagRect = floatingTag.append("rect").attr("rx", 3).attr("ry", 3);
   const floatingTagText = floatingTag.append("text");
 
@@ -1653,33 +1676,57 @@ function renderGraph(graph) {
     return `${text.slice(0, 31)}...`;
   }
 
+  function fitTagTextToWidth(raw, maxWidth) {
+    const base = fitTagText(raw);
+    floatingTagText.text(base);
+    if (!Number.isFinite(maxWidth) || maxWidth <= 40) return base;
+    let next = base;
+    while (next.length > 4 && floatingTagText.node().getComputedTextLength() > maxWidth) {
+      next = `${next.slice(0, -4)}...`;
+      floatingTagText.text(next);
+    }
+    return next;
+  }
+
   function updateFloatingTagPosition() {
     if (!state.tagNodeId) {
-      floatingTag.style("display", "none");
+      floatingTag.style("visibility", "hidden");
       return;
     }
 
     const node = nodeData.find((row) => row.id === state.tagNodeId);
     if (!node || !Number.isFinite(node.x) || !Number.isFinite(node.y)) {
-      floatingTag.style("display", "none");
+      floatingTag.style("visibility", "hidden");
       return;
     }
 
     const visibility = collectVisibilitySets();
     if (!visibility.visibleNodeIds.has(node.id)) {
-      floatingTag.style("display", "none");
+      floatingTag.style("visibility", "hidden");
       return;
     }
 
-    const label = fitTagText(node.label);
+    floatingTag.style("visibility", "hidden");
+    const label = fitTagTextToWidth(node.label, Math.max(56, width - 36));
     floatingTagText.text(label);
     const bbox = floatingTagText.node().getBBox();
     const horizontalPad = 8;
     const verticalPad = 4;
     const tagWidth = bbox.width + horizontalPad * 2;
     const tagHeight = bbox.height + verticalPad * 2;
-    const x = node.x - tagWidth / 2;
-    const y = node.y + nodeRadius(node) + 14;
+    const transform = state.currentZoomTransform || d3.zoomIdentity;
+    const sx = transform.applyX(node.x);
+    const sy = transform.applyY(node.y);
+    const visualNodeRadius = nodeRadius(node) * transform.k;
+    let x = sx - tagWidth / 2;
+    let y = sy + Math.max(12, visualNodeRadius + 10);
+
+    const padding = 6;
+    x = Math.max(padding, Math.min(width - tagWidth - padding, x));
+    if (y + tagHeight > height - padding) {
+      y = sy - tagHeight - Math.max(10, visualNodeRadius + 6);
+    }
+    y = Math.max(padding, Math.min(height - tagHeight - padding, y));
 
     floatingTagRect
       .attr("x", x)
@@ -1688,7 +1735,7 @@ function renderGraph(graph) {
       .attr("height", tagHeight);
 
     floatingTagText.attr("x", x + horizontalPad).attr("y", y + tagHeight - verticalPad - 1);
-    floatingTag.style("display", null);
+    floatingTag.style("visibility", null);
   }
 
   const simulation = d3
@@ -1821,6 +1868,7 @@ function renderGraph(graph) {
     edgeData,
     viewport,
     nodeGroup,
+    nodeHit,
     nodeRing,
     nodeCore,
     nodeLabel,
