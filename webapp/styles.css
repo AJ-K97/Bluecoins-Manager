@@ -40,6 +40,10 @@
   box-sizing: border-box;
 }
 
+.hidden {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -123,6 +127,38 @@ body {
     var(--bg-canvas);
 }
 
+.view-tabs {
+  position: absolute;
+  top: 0.8rem;
+  left: 0.8rem;
+  z-index: 30;
+  display: inline-flex;
+  gap: 0.32rem;
+  padding: 0.24rem;
+  border-radius: 12px;
+  border: 1px solid #c7d7e2;
+  background: rgba(246, 251, 255, 0.92);
+  box-shadow: var(--shadow-1);
+}
+
+.view-tab {
+  border: 1px solid #ccdae5;
+  border-radius: 9px;
+  padding: 0.36rem 0.64rem;
+  background: #f4f9fd;
+  color: #4e6477;
+  font-size: 0.72rem;
+  font-family: "Space Mono", monospace;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.view-tab.is-active {
+  background: #2f7eaa;
+  color: #f6fbff;
+  border-color: #2b739d;
+}
+
 .workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 0;
@@ -162,6 +198,33 @@ body {
   display: block;
   position: relative;
   z-index: 1;
+}
+
+.sankey-view-panel {
+  width: 100%;
+  height: min(79vh, 980px);
+  display: flex;
+  flex-direction: column;
+  padding: 3.7rem 0.85rem 0.85rem;
+  position: relative;
+  z-index: 2;
+}
+
+.sankey-view-head h3 {
+  margin: 0;
+  font-family: "Space Grotesk", sans-serif;
+  color: #21374b;
+  font-size: 1.08rem;
+}
+
+.sankey-view-head .quality-summary {
+  margin-top: 0.3rem;
+}
+
+.graph-wrap.sankey-active #graphSvg,
+.graph-wrap.sankey-active .node-detail-panel,
+.graph-wrap.sankey-active .node-toggle {
+  display: none;
 }
 
 .detail-panel,
@@ -590,7 +653,8 @@ body {
 }
 
 .quality-block,
-.insights-block {
+.insights-block,
+.sankey-view-panel {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -601,6 +665,7 @@ body {
 
 .quality-block::-webkit-scrollbar,
 .insights-block::-webkit-scrollbar,
+.sankey-view-panel::-webkit-scrollbar,
 .node-detail-panel::-webkit-scrollbar,
 .detail-panel::-webkit-scrollbar {
   width: 10px;
@@ -608,6 +673,7 @@ body {
 
 .quality-block::-webkit-scrollbar-track,
 .insights-block::-webkit-scrollbar-track,
+.sankey-view-panel::-webkit-scrollbar-track,
 .node-detail-panel::-webkit-scrollbar-track,
 .detail-panel::-webkit-scrollbar-track {
   border-radius: 999px;
@@ -616,6 +682,7 @@ body {
 
 .quality-block::-webkit-scrollbar-thumb,
 .insights-block::-webkit-scrollbar-thumb,
+.sankey-view-panel::-webkit-scrollbar-thumb,
 .node-detail-panel::-webkit-scrollbar-thumb,
 .detail-panel::-webkit-scrollbar-thumb {
   border-radius: 999px;
@@ -752,6 +819,106 @@ body {
   font-size: 0.75rem;
   line-height: 1.55;
   white-space: pre-wrap;
+}
+
+.sankey-chart-wrap {
+  margin-top: 0.55rem;
+  border: 1px solid #d3dfeb;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.74);
+  min-height: 340px;
+  height: min(58vh, 720px);
+  position: relative;
+  overflow: hidden;
+}
+
+.sankey-view-panel .sankey-chart-wrap {
+  flex: 1;
+  min-height: 420px;
+  height: auto;
+}
+
+.sankey-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.sankey-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  color: #607487;
+  font-size: 0.8rem;
+  text-align: center;
+  background: rgba(247, 251, 255, 0.82);
+}
+
+.sankey-node-rect {
+  fill: #7da3bc;
+  stroke: #5f849f;
+  stroke-width: 1;
+  filter: drop-shadow(0 1px 1px rgba(36, 67, 89, 0.16));
+}
+
+.sankey-node-rect.is-keyword {
+  fill: #95b8cd;
+}
+
+.sankey-node-rect.is-predicted {
+  fill: #4d84a7;
+}
+
+.sankey-node-rect.is-resolved {
+  fill: #2f6f95;
+}
+
+.sankey-node-rect.is-other {
+  fill: #7a9aae;
+  stroke: #5e7d92;
+}
+
+.sankey-link {
+  fill: none;
+  stroke-opacity: 0.3;
+  transition: stroke-opacity 120ms ease;
+}
+
+.sankey-link.kw-pred {
+  stroke: #79a4bc;
+}
+
+.sankey-link.pred-res {
+  stroke: #d65d63;
+  stroke-opacity: 0.48;
+}
+
+.sankey-link.is-muted {
+  stroke-opacity: 0.1 !important;
+}
+
+.sankey-link.is-active {
+  stroke-opacity: 0.88 !important;
+}
+
+.sankey-label {
+  font-family: "Space Mono", monospace;
+  font-size: 0.63rem;
+  fill: #3f596e;
+  paint-order: stroke;
+  stroke: rgba(244, 249, 253, 0.96);
+  stroke-width: 2.2px;
+  pointer-events: none;
+}
+
+.sankey-stage-label {
+  font-family: "Space Mono", monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  fill: #577084;
 }
 
 .quality-table {
@@ -1193,6 +1360,10 @@ body {
   }
 
   #graphSvg {
+    height: 72vh;
+  }
+
+  .sankey-view-panel {
     height: 72vh;
   }
 }

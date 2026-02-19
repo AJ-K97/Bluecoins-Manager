@@ -27,7 +27,26 @@
 
       <section id="workspace" class="workspace">
         <section class="graph-wrap" aria-label="Graph Canvas">
+          <div class="view-tabs" role="tablist" aria-label="Visualization View">
+            <button id="graphViewTabBtn" class="view-tab is-active" type="button" role="tab" aria-selected="true">Graph View</button>
+            <button id="sankeyViewTabBtn" class="view-tab" type="button" role="tab" aria-selected="false">Sankey View</button>
+          </div>
           <svg id="graphSvg" aria-label="Keyword category graph"></svg>
+          <section id="sankeyViewPanel" class="sankey-view-panel hidden" aria-label="Decision path sankey">
+            <div class="sankey-view-head">
+              <div class="heading-row">
+                <h3>Decision Path Sankey</h3>
+                <button class="help-trigger" type="button" data-help-key="insights_sankey" aria-label="Help: Decision path sankey">
+                  ?
+                </button>
+              </div>
+              <div id="sankeySummary" class="quality-summary">Loading insights...</div>
+            </div>
+            <div class="sankey-chart-wrap">
+              <svg id="sankeySvg" class="sankey-svg" aria-label="Decision path sankey chart"></svg>
+              <div id="sankeyEmptyState" class="sankey-empty hidden">No case inspector data available for Sankey view.</div>
+            </div>
+          </section>
           <button id="nodeDrawerToggleBtn" class="drawer-toggle node-toggle" type="button" aria-label="Open Node Details">
             ◉
           </button>
@@ -375,6 +394,7 @@
             </details>
           </div>
           </aside>
+
         </aside>
       </section>
 
@@ -438,6 +458,7 @@
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+    <script src="https://cdn.jsdelivr.net/npm/d3-sankey@0.12.3/dist/d3-sankey.min.js"></script>
     <script src="/graph.js"></script>
   </body>
 </html>

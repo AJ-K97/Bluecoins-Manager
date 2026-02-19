@@ -15,6 +15,7 @@ const state = {
   drawerOpen: true,
   qualityDrawerOpen: false,
   insightsDrawerOpen: false,
+  activeView: "graph",
   insightsData: null,
   selectedInsightCaseId: null,
   timelinePoints: [],
@@ -54,7 +55,11 @@ const GRAPH_SETTINGS_STORAGE_KEY = "bluecoins.graph.settings.v1";
 const MOTION_EASE = d3.easeCubicInOut;
 
 const svg = d3.select("#graphSvg");
+const graphWrap = document.querySelector(".graph-wrap");
 const statsPill = document.getElementById("statsPill");
+const graphViewTabBtn = document.getElementById("graphViewTabBtn");
+const sankeyViewTabBtn = document.getElementById("sankeyViewTabBtn");
+const sankeyViewPanel = document.getElementById("sankeyViewPanel");
 const nodeDetailPanel = document.getElementById("nodeDetailPanel");
 const nodeDetailTitle = document.getElementById("nodeDetailTitle");
 const nodeDetailSubtitle = document.getElementById("nodeDetailSubtitle");
@@ -114,6 +119,9 @@ const qualityDrawerToggleBtn = document.getElementById("qualityDrawerToggleBtn")
 const qualityCloseBtn = document.getElementById("qualityCloseBtn");
 const insightsDrawerToggleBtn = document.getElementById("insightsDrawerToggleBtn");
 const insightsCloseBtn = document.getElementById("insightsCloseBtn");
+const sankeySummary = document.getElementById("sankeySummary");
+const sankeySvgEl = document.getElementById("sankeySvg");
+const sankeyEmptyState = document.getElementById("sankeyEmptyState");
 
 const zoomInBtn = document.getElementById("zoomInBtn");
 const zoomOutBtn = document.getElementById("zoomOutBtn");
@@ -238,6 +246,12 @@ const HELP_CONTENT = {
     does: "Shows how quickly keywords converge to stable categorization.",
     analysis: "Measures flips, corrections, entropy, and time-to-stability by keyword.",
     meaning: "Low stability suggests unresolved ambiguity or insufficient feedback cycles.",
+  },
+  insights_sankey: {
+    title: "Decision Path Sankey",
+    does: "Visualizes flow from keyword to predicted category to resolved category.",
+    analysis: "Aggregates case-inspector rows into weighted transition paths between decision stages.",
+    meaning: "Wider paths indicate repeated behavior patterns, including persistent correction routes.",
   },
   dock_query: {
     title: "Query & Filters",
@@ -544,6 +558,7 @@ function persistSettings() {
       drawerOpen: state.drawerOpen,
       qualityDrawerOpen: state.qualityDrawerOpen,
       insightsDrawerOpen: state.insightsDrawerOpen,
+      activeView: state.activeView,
       breathe: { ...state.breathe },
     };
     window.localStorage.setItem(GRAPH_SETTINGS_STORAGE_KEY, JSON.stringify(payload));
@@ -566,6 +581,7 @@ function loadPersistedSettings() {
     if (typeof parsed.drawerOpen === "boolean") state.drawerOpen = parsed.drawerOpen;
     if (typeof parsed.qualityDrawerOpen === "boolean") state.qualityDrawerOpen = parsed.qualityDrawerOpen;
     if (typeof parsed.insightsDrawerOpen === "boolean") state.insightsDrawerOpen = parsed.insightsDrawerOpen;
+    if (parsed.activeView === "graph" || parsed.activeView === "sankey") state.activeView = parsed.activeView;
     state.connectedNodeScale = clampNumber(parsed.connectedNodeScale, 0.55, 1.3, state.connectedNodeScale);
 
     if (parsed.breathe && typeof parsed.breathe === "object") {
@@ -706,6 +722,29 @@ function setInsightsDrawerOpen(isOpen) {
   if (!insightsPanel || !insightsDrawerToggleBtn) return;
   insightsPanel.classList.toggle("collapsed", !state.insightsDrawerOpen);
   updateWorkspaceLayout();
+  persistSettings();
+}
+
+function setActiveView(viewName) {
+  state.activeView = viewName === "sankey" ? "sankey" : "graph";
+  if (graphViewTabBtn) {
+    const active = state.activeView === "graph";
+    graphViewTabBtn.classList.toggle("is-active", active);
+    graphViewTabBtn.setAttribute("aria-selected", active ? "true" : "false");
+  }
+  if (sankeyViewTabBtn) {
+    const active = state.activeView === "sankey";
+    sankeyViewTabBtn.classList.toggle("is-active", active);
+    sankeyViewTabBtn.setAttribute("aria-selected", active ? "true" : "false");
+  }
+  if (graphWrap) graphWrap.classList.toggle("sankey-active", state.activeView === "sankey");
+  if (sankeyViewPanel) sankeyViewPanel.classList.toggle("hidden", state.activeView !== "sankey");
+  if (state.activeView === "sankey") {
+    stopTimelinePlayback();
+    renderDecisionPathSankey(state.insightsData);
+  } else if (state.graph) {
+    renderGraph(state.graph);
+  }
   persistSettings();
 }
 
@@ -1649,6 +1688,201 @@ function clearInsightsPanels(message) {
   if (insightsStabilityTable) insightsStabilityTable.innerHTML = "";
 }
 
+function clearSankeyPanel(message) {
+  if (sankeySummary) sankeySummary.textContent = message;
+  if (sankeySvgEl) d3.select(sankeySvgEl).selectAll("*").remove();
+  if (sankeyEmptyState) sankeyEmptyState.classList.remove("hidden");
+}
+
+function compactSankeyLabel(value, maxLen = 24) {
+  const text = String(value || "").trim();
+  if (!text) return "(none)";
+  return text.length <= maxLen ? text : `${text.slice(0, maxLen - 3)}...`;
+}
+
+function topLabelSet(rows, accessor, limit) {
+  const counts = new Map();
+  rows.forEach((row) => {
+    const label = String(accessor(row) || "").trim() || "(none)";
+    counts.set(label, (counts.get(label) || 0) + 1);
+  });
+  return new Set(
+    [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limit)
+      .map(([label]) => label),
+  );
+}
+
+function renderDecisionPathSankey(insightsPayload) {
+  if (!sankeySvgEl || !sankeySummary) return;
+  const sankeyFactory = d3.sankey;
+  if (typeof sankeyFactory !== "function") {
+    clearSankeyPanel("Sankey renderer failed to load (d3-sankey unavailable).");
+    return;
+  }
+
+  const cases = Array.isArray(insightsPayload?.case_inspector) ? insightsPayload.case_inspector : [];
+  if (!cases.length) {
+    clearSankeyPanel("No case inspector rows available.");
+    return;
+  }
+
+  const keywordLimit = 24;
+  const predictedLimit = 10;
+  const resolvedLimit = 10;
+  const keywords = topLabelSet(cases, (row) => row.keyword, keywordLimit);
+  const predicted = topLabelSet(cases, (row) => row.predicted_category, predictedLimit);
+  const resolved = topLabelSet(cases, (row) => row.resolved_category, resolvedLimit);
+
+  const normalizedRows = cases.map((row) => {
+    const rawKeyword = String(row.keyword || "").trim() || "(none)";
+    const rawPredicted = String(row.predicted_category || "").trim() || "Unknown";
+    const rawResolved = String(row.resolved_category || "").trim() || "Unknown";
+    return {
+      keyword: keywords.has(rawKeyword) ? rawKeyword : "Other keywords",
+      predicted: predicted.has(rawPredicted) ? rawPredicted : "Other predicted",
+      resolved: resolved.has(rawResolved) ? rawResolved : "Other resolved",
+    };
+  });
+
+  const nodeMap = new Map();
+  const linksMap = new Map();
+  const ensureNode = (prefix, stage, label) => {
+    const id = `${prefix}::${label}`;
+    if (!nodeMap.has(id)) nodeMap.set(id, { id, stage, label });
+    return id;
+  };
+  const addLink = (source, target, type) => {
+    const key = `${source}->${target}::${type}`;
+    const current = linksMap.get(key) || { source, target, value: 0, type };
+    current.value += 1;
+    linksMap.set(key, current);
+  };
+
+  normalizedRows.forEach((row) => {
+    const keywordId = ensureNode("kw", "keyword", row.keyword);
+    const predictedId = ensureNode("pred", "predicted", row.predicted);
+    const resolvedId = ensureNode("res", "resolved", row.resolved);
+    addLink(keywordId, predictedId, "kw-pred");
+    addLink(predictedId, resolvedId, "pred-res");
+  });
+
+  const nodes = [...nodeMap.values()];
+  const links = [...linksMap.values()].filter((item) => item.value > 0);
+  if (!nodes.length || !links.length) {
+    clearSankeyPanel("Decision path data is insufficient for rendering.");
+    return;
+  }
+
+  const chartRect = sankeySvgEl.getBoundingClientRect();
+  const width = Math.max(320, Math.round(chartRect.width || sankeySvgEl.clientWidth || 720));
+  const height = Math.max(260, Math.round(chartRect.height || sankeySvgEl.clientHeight || 420));
+
+  const svgSankey = d3.select(sankeySvgEl);
+  svgSankey.selectAll("*").remove();
+  svgSankey.attr("viewBox", `0 0 ${width} ${height}`);
+
+  const sankey = sankeyFactory()
+    .nodeId((d) => d.id)
+    .nodeWidth(14)
+    .nodePadding(16)
+    .extent([
+      [12, 30],
+      [width - 12, height - 14],
+    ]);
+
+  const layout = sankey({
+    nodes: nodes.map((item) => ({ ...item })),
+    links: links.map((item) => ({ ...item })),
+  });
+
+  svgSankey
+    .append("g")
+    .attr("fill", "none")
+    .selectAll("path")
+    .data(layout.links)
+    .join("path")
+    .attr("class", (d) => `sankey-link ${d.type}`)
+    .attr("d", d3.sankeyLinkHorizontal())
+    .attr("stroke-width", (d) => Math.max(1.2, d.width))
+    .append("title")
+    .text((d) => `${d.source.label} -> ${d.target.label}\n${d.value} decisions`);
+
+  const nodeGroup = svgSankey.append("g").selectAll("g").data(layout.nodes).join("g");
+  nodeGroup
+    .append("rect")
+    .attr("class", (d) => `sankey-node-rect is-${d.stage}${String(d.label || "").startsWith("Other ") ? " is-other" : ""}`)
+    .attr("x", (d) => d.x0)
+    .attr("y", (d) => d.y0)
+    .attr("height", (d) => Math.max(1, d.y1 - d.y0))
+    .attr("width", (d) => d.x1 - d.x0)
+    .attr("rx", 3)
+    .append("title")
+    .text((d) => `${d.label}\n${d.value} cases`);
+
+  const labelMinCases = Math.max(2, Math.round(cases.length * 0.03));
+  const labelMinHeight = 14;
+  nodeGroup
+    .append("text")
+    .attr("class", "sankey-label")
+    .attr("x", (d) => (d.x0 < width / 2 ? d.x1 + 6 : d.x0 - 6))
+    .attr("y", (d) => (d.y0 + d.y1) / 2)
+    .attr("dy", "0.35em")
+    .attr("text-anchor", (d) => (d.x0 < width / 2 ? "start" : "end"))
+    .text((d) => {
+      const heightPx = d.y1 - d.y0;
+      if (d.stage === "keyword") return compactSankeyLabel(d.label, 26);
+      if (Number(d.value || 0) < labelMinCases || heightPx < labelMinHeight) return "";
+      return compactSankeyLabel(d.label, 22);
+    });
+
+  const stageX = {
+    keyword: d3.min(layout.nodes.filter((n) => n.stage === "keyword"), (n) => n.x0) || 0,
+    predicted: d3.min(layout.nodes.filter((n) => n.stage === "predicted"), (n) => n.x0) || width / 2,
+    resolved: d3.min(layout.nodes.filter((n) => n.stage === "resolved"), (n) => n.x0) || width - 110,
+  };
+  svgSankey
+    .append("g")
+    .selectAll("text")
+    .data([
+      { key: "keyword", label: "Keywords" },
+      { key: "predicted", label: "LLM Predicted" },
+      { key: "resolved", label: "Resolved Category" },
+    ])
+    .join("text")
+    .attr("class", "sankey-stage-label")
+    .attr("x", (d) => stageX[d.key] + 2)
+    .attr("y", 17)
+    .text((d) => d.label);
+
+  const allLinks = svgSankey.selectAll(".sankey-link");
+  nodeGroup
+    .on("mouseenter", (_, node) => {
+      allLinks.classed("is-muted", true).classed("is-active", false);
+      allLinks
+        .filter((l) => l.source.id === node.id || l.target.id === node.id)
+        .classed("is-muted", false)
+        .classed("is-active", true);
+    })
+    .on("mouseleave", () => {
+      allLinks.classed("is-muted", false).classed("is-active", false);
+    });
+
+  allLinks
+    .on("mouseenter", function () {
+      allLinks.classed("is-muted", true).classed("is-active", false);
+      d3.select(this).classed("is-muted", false).classed("is-active", true);
+    })
+    .on("mouseleave", () => {
+      allLinks.classed("is-muted", false).classed("is-active", false);
+    });
+
+  sankeySummary.textContent =
+    `${cases.length} cases | ${nodes.length} nodes | ${links.length} paths | top ${keywordLimit}/${predictedLimit}/${resolvedLimit} buckets`;
+  if (sankeyEmptyState) sankeyEmptyState.classList.add("hidden");
+}
+
 function renderInsightCaseById(insightsPayload, selectedId) {
   if (!insightsCaseBody) return;
   const cases = insightsPayload?.case_inspector || [];
@@ -1939,6 +2173,7 @@ async function loadQuality() {
 async function loadInsights() {
   if (!insightsSummary) return;
   insightsSummary.textContent = "Loading agent insights...";
+  if (sankeySummary) sankeySummary.textContent = "Loading decision paths...";
   try {
     const payload = await fetchJsonOrThrow(
       "/api/insights?case_limit=100&risk_limit=28&keyword_limit=42",
@@ -1946,9 +2181,11 @@ async function loadInsights() {
     );
     state.insightsData = payload;
     renderInsightsReport(payload);
+    renderDecisionPathSankey(payload);
   } catch (error) {
     state.insightsData = null;
     clearInsightsPanels(`Could not load insights: ${error.message}`);
+    clearSankeyPanel(`Could not load decision paths: ${error.message}`);
   }
 }
 
@@ -2622,6 +2859,18 @@ if (insightsDrawerToggleBtn) {
   });
 }
 
+if (graphViewTabBtn) {
+  graphViewTabBtn.addEventListener("click", () => {
+    setActiveView("graph");
+  });
+}
+
+if (sankeyViewTabBtn) {
+  sankeyViewTabBtn.addEventListener("click", () => {
+    setActiveView("sankey");
+  });
+}
+
 if (nodeTxPrevBtn) {
   nodeTxPrevBtn.addEventListener("click", () => {
     state.nodeDetailPage = Math.max(0, state.nodeDetailPage - 1);
@@ -2701,7 +2950,8 @@ window.addEventListener("resize", () => {
 });
 
 window.addEventListener("resize", () => {
-  if (state.graph) renderGraph(state.graph);
+  if (state.activeView === "graph" && state.graph) renderGraph(state.graph);
+  if (state.activeView === "sankey" && state.insightsData) renderDecisionPathSankey(state.insightsData);
 });
 
 window.addEventListener("beforeunload", () => {
@@ -2760,5 +3010,7 @@ setNodeDrawerOpen(state.nodeDrawerOpen);
 setDrawerOpen(state.drawerOpen);
 setQualityDrawerOpen(state.qualityDrawerOpen);
 setInsightsDrawerOpen(state.insightsDrawerOpen);
+setActiveView(state.activeView);
 clearInsightsPanels("Loading insights...");
+if (sankeySummary) sankeySummary.textContent = "Loading decision paths...";
 loadGraph();
