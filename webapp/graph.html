@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bluecoins Agent Graph</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;700&family=Space+Grotesk:wght@500;700&family=Space+Mono:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-dot" aria-hidden="true"></span>
+          <div>
+            <h1>Neural Memory</h1>
+            <p>Keyword-category connections with weighted reasoning</p>
+          </div>
+        </div>
+        <div class="pill" id="statsPill">Loading graph...</div>
+      </header>
+
+      <section id="workspace" class="workspace">
+        <section class="graph-wrap" aria-label="Graph Canvas">
+          <div class="view-tabs" role="tablist" aria-label="Visualization View">
+            <button id="graphViewTabBtn" class="view-tab is-active" type="button" role="tab" aria-selected="true">Graph View</button>
+            <button id="sankeyViewTabBtn" class="view-tab" type="button" role="tab" aria-selected="false">Sankey View</button>
+          </div>
+          <svg id="graphSvg" aria-label="Keyword category graph"></svg>
+          <section id="sankeyViewPanel" class="sankey-view-panel hidden" aria-label="Decision path sankey">
+            <div class="sankey-view-head">
+              <div class="heading-row">
+                <h3>Decision Path Sankey</h3>
+                <button class="help-trigger" type="button" data-help-key="insights_sankey" aria-label="Help: Decision path sankey">
+                  ?
+                </button>
+              </div>
+              <div class="sankey-controls" aria-label="Sankey search and filters">
+                <label class="sankey-field">
+                  <span>Mode</span>
+                  <select id="sankeyModeSelect">
+                    <option value="volume">Flow volume</option>
+                    <option value="error">Error flow</option>
+                    <option value="confidence">Confidence-weighted</option>
+                  </select>
+                </label>
+                <label class="sankey-field sankey-search">
+                  <span>Search</span>
+                  <input id="sankeySearchInput" type="text" placeholder="keyword, predicted, resolved..." />
+                </label>
+                <label class="sankey-field">
+                  <span>Field</span>
+                  <select id="sankeyFieldFilter">
+                    <option value="all">All</option>
+                    <option value="keyword">Keyword</option>
+                    <option value="predicted">Predicted</option>
+                    <option value="resolved">Resolved</option>
+                  </select>
+                </label>
+                <label class="sankey-field">
+                  <span>Outcome</span>
+                  <select id="sankeyOutcomeFilter">
+                    <option value="all">All</option>
+                    <option value="mismatch">Predicted != Resolved</option>
+                    <option value="match">Predicted == Resolved</option>
+                  </select>
+                </label>
+                <label class="sankey-field">
+                  <span>Category Lens</span>
+                  <select id="sankeyCategoryLensSelect">
+                    <option value="">All resolved categories</option>
+                  </select>
+                </label>
+                <label class="sankey-check">
+                  <input id="sankeyVerifiedOnlyToggle" type="checkbox" />
+                  <span>Verified only</span>
+                </label>
+                <label class="sankey-field sankey-threshold-field">
+                  <span>Min path cases</span>
+                  <input id="sankeyMinCasesInput" type="number" min="1" step="1" value="1" />
+                </label>
+                <label class="sankey-field sankey-threshold-field">
+                  <span>Top paths</span>
+                  <input id="sankeyTopPathsInput" type="number" min="5" max="200" step="1" value="80" />
+                </label>
+                <button id="sankeyFilterResetBtn" class="dock-icon-button" type="button">Reset</button>
+              </div>
+              <div id="sankeySummary" class="quality-summary">Loading insights...</div>
+              <div class="sankey-zoombar">
+                <span id="sankeyZoomState" class="sankey-zoom-state hidden"></span>
+                <button id="sankeyZoomResetBtn" class="dock-icon-button hidden" type="button">Reset Zoom</button>
+              </div>
+            </div>
+            <div class="sankey-chart-wrap">
+              <svg id="sankeySvg" class="sankey-svg" aria-label="Decision path sankey chart"></svg>
+              <div id="sankeyEmptyState" class="sankey-empty hidden">No case inspector data available for Sankey view.</div>
+              <aside id="sankeyKeywordDetailPanel" class="sankey-keyword-detail hidden" aria-live="polite">
+                <div class="panel-head">
+                  <div class="panel-chip">KEYWORD_DETAIL</div>
+                  <button id="sankeyKeywordDetailCloseBtn" class="drawer-close" type="button" aria-label="Close keyword detail">
+                    ×
+                  </button>
+                </div>
+                <h4 id="sankeyKeywordDetailTitle">Keyword</h4>
+                <div id="sankeyKeywordDetailMeta" class="sankey-keyword-meta"></div>
+                <div id="sankeyKeywordDetailBody" class="sankey-keyword-body"></div>
+              </aside>
+              <aside id="sankeyLinkDetailPanel" class="sankey-link-detail hidden" aria-live="polite">
+                <div class="panel-head">
+                  <div class="panel-chip">PATH_DETAIL</div>
+                  <button id="sankeyLinkDetailCloseBtn" class="drawer-close" type="button" aria-label="Close path detail">
+                    ×
+                  </button>
+                </div>
+                <h4 id="sankeyLinkDetailTitle">Path detail</h4>
+                <div id="sankeyLinkDetailMeta" class="sankey-keyword-meta"></div>
+                <div id="sankeyLinkDetailBody" class="sankey-keyword-body"></div>
+              </aside>
+            </div>
+            <section class="sankey-path-table-wrap">
+              <div class="quality-subtitle">Top Decision Paths</div>
+              <div id="sankeyPathTable"></div>
+            </section>
+          </section>
+          <button id="nodeDrawerToggleBtn" class="drawer-toggle node-toggle" type="button" aria-label="Open Node Details">
+            ◉
+          </button>
+          <button id="drawerToggleBtn" class="drawer-toggle" type="button" aria-label="Open Settings">
+            ⚙
+          </button>
+          <button
+            id="qualityDrawerToggleBtn"
+            class="drawer-toggle quality-toggle"
+            type="button"
+          aria-label="Open Model Quality"
+        >
+          ◫
+        </button>
+          <button
+            id="insightsDrawerToggleBtn"
+            class="drawer-toggle insights-toggle"
+            type="button"
+          aria-label="Open Agent Insights"
+        >
+          ⌬
+        </button>
+
+          <aside id="nodeDetailPanel" class="node-detail-panel">
+          <div class="detail-sticky">
+            <div class="panel-head">
+              <div class="panel-chip">NODE_DETAILS</div>
+              <button id="nodeDetailCloseBtn" class="drawer-close" type="button" aria-label="Close Node Details">
+                ×
+              </button>
+            </div>
+            <div class="heading-row">
+              <h2 id="nodeDetailTitle">Selection</h2>
+              <button class="help-trigger" type="button" data-help-key="selection_panel" aria-label="Help: Selection panel">
+                ?
+              </button>
+            </div>
+            <div id="nodeDetailSubtitle" class="node-detail-subtitle">Hover a node or edge to inspect details.</div>
+          </div>
+          <div id="nodeDetailMeta" class="node-detail-meta"></div>
+          <div id="nodeDetailBody" class="node-detail-body"></div>
+          <div id="nodeTxPanel" class="node-tx-panel hidden">
+            <div class="node-tx-head">
+              <h3>Linked Transactions</h3>
+              <span id="nodeTxCount" class="node-tx-count">0</span>
+            </div>
+            <div class="node-tx-table-wrap">
+              <table class="node-tx-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Date</th>
+                    <th>Description</th>
+                    <th>Amount</th>
+                    <th>Weight</th>
+                  </tr>
+                </thead>
+                <tbody id="nodeTxTableBody"></tbody>
+              </table>
+            </div>
+            <div class="node-tx-pagination">
+              <button id="nodeTxPrevBtn" class="dock-icon-button" type="button" aria-label="Previous transactions page">
+                ←
+              </button>
+              <span id="nodeTxPageInfo">Page 1 / 1</span>
+              <button id="nodeTxNextBtn" class="dock-icon-button" type="button" aria-label="Next transactions page">
+                →
+              </button>
+            </div>
+          </div>
+          </aside>
+        </section>
+
+        <aside id="externalPanels" class="external-panels">
+          <aside id="detailPanel" class="detail-panel">
+          <div class="detail-sticky">
+            <div class="panel-head">
+              <div class="panel-chip">SETTINGS</div>
+              <button id="drawerCloseBtn" class="drawer-close" type="button" aria-label="Close Settings">
+                ×
+              </button>
+            </div>
+            <div class="heading-row">
+              <h2>Settings</h2>
+              <button class="help-trigger" type="button" data-help-key="settings_overview" aria-label="Help: Graph settings">
+                ?
+              </button>
+            </div>
+            <div class="node-detail-subtitle">Display and analysis controls for graph interpretation.</div>
+          </div>
+          <div class="settings-block settings-groups">
+            <div class="heading-row compact">
+              <h3>Graph Settings</h3>
+              <button class="help-trigger" type="button" data-help-key="settings_overview" aria-label="Help: Graph settings">
+                ?
+              </button>
+            </div>
+
+            <details id="settingsGraphSection" class="settings-section" open>
+              <summary>
+                <span>Graph</span>
+                <span class="settings-summary-wrap">
+                  <span class="settings-summary" id="graphSectionSummary">3 controls</span>
+                  <button class="help-trigger" type="button" data-help-key="settings_graph" aria-label="Help: Graph settings">
+                    ?
+                  </button>
+                </span>
+              </summary>
+              <div class="settings-section-body">
+                <label class="settings-row">
+                  <input id="llmMissToggle" type="checkbox" checked />
+                  <span>Initial LLM miss links</span>
+                </label>
+                <label class="settings-range">
+                  <span>Merchant/connected node size</span>
+                  <input id="connectedNodeSizeRange" type="range" min="55" max="130" value="78" />
+                  <output id="connectedNodeSizeValue">0.78x</output>
+                </label>
+              </div>
+            </details>
+
+            <details id="settingsMotionSection" class="settings-section" open>
+              <summary>
+                <span>Motion</span>
+                <span class="settings-summary-wrap">
+                  <span class="settings-summary" id="motionSectionSummary">0/0 enabled</span>
+                  <button class="help-trigger" type="button" data-help-key="settings_motion" aria-label="Help: Motion settings">
+                    ?
+                  </button>
+                </span>
+              </summary>
+              <div class="settings-section-body">
+                <label class="settings-row">
+                  <input id="breatheEnabledToggle" type="checkbox" checked />
+                  <span>Enable breathing effects</span>
+                </label>
+                <label class="settings-row">
+                  <input id="globalPulseToggle" type="checkbox" checked />
+                  <span>Global slow pulse</span>
+                </label>
+                <label class="settings-range">
+                  <span>Global pulse intensity</span>
+                  <input id="globalPulseIntensityRange" type="range" min="0" max="100" value="34" />
+                  <output id="globalPulseIntensityValue">0.34</output>
+                </label>
+                <label class="settings-range">
+                  <span>Global pulse speed</span>
+                  <input id="globalPulseSpeedRange" type="range" min="20" max="180" value="62" />
+                  <output id="globalPulseSpeedValue">0.62x</output>
+                </label>
+                <label class="settings-row">
+                  <input id="phaseLagToggle" type="checkbox" checked />
+                  <span>Category-led phase lag</span>
+                </label>
+                <label class="settings-row">
+                  <input id="edgeShimmerToggle" type="checkbox" checked />
+                  <span>Edge flow shimmer</span>
+                </label>
+                <label class="settings-range">
+                  <span>Edge shimmer intensity</span>
+                  <input id="edgeShimmerIntensityRange" type="range" min="0" max="100" value="30" />
+                  <output id="edgeShimmerIntensityValue">0.30</output>
+                </label>
+                <label class="settings-row">
+                  <input id="interactionRippleToggle" type="checkbox" checked />
+                  <span>Interaction ripple</span>
+                </label>
+                <label class="settings-range">
+                  <span>Interaction ripple strength</span>
+                  <input id="interactionRippleStrengthRange" type="range" min="10" max="200" value="86" />
+                  <output id="interactionRippleStrengthValue">0.86x</output>
+                </label>
+                <label class="settings-row">
+                  <input id="ambientDriftToggle" type="checkbox" checked />
+                  <span>Ambient drift</span>
+                </label>
+                <label class="settings-range">
+                  <span>Ambient drift strength</span>
+                  <input id="ambientDriftStrengthRange" type="range" min="0" max="120" value="22" />
+                  <output id="ambientDriftStrengthValue">0.22</output>
+                </label>
+                <label class="settings-row">
+                  <input id="confidencePulseToggle" type="checkbox" checked />
+                  <span>Confidence-driven pulse</span>
+                </label>
+                <label class="settings-row">
+                  <input id="timelineHeartbeatToggle" type="checkbox" checked />
+                  <span>Timeline heartbeat</span>
+                </label>
+                <label class="settings-range">
+                  <span>Timeline heartbeat strength</span>
+                  <input id="timelineHeartbeatStrengthRange" type="range" min="0" max="180" value="62" />
+                  <output id="timelineHeartbeatStrengthValue">0.62</output>
+                </label>
+                <label class="settings-row">
+                  <input id="backgroundFieldToggle" type="checkbox" checked />
+                  <span>Background field motion</span>
+                </label>
+                <label class="settings-range">
+                  <span>Background field intensity</span>
+                  <input id="backgroundFieldIntensityRange" type="range" min="0" max="120" value="28" />
+                  <output id="backgroundFieldIntensityValue">0.28</output>
+                </label>
+              </div>
+            </details>
+
+            <details id="settingsDisplaySection" class="settings-section">
+              <summary>
+                <span>Display</span>
+                <span class="settings-summary-wrap">
+                  <span class="settings-summary" id="displaySectionSummary">2 toggles</span>
+                  <button class="help-trigger" type="button" data-help-key="settings_display" aria-label="Help: Display settings">
+                    ?
+                  </button>
+                </span>
+              </summary>
+              <div class="settings-section-body">
+                <label class="settings-row">
+                  <input id="edgeTextToggle" type="checkbox" />
+                  <span>Connection line text</span>
+                </label>
+                <label class="settings-row">
+                  <input id="nodeTextToggle" type="checkbox" />
+                  <span>Merchant/connected node text</span>
+                </label>
+              </div>
+            </details>
+          </div>
+          </aside>
+
+          <aside id="qualityPanel" class="quality-panel collapsed">
+          <div class="panel-head">
+            <div class="panel-chip">MODEL_QUALITY</div>
+            <button id="qualityCloseBtn" class="drawer-close" type="button" aria-label="Close Model Quality">
+              ×
+            </button>
+          </div>
+          <div class="heading-row">
+            <h2>Model Quality</h2>
+            <button class="help-trigger" type="button" data-help-key="quality_overview" aria-label="Help: Model quality">
+              ?
+            </button>
+          </div>
+          <div class="quality-block">
+            <div class="quality-head">
+              <div class="heading-row compact">
+                <h3>Metrics</h3>
+                <button class="help-trigger" type="button" data-help-key="quality_metrics" aria-label="Help: Quality metrics">
+                  ?
+                </button>
+              </div>
+              <button id="qualityRefreshBtn" class="quality-refresh-btn" type="button">Refresh</button>
+            </div>
+            <div id="qualitySummary" class="quality-summary">Loading quality metrics...</div>
+
+            <div class="quality-subtitle">
+              <span>Per-category performance</span>
+              <button class="help-trigger" type="button" data-help-key="quality_per_category" aria-label="Help: Per-category performance">
+                ?
+              </button>
+            </div>
+            <div id="qualityCategoryTable" class="quality-table-wrap"></div>
+
+            <div class="quality-subtitle">
+              <span>Confusion matrix</span>
+              <button class="help-trigger" type="button" data-help-key="quality_confusion" aria-label="Help: Confusion matrix">
+                ?
+              </button>
+            </div>
+            <div id="qualityConfusion" class="quality-table-wrap"></div>
+
+            <div class="quality-subtitle">
+              <span>Confidence calibration</span>
+              <button class="help-trigger" type="button" data-help-key="quality_calibration" aria-label="Help: Confidence calibration">
+                ?
+              </button>
+            </div>
+            <div id="qualityCalibration" class="quality-calibration"></div>
+
+            <div class="quality-subtitle">
+              <span>Replay backtest trend</span>
+              <button class="help-trigger" type="button" data-help-key="quality_replay" aria-label="Help: Replay trend">
+                ?
+              </button>
+            </div>
+            <div id="qualityReplay" class="quality-replay"></div>
+          </div>
+          </aside>
+
+          <aside id="insightsPanel" class="insights-panel collapsed">
+          <div class="panel-head">
+            <div class="panel-chip">AGENT_INSIGHTS</div>
+            <button id="insightsCloseBtn" class="drawer-close" type="button" aria-label="Close Agent Insights">
+              ×
+            </button>
+          </div>
+          <div class="heading-row">
+            <h2>Agent Insights</h2>
+            <button class="help-trigger" type="button" data-help-key="insights_overview" aria-label="Help: Agent insights">
+              ?
+            </button>
+          </div>
+          <div class="insights-block">
+            <div class="quality-head">
+              <div class="heading-row compact">
+                <h3>Diagnostics</h3>
+                <button class="help-trigger" type="button" data-help-key="insights_diagnostics" aria-label="Help: Diagnostics">
+                  ?
+                </button>
+              </div>
+              <button id="insightsRefreshBtn" class="quality-refresh-btn" type="button">Refresh</button>
+            </div>
+            <div id="insightsSummary" class="quality-summary">Loading insights...</div>
+
+            <details class="insights-section" open>
+              <summary>
+                <span>Case Inspector</span>
+                <button class="help-trigger" type="button" data-help-key="insights_case_inspector" aria-label="Help: Case inspector">
+                  ?
+                </button>
+              </summary>
+              <label class="insights-label" for="insightsCaseSelect">Transaction</label>
+              <select id="insightsCaseSelect" class="insights-select"></select>
+              <div id="insightsCaseBody" class="insights-case-body">No cases loaded yet.</div>
+            </details>
+
+            <details class="insights-section">
+              <summary>
+                <span>Ambiguity & Risk</span>
+                <button class="help-trigger" type="button" data-help-key="insights_risk" aria-label="Help: Ambiguity and risk">
+                  ?
+                </button>
+              </summary>
+              <div id="insightsRiskTable" class="quality-table-wrap"></div>
+            </details>
+
+            <details class="insights-section">
+              <summary>
+                <span>Stability & Learning Velocity</span>
+                <button class="help-trigger" type="button" data-help-key="insights_stability" aria-label="Help: Stability and learning velocity">
+                  ?
+                </button>
+              </summary>
+              <div id="insightsStabilityTable" class="quality-table-wrap"></div>
+            </details>
+          </div>
+          </aside>
+
+        </aside>
+      </section>
+
+      <footer class="bottom-dock">
+        <div class="dock-group dock-group-query">
+          <div class="dock-search">
+            <span class="dock-icon" aria-hidden="true">⌕</span>
+            <input id="searchInput" type="text" placeholder="Query graph..." />
+          </div>
+          <label class="dock-field compact-field">
+            <span>Min Weight</span>
+            <input id="minWeightInput" type="number" min="0" step="0.1" value="0" />
+          </label>
+          <label class="dock-field compact-field">
+            <span>Limit</span>
+            <input id="limitInput" type="number" min="25" max="1000" step="25" value="250" />
+          </label>
+          <label class="dock-toggle">
+            <input id="verifiedOnlyInput" type="checkbox" />
+            <span>Verified</span>
+          </label>
+          <button id="refreshBtn" class="dock-button dock-button-primary" type="button">Refresh</button>
+          <button class="help-trigger dock-help" type="button" data-help-key="dock_query" aria-label="Help: Query and filters">
+            ?
+          </button>
+        </div>
+
+        <div class="dock-divider"></div>
+
+        <div class="dock-group dock-group-timeline">
+          <button id="timelinePlayBtn" class="dock-button" type="button">Play</button>
+          <label class="dock-field timeline-field">
+            <span>Time</span>
+            <input id="timelineSlider" type="range" min="0" max="0" value="0" step="1" />
+          </label>
+          <div id="timelineValue" class="timeline-value">All time</div>
+          <button class="help-trigger dock-help" type="button" data-help-key="dock_timeline" aria-label="Help: Timeline controls">
+            ?
+          </button>
+        </div>
+
+        <div class="dock-divider"></div>
+
+        <div class="dock-group dock-group-zoom">
+          <button id="zoomOutBtn" class="dock-icon-button" type="button" aria-label="Zoom Out">−</button>
+          <button id="zoomResetBtn" class="dock-icon-button" type="button">100%</button>
+          <button id="zoomInBtn" class="dock-icon-button" type="button" aria-label="Zoom In">+</button>
+          <button class="help-trigger dock-help" type="button" data-help-key="dock_zoom" aria-label="Help: Zoom controls">
+            ?
+          </button>
+        </div>
+      </footer>
+
+      <div id="helpPopover" class="help-popover hidden" role="dialog" aria-live="polite" aria-label="Context help">
+        <div class="help-popover-head">
+          <h4 id="helpPopoverTitle">Help</h4>
+          <button id="helpPopoverClose" type="button" class="help-close" aria-label="Close help">×</button>
+        </div>
+        <div id="helpPopoverBody" class="help-popover-body"></div>
+      </div>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+    <script src="https://cdn.jsdelivr.net/npm/d3-sankey@0.12.3/dist/d3-sankey.min.js"></script>
+    <script src="/graph.js"></script>
+  </body>
+</html>

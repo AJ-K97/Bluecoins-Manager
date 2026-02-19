@@ -1194,51 +1194,277 @@ def export_to_bluecoins_csv(transactions, output_path):
             return f"{user_note} | Source: {cleaned_desc}"
         return user_note or cleaned_desc
 
+    def _parse_signed_number(value):
+        if value is None:
+            return None
+        text = str(value).strip().replace(",", "").replace("$", "")
+        if not text:
+            return None
+        if text.startswith("(") and text.endswith(")"):
+            text = f"-{text[1:-1]}"
+        text = re.sub(r"\s+", "", text)
+        text = re.sub(r"[^0-9.\-+]", "", text)
+        if not text or text in {"+", "-", ".", "+.", "-."}:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+    def _infer_direction_from_raw_row(tx):
+        raw = getattr(tx, "raw_csv_row", None)
+        if not raw:
+            return "unknown"
+
+        # Prefer structured parse if raw row was persisted as JSON.
+        if isinstance(raw, str):
+            raw_str = raw.strip()
+            if raw_str.startswith("{") and raw_str.endswith("}"):
+                try:
+                    payload = json.loads(raw_str)
+                except Exception:
+                    payload = None
+                if isinstance(payload, dict):
+                    # 1) Explicit direction-like fields.
+                    for k, v in payload.items():
+                        key = str(k or "").strip().lower()
+                        val = str(v or "").strip().upper()
+                        if key in {"direction", "dir"}:
+                            if val == "IN":
+                                return "in"
+                            if val == "OUT":
+                                return "out"
+                        if key in {"credit/debit", "debit/credit", "dr/cr"}:
+                            if "CREDIT" in val or val in {"CR", "C"}:
+                                return "in"
+                            if "DEBIT" in val or val in {"DR", "D"}:
+                                return "out"
+                        if key.endswith("direction"):
+                            if "IN" in val and "OUT" not in val:
+                                return "in"
+                            if "OUT" in val and "IN" not in val:
+                                return "out"
+
+                    # 2) Infer from signed amount-like fields.
+                    for k, v in payload.items():
+                        key = str(k or "").strip().lower()
+                        if "amount" not in key and key not in {"debit", "credit"}:
+                            continue
+                        parsed = _parse_signed_number(v)
+                        if parsed is None:
+                            continue
+                        if parsed < 0:
+                            return "out"
+                        if parsed > 0:
+                            return "in"
+
+        raw_upper = f" {str(raw).upper()} "
+        if re.search(r'"\s*DIRECTION\s*"\s*:\s*"\s*OUT\s*"', raw_upper):
+            return "out"
+        if re.search(r'"\s*DIRECTION\s*"\s*:\s*"\s*IN\s*"', raw_upper):
+            return "in"
+        if " DIRECTION " in raw_upper:
+            if " OUT " in raw_upper and " IN " not in raw_upper:
+                return "out"
+            if " IN " in raw_upper and " OUT " not in raw_upper:
+                return "in"
+
+        return "unknown"
+
+    def _infer_transfer_direction(tx):
+        raw_dir = _infer_direction_from_raw_row(tx)
+        if raw_dir != "unknown":
+            return raw_dir
+
+        text = f" {_normalize_whitespace(getattr(tx, 'description', '')).upper()} "
+        inbound_markers = ("TRANSFER FROM", "PAYMENT FROM")
+        outbound_markers = ("TRANSFER TO", "PAYMENT TO")
+        has_inbound = any(m in text for m in inbound_markers)
+        has_outbound = any(m in text for m in outbound_markers)
+        if has_inbound and not has_outbound:
+            return "in"
+        if has_outbound and not has_inbound:
+            return "out"
+
+        has_from_word = re.search(r"\bFROM\b", text) is not None
+        has_to_word = re.search(r"\bTO\b", text) is not None
+        if has_from_word and not has_to_word:
+            return "in"
+        if has_to_word and not has_from_word:
+            return "out"
+        return "unknown"
+
+    def _tx_sort_key(entry):
+        tx_id = getattr(entry["tx"], "id", None)
+        has_numeric_id = isinstance(tx_id, int)
+        return (0 if has_numeric_id else 1, tx_id if has_numeric_id else entry["idx"], entry["idx"])
+
+    def _account_key(tx):
+        acc_id = getattr(tx, "account_id", None)
+        if acc_id is not None:
+            return f"id:{acc_id}"
+        account = getattr(tx, "account", None)
+        acc_name = _normalize_whitespace(getattr(account, "name", "")) if account else ""
+        return f"name:{acc_name}" if acc_name else "unknown"
+
+    def _pair_transfer_transactions():
+        entries = []
+        for idx, tx in enumerate(transactions):
+            if getattr(tx, "type", None) != "transfer":
+                continue
+            date_val = getattr(tx, "date", None)
+            day = date_val.date() if hasattr(date_val, "date") else date_val
+            amount_val = getattr(tx, "amount", 0.0)
+            try:
+                abs_amount = abs(float(amount_val))
+            except (TypeError, ValueError):
+                abs_amount = abs(amount_val) if amount_val is not None else 0.0
+            entries.append(
+                {
+                    "idx": idx,
+                    "tx": tx,
+                    "direction": _infer_transfer_direction(tx),
+                    "group_key": (day, abs_amount),
+                    "account_key": _account_key(tx),
+                }
+            )
+
+        paired_indices = set()
+        pair_lookup = {}
+        skip_records = []
+        by_group = {}
+        for entry in entries:
+            by_group.setdefault(entry["group_key"], []).append(entry)
+
+        for group in by_group.values():
+            outs = sorted([e for e in group if e["direction"] == "out"], key=_tx_sort_key)
+            ins = sorted([e for e in group if e["direction"] == "in"], key=_tx_sort_key)
+            used_in_idx = set()
+
+            for out_e in outs:
+                candidates = [in_e for in_e in ins if in_e["idx"] not in used_in_idx]
+                if not candidates:
+                    continue
+                candidates.sort(
+                    key=lambda in_e: (
+                        0 if in_e["account_key"] != out_e["account_key"] else 1,
+                        _tx_sort_key(in_e),
+                    )
+                )
+                chosen = candidates[0]
+                used_in_idx.add(chosen["idx"])
+                paired_indices.add(out_e["idx"])
+                paired_indices.add(chosen["idx"])
+                pair_lookup[out_e["idx"]] = (out_e, chosen)
+                pair_lookup[chosen["idx"]] = (out_e, chosen)
+
+            for e in sorted(group, key=_tx_sort_key):
+                if e["idx"] in paired_indices:
+                    continue
+                if e["direction"] == "unknown":
+                    reason = "direction_unknown"
+                else:
+                    reason = "pair_not_found"
+                skip_records.append(
+                    {
+                        "idx": e["idx"],
+                        "id": getattr(e["tx"], "id", None),
+                        "reason": reason,
+                    }
+                )
+
+        skipped_indices = {s["idx"] for s in skip_records}
+        return pair_lookup, paired_indices, skipped_indices, skip_records
+
+    def _amount_as_float(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _build_export_row(tx, amount_override=None):
+        parent_name, cat_name = get_transaction_category_display(tx)
+
+        # Account name might not be loaded if we didn't join Account?
+        # Transaction.account_id is there, but we need Account name.
+        # Ideally get_transactions should load Account too.
+        # But for `process_import`, we knew it from `account` object.
+        # For general export, we need to ensure account is loaded or passed.
+
+        # Let's rely on lazy load or ensure eager load in query.
+        # But `process_import` passed `new_txs` which are attached to session?
+        # Wait, `get_transactions` does not load Account.
+        pass
+
+        # We need account name.
+        # Let's assume transactions have account relationship loaded if needed.
+        # Or we fetch it.
+
+        # Actually, `Transaction` model should have `account` relationship.
+        # Let's check `src/database.py`...
+        # Assuming it does.
+
+        acc_name = tx.account.name if tx.account else "Unknown"
+        notes = _build_notes_value(tx)
+        item_or_payee = _summarize_item_or_payee(tx)
+        amount_value = _amount_as_float(tx.amount) if amount_override is None else amount_override
+
+        return [
+            "t" if tx.type == "transfer" else ("e" if tx.type == "expense" else "i"),
+            tx.date.strftime("%m/%d/%Y"),
+            item_or_payee,
+            str(amount_value),
+            parent_name,
+            cat_name,
+            "Bank",
+            acc_name,
+            notes,
+            "",
+            "",
+            "",
+        ]
+
     try:
+        pair_lookup, paired_transfer_indices, skipped_transfer_indices, skipped_transfers = _pair_transfer_transactions()
+        exported_count = 0
+        written_transfer_indices = set()
         with open(output_path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(header)
             
-            for tx in transactions:
-                parent_name, cat_name = get_transaction_category_display(tx)
-                
-                # Account name might not be loaded if we didn't join Account? 
-                # Transaction.account_id is there, but we need Account name.
-                # Ideally get_transactions should load Account too.
-                # But for `process_import`, we knew it from `account` object.
-                # For general export, we need to ensure account is loaded or passed.
-                
-                # Let's rely on lazy load or ensure eager load in query.
-                # But `process_import` passed `new_txs` which are attached to session? 
-                # Wait, `get_transactions` does not load Account.
-                pass
-                
-                # We need account name. 
-                # Let's assume transactions have account relationship loaded if needed.
-                # Or we fetch it.
-                
-                # Actually, `Transaction` model should have `account` relationship.
-                # Let's check `src/database.py`... 
-                # Assuming it does.
-                
-                acc_name = tx.account.name if tx.account else "Unknown"
-                notes = _build_notes_value(tx)
-                item_or_payee = _summarize_item_or_payee(tx)
+            for idx, tx in enumerate(transactions):
+                if getattr(tx, "type", None) != "transfer":
+                    amount_value = abs(_amount_as_float(getattr(tx, "amount", 0.0)))
+                    writer.writerow(_build_export_row(tx, amount_override=amount_value))
+                    exported_count += 1
+                    continue
 
-                writer.writerow([
-                    "t" if tx.type == "transfer" else ("e" if tx.type == "expense" else "i"),
-                    tx.date.strftime("%m/%d/%Y"),
-                    item_or_payee,
-                    str(tx.amount),
-                    parent_name,
-                    cat_name,
-                    "Bank",
-                    acc_name,
-                    notes,
-                    "",
-                    "",
-                    "",
-                ])
-        return True, f"Exported {len(transactions)} transactions to {output_path}"
+                if idx in skipped_transfer_indices or idx in written_transfer_indices:
+                    continue
+                if idx not in paired_transfer_indices:
+                    continue
+
+                out_e, in_e = pair_lookup[idx]
+                out_idx = out_e["idx"]
+                in_idx = in_e["idx"]
+                if out_idx in written_transfer_indices or in_idx in written_transfer_indices:
+                    continue
+
+                out_tx = out_e["tx"]
+                in_tx = in_e["tx"]
+                writer.writerow(_build_export_row(out_tx, amount_override=-abs(_amount_as_float(getattr(out_tx, "amount", 0.0)))))
+                writer.writerow(_build_export_row(in_tx, amount_override=abs(_amount_as_float(getattr(in_tx, "amount", 0.0)))))
+                written_transfer_indices.add(out_idx)
+                written_transfer_indices.add(in_idx)
+                exported_count += 2
+
+        msg = f"Exported {exported_count} transactions to {output_path}"
+        if skipped_transfers:
+            skipped_bits = []
+            for s in skipped_transfers:
+                label = f"#{s['id']}" if s.get("id") is not None else f"@{s['idx']}"
+                skipped_bits.append(f"{label}({s['reason']})")
+            msg += f". Skipped {len(skipped_transfers)} unpaired transfers: {', '.join(skipped_bits)}"
+        return True, msg
     except Exception as e:
         return False, f"Export failed: {e}"

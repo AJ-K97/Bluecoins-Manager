@@ -28,6 +28,7 @@ from src.commands import (
     add_transaction,
 )
 from src.local_llm import LocalLLMPipeline
+from src.graph_webapp import serve_graph_web_server
 from src.ai_config import (
     close_ollama_client,
     get_default_embedding_model,
@@ -639,6 +640,20 @@ async def settings_command(args):
         print(f"{marker} {model_name}")
 
 
+async def graph_web_command(args):
+    await init_db()
+    # init_db() runs on the CLI loop; clear loop-bound pooled connections
+    # before serving requests on the dedicated graph-web async loop.
+    from src.database import engine
+
+    await engine.dispose()
+    await serve_graph_web_server(
+        host=args.host,
+        port=args.port,
+        open_browser=args.open_browser,
+    )
+
+
 async def main():
     parser = argparse.ArgumentParser(description="Financial CLI V2")
     subparsers = parser.add_subparsers(dest="command")
@@ -833,6 +848,18 @@ async def main():
         help="Model name to save to .env as OLLAMA_MODEL",
     )
 
+    graph_web_parser = subparsers.add_parser(
+        "graph-web",
+        help="Run the local keyword->category memory graph webapp.",
+    )
+    graph_web_parser.add_argument("--host", default="127.0.0.1", help="Host to bind")
+    graph_web_parser.add_argument("--port", type=int, default=8787, help="Port to bind")
+    graph_web_parser.add_argument(
+        "--open-browser",
+        action="store_true",
+        help="Open the graph page in the default browser.",
+    )
+
     args = parser.parse_args()
 
     # Commands that do not require database connectivity.
@@ -841,6 +868,9 @@ async def main():
         return
     if args.command == "settings":
         await settings_command(args)
+        return
+    if args.command == "graph-web":
+        await graph_web_command(args)
         return
 
     await init_db()
