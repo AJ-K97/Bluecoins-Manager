@@ -30,6 +30,14 @@
         <button id="drawerToggleBtn" class="drawer-toggle" type="button" aria-label="Open Settings">
           ⚙
         </button>
+        <button
+          id="qualityDrawerToggleBtn"
+          class="drawer-toggle quality-toggle"
+          type="button"
+          aria-label="Open Model Quality"
+        >
+          ◫
+        </button>
 
         <aside id="detailPanel" class="detail-panel">
           <div class="panel-head">
@@ -60,6 +68,35 @@
               <input id="connectedNodeSizeRange" type="range" min="55" max="130" value="78" />
               <output id="connectedNodeSizeValue">0.78x</output>
             </label>
+          </div>
+        </aside>
+
+        <aside id="qualityPanel" class="quality-panel collapsed">
+          <div class="panel-head">
+            <div class="panel-chip">MODEL_QUALITY</div>
+            <button id="qualityCloseBtn" class="drawer-close" type="button" aria-label="Close Model Quality">
+              ×
+            </button>
+          </div>
+          <h2>Model Quality</h2>
+          <div class="quality-block">
+            <div class="quality-head">
+              <h3>Metrics</h3>
+              <button id="qualityRefreshBtn" class="quality-refresh-btn" type="button">Refresh</button>
+            </div>
+            <div id="qualitySummary" class="quality-summary">Loading quality metrics...</div>
+
+            <div class="quality-subtitle">Per-category performance</div>
+            <div id="qualityCategoryTable" class="quality-table-wrap"></div>
+
+            <div class="quality-subtitle">Confusion matrix</div>
+            <div id="qualityConfusion" class="quality-table-wrap"></div>
+
+            <div class="quality-subtitle">Confidence calibration</div>
+            <div id="qualityCalibration" class="quality-calibration"></div>
+
+            <div class="quality-subtitle">Replay backtest trend</div>
+            <div id="qualityReplay" class="quality-replay"></div>
           </div>
         </aside>
       </section>

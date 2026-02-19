@@ -641,6 +641,12 @@ async def settings_command(args):
 
 
 async def graph_web_command(args):
+    await init_db()
+    # init_db() runs on the CLI loop; clear loop-bound pooled connections
+    # before serving requests on the dedicated graph-web async loop.
+    from src.database import engine
+
+    await engine.dispose()
     await serve_graph_web_server(
         host=args.host,
         port=args.port,
@@ -863,6 +869,9 @@ async def main():
     if args.command == "settings":
         await settings_command(args)
         return
+    if args.command == "graph-web":
+        await graph_web_command(args)
+        return
 
     await init_db()
 
@@ -889,8 +898,6 @@ async def main():
         await add_tx_command(args)
     elif args.command == "benchmark":
         await benchmark_command(args)
-    elif args.command == "graph-web":
-        await graph_web_command(args)
     else:
         parser.print_help()
 

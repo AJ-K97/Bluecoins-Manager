@@ -12,6 +12,7 @@ const state = {
   showInitialMissLinks: true,
   connectedNodeScale: 0.78,
   drawerOpen: true,
+  qualityDrawerOpen: false,
   timelinePoints: [],
   timelineIndex: 0,
   isTimelinePlaying: false,
@@ -24,6 +25,7 @@ const svg = d3.select("#graphSvg");
 const statsPill = document.getElementById("statsPill");
 const detailBody = document.getElementById("detailBody");
 const detailPanel = document.getElementById("detailPanel");
+const qualityPanel = document.getElementById("qualityPanel");
 
 const searchInput = document.getElementById("searchInput");
 const minWeightInput = document.getElementById("minWeightInput");
@@ -38,6 +40,8 @@ const connectedNodeSizeRange = document.getElementById("connectedNodeSizeRange")
 const connectedNodeSizeValue = document.getElementById("connectedNodeSizeValue");
 const drawerToggleBtn = document.getElementById("drawerToggleBtn");
 const drawerCloseBtn = document.getElementById("drawerCloseBtn");
+const qualityDrawerToggleBtn = document.getElementById("qualityDrawerToggleBtn");
+const qualityCloseBtn = document.getElementById("qualityCloseBtn");
 
 const zoomInBtn = document.getElementById("zoomInBtn");
 const zoomOutBtn = document.getElementById("zoomOutBtn");
@@ -46,6 +50,12 @@ const zoomResetBtn = document.getElementById("zoomResetBtn");
 const timelinePlayBtn = document.getElementById("timelinePlayBtn");
 const timelineSlider = document.getElementById("timelineSlider");
 const timelineValue = document.getElementById("timelineValue");
+const qualityRefreshBtn = document.getElementById("qualityRefreshBtn");
+const qualitySummary = document.getElementById("qualitySummary");
+const qualityCategoryTable = document.getElementById("qualityCategoryTable");
+const qualityConfusion = document.getElementById("qualityConfusion");
+const qualityCalibration = document.getElementById("qualityCalibration");
+const qualityReplay = document.getElementById("qualityReplay");
 
 function sourceId(edge) {
   return typeof edge.source === "object" ? edge.source.id : edge.source;
@@ -74,6 +84,30 @@ function formatDate(value) {
 function formatAmount(value) {
   if (typeof value !== "number") return "-";
   return value.toFixed(2);
+}
+
+function formatPercent(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+  return `${(Number(value) * 100).toFixed(1)}%`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function shortCategoryLabel(rawLabel) {
+  const label = String(rawLabel || "").trim();
+  if (!label) return "Unknown";
+  const noType = label.replace(/\s*\[[^\]]+\]\s*$/, "");
+  const parts = noType.split(">");
+  const compact = (parts[parts.length - 1] || noType).trim();
+  if (compact.length <= 18) return compact;
+  return `${compact.slice(0, 15)}...`;
 }
 
 function timelineMsFromDate(value) {
@@ -168,6 +202,33 @@ function setDrawerOpen(isOpen) {
   if (!detailPanel || !drawerToggleBtn) return;
   detailPanel.classList.toggle("collapsed", !state.drawerOpen);
   drawerToggleBtn.classList.toggle("hidden", state.drawerOpen);
+}
+
+function setQualityDrawerOpen(isOpen) {
+  state.qualityDrawerOpen = Boolean(isOpen);
+  if (!qualityPanel || !qualityDrawerToggleBtn) return;
+  qualityPanel.classList.toggle("collapsed", !state.qualityDrawerOpen);
+  qualityDrawerToggleBtn.classList.toggle("hidden", state.qualityDrawerOpen);
+}
+
+async function fetchJsonOrThrow(url, label) {
+  const response = await fetch(url);
+  const rawText = await response.text();
+  let payload = null;
+  try {
+    payload = JSON.parse(rawText);
+  } catch (_error) {
+    const preview = rawText.replace(/\s+/g, " ").trim().slice(0, 140);
+    const isHtml = /^<!doctype|^<html/i.test(rawText.trim());
+    const hint = isHtml
+      ? "Received HTML instead of JSON. Restart graph-web to load the latest API routes."
+      : preview || "Empty response.";
+    throw new Error(`${label} returned non-JSON (${response.status}). ${hint}`);
+  }
+  if (!response.ok) {
+    throw new Error(payload?.error || `${label} request failed (${response.status})`);
+  }
+  return payload;
 }
 
 function stopTimelinePlayback() {
@@ -710,6 +771,164 @@ function focusNodeWithZoom(node) {
   svg.transition().duration(320).call(state.zoomBehavior.transform, transform);
 }
 
+function clearQualityPanels(message) {
+  if (qualitySummary) qualitySummary.textContent = message;
+  if (qualityCategoryTable) qualityCategoryTable.innerHTML = "";
+  if (qualityConfusion) qualityConfusion.innerHTML = "";
+  if (qualityCalibration) qualityCalibration.innerHTML = "";
+  if (qualityReplay) qualityReplay.innerHTML = "";
+}
+
+function renderQualityReport(qualityPayload, replayPayload) {
+  if (!qualitySummary) return;
+
+  const summary = qualityPayload?.summary || {};
+  const replayMonths = replayPayload?.months || qualityPayload?.replay || [];
+  const bestPeriod = replayPayload?.best_period || null;
+  const worstPeriod = replayPayload?.worst_period || null;
+  qualitySummary.textContent = [
+    `Scored: ${summary.total_scored || 0}`,
+    `Accuracy: ${formatPercent(summary.accuracy)}`,
+    `Macro F1: ${formatPercent(summary.macro_f1)}`,
+    `Categories: ${summary.categories_covered || 0}`,
+    bestPeriod ? `Best month: ${bestPeriod.period} (${formatPercent(bestPeriod.accuracy)})` : "",
+    worstPeriod ? `Worst month: ${worstPeriod.period} (${formatPercent(worstPeriod.accuracy)})` : "",
+  ]
+    .filter(Boolean)
+    .join(" | ");
+
+  if (qualityCategoryTable) {
+    const rows = (qualityPayload?.per_category || []).slice(0, 12);
+    if (!rows.length) {
+      qualityCategoryTable.innerHTML = `<div class="quality-line"><div class="quality-line-label">No scored category rows yet.</div></div>`;
+    } else {
+      const body = rows
+        .map(
+          (row) => `
+          <tr>
+            <td title="${escapeHtml(row.category_label)}">${escapeHtml(shortCategoryLabel(row.category_label))}</td>
+            <td class="metric-cell">${Number(row.support || 0)}</td>
+            <td class="metric-cell">${formatPercent(row.precision)}</td>
+            <td class="metric-cell">${formatPercent(row.recall)}</td>
+            <td class="metric-cell">${formatPercent(row.f1)}</td>
+          </tr>`,
+        )
+        .join("");
+      qualityCategoryTable.innerHTML = `
+        <table class="quality-table">
+          <thead>
+            <tr>
+              <th>Category</th>
+              <th>Support</th>
+              <th>Precision</th>
+              <th>Recall</th>
+              <th>F1</th>
+            </tr>
+          </thead>
+          <tbody>${body}</tbody>
+        </table>`;
+    }
+  }
+
+  if (qualityConfusion) {
+    const labels = (qualityPayload?.confusion?.labels || []).slice(0, 8);
+    const rows = (qualityPayload?.confusion?.rows || []).slice(0, labels.length);
+    if (!labels.length || !rows.length) {
+      qualityConfusion.innerHTML = `<div class="quality-line"><div class="quality-line-label">Not enough scored data for confusion matrix.</div></div>`;
+    } else {
+      const maxCount = Math.max(
+        1,
+        ...rows.flatMap((row) => (row.counts || []).slice(0, labels.length).map((value) => Number(value || 0))),
+      );
+      const headerCells = labels
+        .map((label) => `<th title="${escapeHtml(label.label)}">${escapeHtml(shortCategoryLabel(label.label))}</th>`)
+        .join("");
+      const bodyRows = rows
+        .map((row) => {
+          const cells = (row.counts || [])
+            .slice(0, labels.length)
+            .map((value) => {
+              const count = Number(value || 0);
+              const alpha = count > 0 ? 0.08 + (count / maxCount) * 0.52 : 0;
+              return `<td class="metric-cell" style="background: rgba(95, 135, 152, ${alpha.toFixed(3)});">${count}</td>`;
+            })
+            .join("");
+          return `
+          <tr>
+            <td title="${escapeHtml(row.actual_label)}">${escapeHtml(shortCategoryLabel(row.actual_label))}</td>
+            ${cells}
+          </tr>`;
+        })
+        .join("");
+      qualityConfusion.innerHTML = `
+        <table class="quality-table">
+          <thead>
+            <tr>
+              <th>Actual \\ Pred</th>
+              ${headerCells}
+            </tr>
+          </thead>
+          <tbody>${bodyRows}</tbody>
+        </table>`;
+    }
+  }
+
+  if (qualityCalibration) {
+    const bins = (qualityPayload?.calibration || []).filter((row) => Number(row.count || 0) > 0);
+    if (!bins.length) {
+      qualityCalibration.innerHTML = `<div class="quality-line"><div class="quality-line-label">No confidence values available for calibration.</div></div>`;
+    } else {
+      const maxCount = Math.max(1, ...bins.map((row) => Number(row.count || 0)));
+      qualityCalibration.innerHTML = bins
+        .map((row) => {
+          const start = Math.round(Number(row.range_start || 0) * 100);
+          const end = Math.round(Number(row.range_end || 0) * 100);
+          const width = Math.max(8, Math.round((Number(row.count || 0) / maxCount) * 100));
+          return `
+          <div class="quality-line">
+            <div class="quality-line-label">${start}-${end}% | conf ${formatPercent(row.avg_confidence)} | acc ${formatPercent(row.accuracy)}</div>
+            <div class="quality-line-value">n=${Number(row.count || 0)}</div>
+          </div>
+          <div class="quality-bar"><div class="quality-bar-fill" style="width:${width}%;"></div></div>`;
+        })
+        .join("");
+    }
+  }
+
+  if (qualityReplay) {
+    const points = replayMonths.slice(-10);
+    if (!points.length) {
+      qualityReplay.innerHTML = `<div class="quality-line"><div class="quality-line-label">Replay data unavailable.</div></div>`;
+    } else {
+      qualityReplay.innerHTML = points
+        .map((point) => {
+          const width = Math.max(6, Math.round((Number(point.accuracy || 0) || 0) * 100));
+          return `
+          <div class="quality-line">
+            <div class="quality-line-label">${escapeHtml(point.period)}</div>
+            <div class="quality-line-value">${formatPercent(point.accuracy)} (${point.correct}/${point.count})</div>
+          </div>
+          <div class="quality-bar"><div class="quality-bar-fill" style="width:${width}%;"></div></div>`;
+        })
+        .join("");
+    }
+  }
+}
+
+async function loadQuality() {
+  if (!qualitySummary) return;
+  qualitySummary.textContent = "Loading quality metrics...";
+  try {
+    const [qualityPayload, replayPayload] = await Promise.all([
+      fetchJsonOrThrow("/api/quality?confusion_limit=10&replay_months=18", "Quality API"),
+      fetchJsonOrThrow("/api/replay?months=18", "Replay API"),
+    ]);
+    renderQualityReport(qualityPayload, replayPayload);
+  } catch (error) {
+    clearQualityPanels(`Could not load model quality data: ${error.message}`);
+  }
+}
+
 function renderGraph(graph) {
   const width = svg.node().clientWidth || 1200;
   const height = svg.node().clientHeight || 760;
@@ -1009,17 +1228,15 @@ async function loadGraph() {
   const query = buildQueryString();
 
   try {
-    const response = await fetch(`/api/graph?${query}`);
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload.error || `Request failed with ${response.status}`);
-    }
+    const payload = await fetchJsonOrThrow(`/api/graph?${query}`, "Graph API");
     state.graph = payload;
     updateStats(payload.stats || {});
     renderGraph(payload);
+    loadQuality();
   } catch (error) {
     statsPill.textContent = "Failed to load graph";
     setDetailPanel(`Could not load graph data.\n${error.message}`);
+    clearQualityPanels("Graph load failed. Quality metrics unavailable.");
   }
 }
 
@@ -1074,15 +1291,35 @@ if (timelinePlayBtn) {
   });
 }
 
+if (qualityRefreshBtn) {
+  qualityRefreshBtn.addEventListener("click", () => {
+    loadQuality();
+  });
+}
+
 if (drawerToggleBtn) {
   drawerToggleBtn.addEventListener("click", () => {
     setDrawerOpen(true);
+    setQualityDrawerOpen(false);
   });
 }
 
 if (drawerCloseBtn) {
   drawerCloseBtn.addEventListener("click", () => {
     setDrawerOpen(false);
+  });
+}
+
+if (qualityDrawerToggleBtn) {
+  qualityDrawerToggleBtn.addEventListener("click", () => {
+    setQualityDrawerOpen(true);
+    setDrawerOpen(false);
+  });
+}
+
+if (qualityCloseBtn) {
+  qualityCloseBtn.addEventListener("click", () => {
+    setQualityDrawerOpen(false);
   });
 }
 
@@ -1129,4 +1366,5 @@ if (timelinePlayBtn) timelinePlayBtn.disabled = true;
 syncConnectedNodeScaleLabel();
 updateTimelineLabel();
 setDrawerOpen(true);
+setQualityDrawerOpen(false);
 loadGraph();

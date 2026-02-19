@@ -110,7 +110,30 @@ body {
   transition: transform 180ms ease, opacity 180ms ease;
 }
 
+.quality-panel {
+  position: absolute;
+  right: 1rem;
+  top: 1rem;
+  width: min(520px, calc(100% - 2rem));
+  max-height: calc(100% - 2rem);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  box-shadow: 0 12px 22px rgba(21, 31, 37, 0.08);
+  padding: 0.85rem 0.9rem;
+  transition: transform 180ms ease, opacity 180ms ease;
+  overflow: hidden;
+}
+
 .detail-panel.collapsed {
+  transform: translateX(calc(100% + 1rem));
+  opacity: 0;
+  pointer-events: none;
+}
+
+.quality-panel.collapsed {
   transform: translateX(calc(100% + 1rem));
   opacity: 0;
   pointer-events: none;
@@ -143,6 +166,10 @@ body {
   box-shadow: 0 6px 14px rgba(30, 40, 44, 0.09);
 }
 
+.quality-toggle {
+  top: 3.05rem;
+}
+
 .drawer-toggle.hidden {
   display: none;
 }
@@ -159,6 +186,12 @@ body {
 }
 
 .detail-panel h2 {
+  margin: 0.65rem 0 0.4rem;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 1.24rem;
+}
+
+.quality-panel h2 {
   margin: 0.65rem 0 0.4rem;
   font-family: "Space Grotesk", sans-serif;
   font-size: 1.24rem;
@@ -217,6 +250,154 @@ body {
   font-family: "Space Mono", monospace;
   font-size: 0.74rem;
   color: #73797d;
+}
+
+.quality-block {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  padding-right: 0.3rem;
+}
+
+.quality-block::-webkit-scrollbar {
+  width: 9px;
+}
+
+.quality-block::-webkit-scrollbar-track {
+  background: rgba(216, 220, 223, 0.55);
+  border-radius: 999px;
+}
+
+.quality-block::-webkit-scrollbar-thumb {
+  background: rgba(111, 136, 151, 0.75);
+  border-radius: 999px;
+  border: 2px solid rgba(216, 220, 223, 0.45);
+}
+
+.quality-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.quality-head h3 {
+  margin: 0;
+}
+
+.quality-refresh-btn {
+  border: 1px solid #ccd3d8;
+  border-radius: 7px;
+  background: #f5f7f8;
+  color: #586067;
+  font-size: 0.72rem;
+  padding: 0.24rem 0.44rem;
+  cursor: pointer;
+}
+
+.quality-refresh-btn:hover {
+  background: #edf1f3;
+}
+
+.quality-summary {
+  margin-top: 0.5rem;
+  color: #5f666c;
+  font-size: 0.79rem;
+  line-height: 1.55;
+}
+
+.quality-subtitle {
+  margin-top: 0.62rem;
+  margin-bottom: 0.28rem;
+  font-family: "Space Mono", monospace;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #788087;
+}
+
+.quality-table-wrap {
+  overflow: auto;
+  border: 1px solid #d5dade;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.68);
+}
+
+.quality-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.73rem;
+}
+
+.quality-table th,
+.quality-table td {
+  border-bottom: 1px solid #e2e6e9;
+  padding: 0.24rem 0.34rem;
+  text-align: left;
+  color: #5c6368;
+  white-space: nowrap;
+}
+
+.quality-table th {
+  font-family: "Space Mono", monospace;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  color: #727a80;
+  background: rgba(245, 247, 248, 0.82);
+}
+
+.quality-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.quality-table td.metric-cell {
+  text-align: right;
+  font-family: "Space Mono", monospace;
+}
+
+.quality-calibration,
+.quality-replay {
+  border: 1px solid #d5dade;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.68);
+  padding: 0.3rem 0.38rem;
+}
+
+.quality-line {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0.2rem 0;
+}
+
+.quality-line-label {
+  color: #5d646a;
+  font-size: 0.73rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.quality-line-value {
+  color: #656d73;
+  font-family: "Space Mono", monospace;
+  font-size: 0.67rem;
+}
+
+.quality-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: #d9e1e6;
+  margin-top: 0.14rem;
+}
+
+.quality-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: #6b8fa1;
 }
 
 .bottom-dock {
@@ -395,13 +576,31 @@ body {
     pointer-events: auto;
   }
 
+  .quality-panel {
+    position: static;
+    width: auto;
+    margin: 0.75rem;
+    transform: none;
+    opacity: 1;
+    pointer-events: auto;
+    max-height: none;
+  }
+
   .detail-panel.collapsed {
+    display: none;
+  }
+
+  .quality-panel.collapsed {
     display: none;
   }
 
   .drawer-toggle {
     right: 0.8rem;
     top: 0.8rem;
+  }
+
+  .quality-toggle {
+    top: 3.7rem;
   }
 
   .bottom-dock {

@@ -1,8 +1,10 @@
 import asyncio
 import json
 import math
+import threading
 import webbrowser
 from collections import Counter, defaultdict
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
 from functools import partial
@@ -116,6 +118,46 @@ def _update_bounds(bounds: dict, node_id: str, seen_at: Optional[datetime]) -> N
         slot["last"] = seen_at
 
 
+def _resolve_category_id(
+    user_selected_category_id: Optional[int],
+    tx_category_id: Optional[int],
+    ai_suggested_category_id: Optional[int],
+) -> Optional[int]:
+    if user_selected_category_id is not None:
+        return user_selected_category_id
+    if tx_category_id is not None:
+        return tx_category_id
+    return ai_suggested_category_id
+
+
+def _category_label_from_map(category_id: Optional[int], category_map: Dict[int, dict]) -> str:
+    if category_id is None:
+        return "Uncategorized > Uncategorized [unknown]"
+    category_meta = category_map.get(
+        category_id,
+        {"parent_name": "Unknown", "name": "Unknown", "type": "unknown"},
+    )
+    return f"{category_meta['parent_name']} > {category_meta['name']} [{category_meta['type']}]"
+
+
+async def _fetch_category_map(session, category_ids) -> Dict[int, dict]:
+    category_map = {}
+    if not category_ids:
+        return category_map
+    cat_res = await session.execute(
+        select(Category.id, Category.parent_name, Category.name, Category.type).where(
+            Category.id.in_(category_ids)
+        )
+    )
+    for category_id, parent_name, name, category_type in cat_res.all():
+        category_map[category_id] = {
+            "parent_name": parent_name or "Uncategorized",
+            "name": name or "Uncategorized",
+            "type": category_type or "unknown",
+        }
+    return category_map
+
+
 async def build_keyword_category_graph(
     session,
     *,
@@ -176,12 +218,8 @@ async def build_keyword_category_graph(
         if not keyword:
             continue
 
-        category_id = (
-            user_selected_category_id
-            if user_selected_category_id is not None
-            else tx_category_id
-            if tx_category_id is not None
-            else ai_suggested_category_id
+        category_id = _resolve_category_id(
+            user_selected_category_id, tx_category_id, ai_suggested_category_id
         )
         if category_id is None and not include_uncategorized:
             continue
@@ -239,19 +277,7 @@ async def build_keyword_category_graph(
                     }
                 )
 
-    category_map = {}
-    if category_ids:
-        cat_res = await session.execute(
-            select(Category.id, Category.parent_name, Category.name, Category.type).where(
-                Category.id.in_(category_ids)
-            )
-        )
-        for category_id, parent_name, name, category_type in cat_res.all():
-            category_map[category_id] = {
-                "parent_name": parent_name or "Uncategorized",
-                "name": name or "Uncategorized",
-                "type": category_type or "unknown",
-            }
+    category_map = await _fetch_category_map(session, category_ids)
 
     edges = []
     for edge in accumulators.values():
@@ -279,10 +305,7 @@ async def build_keyword_category_graph(
                 edge.category_id,
                 {"parent_name": "Unknown", "name": "Unknown", "type": "unknown"},
             )
-            category_label = (
-                f"{category_meta['parent_name']} > {category_meta['name']} "
-                f"[{category_meta['type']}]"
-            )
+            category_label = _category_label_from_map(edge.category_id, category_map)
             category_type = category_meta["type"]
             target_id = f"category::{edge.category_id}"
 
@@ -601,6 +624,245 @@ async def build_keyword_category_graph(
     }
 
 
+async def build_quality_report(
+    session,
+    *,
+    confusion_limit: int = 10,
+    replay_months: int = 18,
+):
+    stmt = (
+        select(
+            AIMemory.pattern_key,
+            AIMemory.user_selected_category_id,
+            AIMemory.ai_suggested_category_id,
+            AIMemory.transaction_id,
+            AIMemory.created_at,
+            Transaction.category_id,
+            Transaction.confidence_score,
+            Transaction.date,
+        )
+        .join(Transaction, Transaction.id == AIMemory.transaction_id)
+    )
+    res = await session.execute(stmt)
+    rows = res.all()
+
+    category_ids = set()
+    scored = []
+    for (
+        _pattern_key,
+        user_selected_category_id,
+        ai_suggested_category_id,
+        transaction_id,
+        memory_created_at,
+        tx_category_id,
+        confidence_score,
+        tx_date,
+    ) in rows:
+        resolved_category_id = _resolve_category_id(
+            user_selected_category_id, tx_category_id, ai_suggested_category_id
+        )
+        predicted_category_id = ai_suggested_category_id
+        if resolved_category_id is None or predicted_category_id is None:
+            continue
+
+        category_ids.add(int(resolved_category_id))
+        category_ids.add(int(predicted_category_id))
+        observed_at = _as_utc_datetime(tx_date) or _as_utc_datetime(memory_created_at)
+        scored.append(
+            {
+                "transaction_id": int(transaction_id) if transaction_id is not None else None,
+                "actual": int(resolved_category_id),
+                "predicted": int(predicted_category_id),
+                "confidence": float(confidence_score) if confidence_score is not None else None,
+                "observed_at": observed_at,
+            }
+        )
+
+    category_map = await _fetch_category_map(session, category_ids)
+
+    total_scored = len(scored)
+    correct_count = sum(1 for row in scored if row["actual"] == row["predicted"])
+    accuracy = (correct_count / total_scored) if total_scored > 0 else 0.0
+
+    category_stats = defaultdict(
+        lambda: {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "support": 0,
+            "predicted_count": 0,
+        }
+    )
+    for row in scored:
+        actual = row["actual"]
+        predicted = row["predicted"]
+        category_stats[actual]["support"] += 1
+        category_stats[predicted]["predicted_count"] += 1
+        if actual == predicted:
+            category_stats[actual]["tp"] += 1
+        else:
+            category_stats[actual]["fn"] += 1
+            category_stats[predicted]["fp"] += 1
+
+    per_category = []
+    macro_f1_total = 0.0
+    macro_f1_count = 0
+    for category_id, stats in category_stats.items():
+        tp = stats["tp"]
+        fp = stats["fp"]
+        fn = stats["fn"]
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+        macro_f1_total += f1
+        macro_f1_count += 1
+        per_category.append(
+            {
+                "category_id": category_id,
+                "category_label": _category_label_from_map(category_id, category_map),
+                "support": stats["support"],
+                "predicted_count": stats["predicted_count"],
+                "tp": tp,
+                "fp": fp,
+                "fn": fn,
+                "precision": round(precision, 4),
+                "recall": round(recall, 4),
+                "f1": round(f1, 4),
+            }
+        )
+
+    per_category.sort(key=lambda item: (item["support"], item["f1"]), reverse=True)
+    macro_f1 = (macro_f1_total / macro_f1_count) if macro_f1_count > 0 else 0.0
+
+    confusion_limit = max(4, min(20, int(confusion_limit or 10)))
+    top_actual_ids = [item["category_id"] for item in per_category[:confusion_limit]]
+    confusion_counts = defaultdict(int)
+    for row in scored:
+        actual = row["actual"]
+        predicted = row["predicted"]
+        if actual in top_actual_ids and predicted in top_actual_ids:
+            confusion_counts[(actual, predicted)] += 1
+
+    confusion_rows = []
+    for actual in top_actual_ids:
+        row_counts = [confusion_counts.get((actual, predicted), 0) for predicted in top_actual_ids]
+        confusion_rows.append(
+            {
+                "actual_category_id": actual,
+                "actual_label": _category_label_from_map(actual, category_map),
+                "support": sum(row_counts),
+                "counts": row_counts,
+            }
+        )
+
+    calibration_bins = []
+    raw_bins = [
+        {"sum_confidence": 0.0, "correct": 0, "count": 0, "start": idx / 10, "end": (idx + 1) / 10}
+        for idx in range(10)
+    ]
+    for row in scored:
+        confidence = row["confidence"]
+        if confidence is None:
+            continue
+        confidence = max(0.0, min(1.0, confidence))
+        idx = min(9, int(confidence * 10))
+        raw_bins[idx]["count"] += 1
+        raw_bins[idx]["sum_confidence"] += confidence
+        if row["actual"] == row["predicted"]:
+            raw_bins[idx]["correct"] += 1
+
+    for bucket in raw_bins:
+        count = bucket["count"]
+        avg_confidence = (bucket["sum_confidence"] / count) if count > 0 else None
+        bucket_accuracy = (bucket["correct"] / count) if count > 0 else None
+        calibration_bins.append(
+            {
+                "range_start": round(bucket["start"], 2),
+                "range_end": round(bucket["end"], 2),
+                "count": count,
+                "avg_confidence": round(avg_confidence, 4) if avg_confidence is not None else None,
+                "accuracy": round(bucket_accuracy, 4) if bucket_accuracy is not None else None,
+            }
+        )
+
+    monthly = defaultdict(lambda: {"count": 0, "correct": 0})
+    for row in scored:
+        observed_at = row["observed_at"]
+        if observed_at is None:
+            continue
+        month_key = observed_at.strftime("%Y-%m")
+        monthly[month_key]["count"] += 1
+        if row["actual"] == row["predicted"]:
+            monthly[month_key]["correct"] += 1
+
+    sorted_months = sorted(monthly.keys())
+    if replay_months > 0:
+        sorted_months = sorted_months[-max(3, min(48, int(replay_months))):]
+    replay_points = []
+    cumulative_count = 0
+    cumulative_correct = 0
+    for month_key in sorted_months:
+        row = monthly[month_key]
+        count = row["count"]
+        correct = row["correct"]
+        cumulative_count += count
+        cumulative_correct += correct
+        replay_points.append(
+            {
+                "period": month_key,
+                "count": count,
+                "correct": correct,
+                "accuracy": round(correct / count, 4) if count > 0 else 0.0,
+                "cumulative_accuracy": (
+                    round(cumulative_correct / cumulative_count, 4) if cumulative_count > 0 else 0.0
+                ),
+            }
+        )
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": {
+            "total_scored": total_scored,
+            "correct": correct_count,
+            "accuracy": round(accuracy, 4),
+            "macro_f1": round(macro_f1, 4),
+            "categories_covered": len(per_category),
+        },
+        "per_category": per_category,
+        "confusion": {
+            "labels": [
+                {"category_id": category_id, "label": _category_label_from_map(category_id, category_map)}
+                for category_id in top_actual_ids
+            ],
+            "rows": confusion_rows,
+        },
+        "calibration": calibration_bins,
+        "replay": replay_points,
+    }
+
+
+async def build_replay_report(
+    session,
+    *,
+    months: int = 18,
+):
+    report = await build_quality_report(session, replay_months=months)
+    replay_points = report.get("replay", [])
+    best_period = None
+    worst_period = None
+    if replay_points:
+        best_period = max(replay_points, key=lambda item: item["accuracy"])
+        worst_period = min(replay_points, key=lambda item: item["accuracy"])
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": report.get("summary", {}),
+        "months": replay_points,
+        "best_period": best_period,
+        "worst_period": worst_period,
+    }
+
+
 async def _graph_payload_from_query(query):
     min_weight = _coerce_float(query.get("min_weight", [None])[0], default=0.0)
     limit = _coerce_int(query.get("limit", [None])[0], default=250, minimum=25, maximum=1000)
@@ -635,11 +897,109 @@ async def _graph_payload_from_query(query):
         )
 
 
+async def _quality_payload_from_query(query):
+    confusion_limit = _coerce_int(
+        query.get("confusion_limit", [None])[0],
+        default=10,
+        minimum=4,
+        maximum=20,
+    )
+    replay_months = _coerce_int(
+        query.get("replay_months", [None])[0],
+        default=18,
+        minimum=3,
+        maximum=48,
+    )
+    async with AsyncSessionLocal() as session:
+        return await build_quality_report(
+            session,
+            confusion_limit=confusion_limit,
+            replay_months=replay_months,
+        )
+
+
+async def _replay_payload_from_query(query):
+    months = _coerce_int(
+        query.get("months", [None])[0],
+        default=18,
+        minimum=3,
+        maximum=48,
+    )
+    async with AsyncSessionLocal() as session:
+        return await build_replay_report(session, months=months)
+
+
+class AsyncLoopRunner:
+    def __init__(self):
+        self._loop = None
+        self._thread = None
+        self._ready = threading.Event()
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+
+        def _run_loop():
+            loop = asyncio.new_event_loop()
+            self._loop = loop
+            asyncio.set_event_loop(loop)
+            self._ready.set()
+            loop.run_forever()
+
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.close()
+
+        self._thread = threading.Thread(target=_run_loop, name="graph-web-async-loop", daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=5)
+        if self._loop is None:
+            raise RuntimeError("Failed to start async loop runner.")
+
+    def run(self, coroutine, timeout: float = 180.0):
+        if self._loop is None:
+            raise RuntimeError("Async loop runner is not started.")
+        future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        try:
+            return future.result(timeout=timeout)
+        except FutureTimeoutError as exc:
+            future.cancel()
+            raise TimeoutError("Async API task timed out.") from exc
+
+    def stop(self):
+        loop = self._loop
+        if loop is None:
+            return
+        loop.call_soon_threadsafe(loop.stop)
+        if self._thread:
+            self._thread.join(timeout=3)
+        self._loop = None
+        self._thread = None
+        self._ready.clear()
+
+
 class GraphRequestHandler(SimpleHTTPRequestHandler):
+    async_runner = None
+
+    def _run_async(self, coroutine):
+        runner = type(self).async_runner
+        if runner is None:
+            raise RuntimeError("Async runner not initialized.")
+        return runner.run(coroutine)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/graph":
             self._serve_graph_payload(parse_qs(parsed.query))
+            return
+        if parsed.path == "/api/quality":
+            self._serve_quality_payload(parse_qs(parsed.query))
+            return
+        if parsed.path == "/api/replay":
+            self._serve_replay_payload(parse_qs(parsed.query))
             return
 
         if parsed.path in {"", "/"}:
@@ -648,7 +1008,35 @@ class GraphRequestHandler(SimpleHTTPRequestHandler):
 
     def _serve_graph_payload(self, query):
         try:
-            payload = asyncio.run(_graph_payload_from_query(query))
+            payload = self._run_async(_graph_payload_from_query(query))
+            data = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+        except Exception as exc:
+            data = json.dumps({"error": str(exc)}).encode("utf-8")
+            self.send_response(500)
+
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_quality_payload(self, query):
+        try:
+            payload = self._run_async(_quality_payload_from_query(query))
+            data = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+        except Exception as exc:
+            data = json.dumps({"error": str(exc)}).encode("utf-8")
+            self.send_response(500)
+
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_replay_payload(self, query):
+        try:
+            payload = self._run_async(_replay_payload_from_query(query))
             data = json.dumps(payload).encode("utf-8")
             self.send_response(200)
         except Exception as exc:
@@ -667,6 +1055,10 @@ def run_graph_web_server(host: str, port: int, open_browser: bool = False):
     if not graph_page.exists():
         raise FileNotFoundError(f"Expected webapp page at {graph_page}")
 
+    async_runner = AsyncLoopRunner()
+    async_runner.start()
+    GraphRequestHandler.async_runner = async_runner
+
     handler = partial(GraphRequestHandler, directory=str(static_dir))
     server = ThreadingHTTPServer((host, port), handler)
 
@@ -682,6 +1074,8 @@ def run_graph_web_server(host: str, port: int, open_browser: bool = False):
         print("\nStopping graph webapp.")
     finally:
         server.server_close()
+        GraphRequestHandler.async_runner = None
+        async_runner.stop()
 
 
 async def serve_graph_web_server(host: str, port: int, open_browser: bool = False):
