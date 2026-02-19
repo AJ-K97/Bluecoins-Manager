@@ -156,6 +156,7 @@ def test_export_to_bluecoins_csv_summarizes_item_and_cleans_notes(tmp_path):
     row = rows[1]
     assert row[0] == "e"
     assert row[2] == "CORFIELD FRESH IGA"
+    assert row[3] == "42.1"
     assert row[8] == "CORFIELD FRESH IGA"
 
 
@@ -204,6 +205,182 @@ def test_export_to_bluecoins_csv_item_or_payee_uses_merchant_only(tmp_path):
     row = rows[1]
     assert row[2] == "LIVINGSTON ORIENTAL CANNING"
 
+
+def _make_transfer_tx(
+    tx_id,
+    date,
+    amount,
+    description,
+    account_name,
+    raw_csv_row=None,
+    account_id=None,
+):
+    return SimpleNamespace(
+        id=tx_id,
+        type="transfer",
+        date=date,
+        description=description,
+        amount=amount,
+        category=None,
+        category_id=None,
+        account=SimpleNamespace(name=account_name),
+        account_id=account_id,
+        raw_csv_row=raw_csv_row,
+    )
+
+
+def test_export_to_bluecoins_csv_exports_only_paired_transfers(tmp_path):
+    output_path = tmp_path / "bluecoins_export_paired_transfers.csv"
+    txs = [
+        _make_transfer_tx(
+            tx_id=102,
+            date=datetime(2024, 1, 10, 9, 15),
+            amount=100.0,
+            description="TRANSFER FROM CHECKING",
+            account_name="Savings",
+            raw_csv_row='{"Direction":"IN","Amount":"100.00"}',
+            account_id=2,
+        ),
+        _make_transfer_tx(
+            tx_id=101,
+            date=datetime(2024, 1, 10, 9, 0),
+            amount=-100.0,
+            description="TRANSFER TO SAVINGS",
+            account_name="Checking",
+            raw_csv_row='{"Direction":"OUT","Amount":"-100.00"}',
+            account_id=1,
+        ),
+    ]
+
+    success, msg = export_to_bluecoins_csv(txs, str(output_path))
+    assert success
+    assert msg.startswith("Exported 2 transactions to ")
+    assert "Skipped" not in msg
+
+    with output_path.open(newline="") as f:
+        rows = list(csv.reader(f))
+
+    assert len(rows) == 3
+    assert rows[1][0] == "t"
+    assert rows[2][0] == "t"
+    assert rows[1][7] == "Checking"
+    assert rows[1][3] == "-100.0"
+    assert rows[2][7] == "Savings"
+    assert rows[2][3] == "100.0"
+
+
+def test_export_to_bluecoins_csv_skips_unpaired_transfer_and_reports_id(tmp_path):
+    output_path = tmp_path / "bluecoins_export_unpaired_transfer.csv"
+    txs = [
+        _make_transfer_tx(
+            tx_id=201,
+            date=datetime(2024, 1, 10, 9, 0),
+            amount=-100.0,
+            description="TRANSFER TO SAVINGS",
+            account_name="Checking",
+            raw_csv_row='{"Direction":"OUT","Amount":"-100.00"}',
+            account_id=1,
+        ),
+    ]
+
+    success, msg = export_to_bluecoins_csv(txs, str(output_path))
+    assert success
+    assert msg.startswith("Exported 0 transactions to ")
+    assert "Skipped 1 unpaired transfers" in msg
+    assert "#201(pair_not_found)" in msg
+
+    with output_path.open(newline="") as f:
+        rows = list(csv.reader(f))
+
+    assert len(rows) == 1
+
+
+def test_export_to_bluecoins_csv_skips_transfer_with_unknown_direction(tmp_path):
+    output_path = tmp_path / "bluecoins_export_unknown_direction.csv"
+    txs = [
+        _make_transfer_tx(
+            tx_id=301,
+            date=datetime(2024, 1, 10, 9, 0),
+            amount=100.0,
+            description="Transfer movement",
+            account_name="Checking",
+            raw_csv_row='{"Reference":"ABC123"}',
+            account_id=1,
+        ),
+    ]
+
+    success, msg = export_to_bluecoins_csv(txs, str(output_path))
+    assert success
+    assert "Skipped 1 unpaired transfers" in msg
+    assert "#301(direction_unknown)" in msg
+
+    with output_path.open(newline="") as f:
+        rows = list(csv.reader(f))
+
+    assert len(rows) == 1
+
+
+def test_export_to_bluecoins_csv_pairs_deterministically_with_collisions(tmp_path):
+    output_path = tmp_path / "bluecoins_export_collision_pairing.csv"
+    txs = [
+        _make_transfer_tx(
+            tx_id=1,
+            date=datetime(2024, 3, 1, 8, 0),
+            amount=-250.0,
+            description="TRANSFER TO SAVINGS",
+            account_name="A",
+            raw_csv_row='{"Direction":"OUT","Amount":"-250.00"}',
+            account_id=10,
+        ),
+        _make_transfer_tx(
+            tx_id=2,
+            date=datetime(2024, 3, 1, 8, 5),
+            amount=-250.0,
+            description="TRANSFER TO SAVINGS",
+            account_name="B",
+            raw_csv_row='{"Direction":"OUT","Amount":"-250.00"}',
+            account_id=20,
+        ),
+        _make_transfer_tx(
+            tx_id=3,
+            date=datetime(2024, 3, 1, 8, 10),
+            amount=250.0,
+            description="TRANSFER FROM SAVINGS",
+            account_name="A",
+            raw_csv_row='{"Direction":"IN","Amount":"250.00"}',
+            account_id=10,
+        ),
+        _make_transfer_tx(
+            tx_id=4,
+            date=datetime(2024, 3, 1, 8, 15),
+            amount=250.0,
+            description="TRANSFER FROM SAVINGS",
+            account_name="C",
+            raw_csv_row='{"Direction":"IN","Amount":"250.00"}',
+            account_id=30,
+        ),
+        _make_transfer_tx(
+            tx_id=5,
+            date=datetime(2024, 3, 1, 8, 20),
+            amount=-250.0,
+            description="TRANSFER TO SAVINGS",
+            account_name="D",
+            raw_csv_row='{"Direction":"OUT","Amount":"-250.00"}',
+            account_id=40,
+        ),
+    ]
+
+    success, msg = export_to_bluecoins_csv(txs, str(output_path))
+    assert success
+    assert "Exported 4 transactions to " in msg
+    assert "Skipped 1 unpaired transfers" in msg
+    assert "#5(pair_not_found)" in msg
+
+    with output_path.open(newline="") as f:
+        rows = list(csv.reader(f))
+
+    # header + 4 transfer rows
+    assert len(rows) == 5
 
 @pytest.mark.asyncio
 async def test_update_transaction_note(db_session):
