@@ -13,6 +13,9 @@ const state = {
   connectedNodeScale: 0.78,
   drawerOpen: true,
   qualityDrawerOpen: false,
+  insightsDrawerOpen: false,
+  insightsData: null,
+  selectedInsightCaseId: null,
   timelinePoints: [],
   timelineIndex: 0,
   isTimelinePlaying: false,
@@ -26,6 +29,7 @@ const statsPill = document.getElementById("statsPill");
 const detailBody = document.getElementById("detailBody");
 const detailPanel = document.getElementById("detailPanel");
 const qualityPanel = document.getElementById("qualityPanel");
+const insightsPanel = document.getElementById("insightsPanel");
 
 const searchInput = document.getElementById("searchInput");
 const minWeightInput = document.getElementById("minWeightInput");
@@ -42,6 +46,8 @@ const drawerToggleBtn = document.getElementById("drawerToggleBtn");
 const drawerCloseBtn = document.getElementById("drawerCloseBtn");
 const qualityDrawerToggleBtn = document.getElementById("qualityDrawerToggleBtn");
 const qualityCloseBtn = document.getElementById("qualityCloseBtn");
+const insightsDrawerToggleBtn = document.getElementById("insightsDrawerToggleBtn");
+const insightsCloseBtn = document.getElementById("insightsCloseBtn");
 
 const zoomInBtn = document.getElementById("zoomInBtn");
 const zoomOutBtn = document.getElementById("zoomOutBtn");
@@ -56,6 +62,12 @@ const qualityCategoryTable = document.getElementById("qualityCategoryTable");
 const qualityConfusion = document.getElementById("qualityConfusion");
 const qualityCalibration = document.getElementById("qualityCalibration");
 const qualityReplay = document.getElementById("qualityReplay");
+const insightsRefreshBtn = document.getElementById("insightsRefreshBtn");
+const insightsSummary = document.getElementById("insightsSummary");
+const insightsCaseSelect = document.getElementById("insightsCaseSelect");
+const insightsCaseBody = document.getElementById("insightsCaseBody");
+const insightsRiskTable = document.getElementById("insightsRiskTable");
+const insightsStabilityTable = document.getElementById("insightsStabilityTable");
 
 function sourceId(edge) {
   return typeof edge.source === "object" ? edge.source.id : edge.source;
@@ -209,6 +221,13 @@ function setQualityDrawerOpen(isOpen) {
   if (!qualityPanel || !qualityDrawerToggleBtn) return;
   qualityPanel.classList.toggle("collapsed", !state.qualityDrawerOpen);
   qualityDrawerToggleBtn.classList.toggle("hidden", state.qualityDrawerOpen);
+}
+
+function setInsightsDrawerOpen(isOpen) {
+  state.insightsDrawerOpen = Boolean(isOpen);
+  if (!insightsPanel || !insightsDrawerToggleBtn) return;
+  insightsPanel.classList.toggle("collapsed", !state.insightsDrawerOpen);
+  insightsDrawerToggleBtn.classList.toggle("hidden", state.insightsDrawerOpen);
 }
 
 async function fetchJsonOrThrow(url, label) {
@@ -779,6 +798,152 @@ function clearQualityPanels(message) {
   if (qualityReplay) qualityReplay.innerHTML = "";
 }
 
+function clearInsightsPanels(message) {
+  state.selectedInsightCaseId = null;
+  if (insightsSummary) insightsSummary.textContent = message;
+  if (insightsCaseSelect) insightsCaseSelect.innerHTML = "";
+  if (insightsCaseBody) insightsCaseBody.textContent = "";
+  if (insightsRiskTable) insightsRiskTable.innerHTML = "";
+  if (insightsStabilityTable) insightsStabilityTable.innerHTML = "";
+}
+
+function renderInsightCaseById(insightsPayload, selectedId) {
+  if (!insightsCaseBody) return;
+  const cases = insightsPayload?.case_inspector || [];
+  if (!cases.length) {
+    insightsCaseBody.textContent = "No cases available.";
+    return;
+  }
+  const selected = cases.find((item) => String(item.transaction_id) === String(selectedId)) || cases[0];
+  if (!selected) {
+    insightsCaseBody.textContent = "No case selected.";
+    return;
+  }
+  const topMemory = (selected.signal_snapshot?.top_category_memory || [])
+    .slice(0, 3)
+    .map((entry) => `${shortCategoryLabel(entry.category_label)} (${formatPercent(entry.ratio)})`)
+    .join(", ");
+  insightsCaseBody.textContent = [
+    `TX: ${selected.transaction_id} | Date: ${selected.date || "-"}`,
+    `Keyword: ${selected.keyword || "(none)"}`,
+    `Predicted: ${selected.predicted_category}`,
+    `Resolved: ${selected.resolved_category}`,
+    `Confidence: ${formatPercent(selected.confidence)} | Verified: ${selected.is_verified ? "yes" : "no"} | Correct: ${selected.was_correct === null ? "-" : selected.was_correct ? "yes" : "no"}`,
+    `Keyword entropy: ${Number(selected.signal_snapshot?.keyword_entropy || 0).toFixed(3)}`,
+    topMemory ? `Memory top categories: ${topMemory}` : "Memory top categories: -",
+    "",
+    `Reason: ${selected.reason || "-"}`,
+  ].join("\n");
+}
+
+function renderInsightsReport(insightsPayload) {
+  if (!insightsSummary) return;
+  const summary = insightsPayload?.summary || {};
+  insightsSummary.textContent = [
+    `Cases: ${summary.total_cases || 0}`,
+    `Risk rows: ${summary.risk_rows || 0}`,
+    `Stability rows: ${summary.stability_rows || 0}`,
+    `High risk (>=0.6): ${summary.risky_count || 0}`,
+    `Unstable keywords: ${summary.unstable_keywords || 0}`,
+  ].join(" | ");
+
+  if (insightsCaseSelect) {
+    const cases = insightsPayload?.case_inspector || [];
+    if (!cases.length) {
+      insightsCaseSelect.innerHTML = "";
+      if (insightsCaseBody) insightsCaseBody.textContent = "No case data available.";
+    } else {
+      if (!state.selectedInsightCaseId || !cases.some((item) => String(item.transaction_id) === String(state.selectedInsightCaseId))) {
+        state.selectedInsightCaseId = String(cases[0].transaction_id);
+      }
+      insightsCaseSelect.innerHTML = cases
+        .slice(0, 120)
+        .map((item) => {
+          const selectedFlag = String(item.transaction_id) === String(state.selectedInsightCaseId) ? " selected" : "";
+          const desc = item.description || `TX ${item.transaction_id}`;
+          const shortDesc = desc.length > 64 ? `${desc.slice(0, 61)}...` : desc;
+          return `<option value="${escapeHtml(item.transaction_id)}"${selectedFlag}>#${escapeHtml(
+            item.transaction_id,
+          )} | ${escapeHtml(item.date || "-")} | ${escapeHtml(shortDesc)}</option>`;
+        })
+        .join("");
+      renderInsightCaseById(insightsPayload, state.selectedInsightCaseId);
+    }
+  }
+
+  if (insightsRiskTable) {
+    const rows = (insightsPayload?.risk || []).slice(0, 25);
+    if (!rows.length) {
+      insightsRiskTable.innerHTML = `<div class="quality-line"><div class="quality-line-label">No risk rows available.</div></div>`;
+    } else {
+      const body = rows
+        .map(
+          (row) => `
+          <tr>
+            <td title="${escapeHtml(row.description)}">#${escapeHtml(row.transaction_id)}</td>
+            <td>${escapeHtml(row.keyword || "(none)")}</td>
+            <td class="metric-cell">${formatPercent(row.risk_score)}</td>
+            <td class="metric-cell">${formatPercent(row.confidence)}</td>
+            <td class="metric-cell">${row.was_correct === null ? "-" : row.was_correct ? "yes" : "no"}</td>
+            <td title="${escapeHtml(row.resolved_category)}">${escapeHtml(shortCategoryLabel(row.resolved_category))}</td>
+          </tr>`,
+        )
+        .join("");
+      insightsRiskTable.innerHTML = `
+        <table class="quality-table">
+          <thead>
+            <tr>
+              <th>TX</th>
+              <th>Keyword</th>
+              <th>Risk</th>
+              <th>Conf</th>
+              <th>Correct</th>
+              <th>Resolved</th>
+            </tr>
+          </thead>
+          <tbody>${body}</tbody>
+        </table>`;
+    }
+  }
+
+  if (insightsStabilityTable) {
+    const rows = (insightsPayload?.stability || []).slice(0, 30);
+    if (!rows.length) {
+      insightsStabilityTable.innerHTML = `<div class="quality-line"><div class="quality-line-label">No stability rows available.</div></div>`;
+    } else {
+      const body = rows
+        .map(
+          (row) => `
+          <tr>
+            <td>${escapeHtml(row.keyword)}</td>
+            <td class="metric-cell">${Number(row.tx_count || 0)}</td>
+            <td class="metric-cell">${Number(row.flips || 0)}</td>
+            <td class="metric-cell">${formatPercent(row.stability_ratio)}</td>
+            <td class="metric-cell">${Number(row.corrections || 0)}</td>
+            <td class="metric-cell">${row.transactions_to_stability ?? "-"}</td>
+            <td class="metric-cell">${Number(row.keyword_entropy || 0).toFixed(2)}</td>
+          </tr>`,
+        )
+        .join("");
+      insightsStabilityTable.innerHTML = `
+        <table class="quality-table">
+          <thead>
+            <tr>
+              <th>Keyword</th>
+              <th>Tx</th>
+              <th>Flips</th>
+              <th>Stability</th>
+              <th>Corrections</th>
+              <th>To stable</th>
+              <th>Entropy</th>
+            </tr>
+          </thead>
+          <tbody>${body}</tbody>
+        </table>`;
+    }
+  }
+}
+
 function renderQualityReport(qualityPayload, replayPayload) {
   if (!qualitySummary) return;
 
@@ -926,6 +1091,22 @@ async function loadQuality() {
     renderQualityReport(qualityPayload, replayPayload);
   } catch (error) {
     clearQualityPanels(`Could not load model quality data: ${error.message}`);
+  }
+}
+
+async function loadInsights() {
+  if (!insightsSummary) return;
+  insightsSummary.textContent = "Loading agent insights...";
+  try {
+    const payload = await fetchJsonOrThrow(
+      "/api/insights?case_limit=100&risk_limit=28&keyword_limit=42",
+      "Insights API",
+    );
+    state.insightsData = payload;
+    renderInsightsReport(payload);
+  } catch (error) {
+    state.insightsData = null;
+    clearInsightsPanels(`Could not load insights: ${error.message}`);
   }
 }
 
@@ -1233,10 +1414,12 @@ async function loadGraph() {
     updateStats(payload.stats || {});
     renderGraph(payload);
     loadQuality();
+    loadInsights();
   } catch (error) {
     statsPill.textContent = "Failed to load graph";
     setDetailPanel(`Could not load graph data.\n${error.message}`);
     clearQualityPanels("Graph load failed. Quality metrics unavailable.");
+    clearInsightsPanels("Graph load failed. Insights unavailable.");
   }
 }
 
@@ -1297,10 +1480,24 @@ if (qualityRefreshBtn) {
   });
 }
 
+if (insightsRefreshBtn) {
+  insightsRefreshBtn.addEventListener("click", () => {
+    loadInsights();
+  });
+}
+
+if (insightsCaseSelect) {
+  insightsCaseSelect.addEventListener("change", () => {
+    state.selectedInsightCaseId = insightsCaseSelect.value || null;
+    renderInsightCaseById(state.insightsData, state.selectedInsightCaseId);
+  });
+}
+
 if (drawerToggleBtn) {
   drawerToggleBtn.addEventListener("click", () => {
     setDrawerOpen(true);
     setQualityDrawerOpen(false);
+    setInsightsDrawerOpen(false);
   });
 }
 
@@ -1314,12 +1511,27 @@ if (qualityDrawerToggleBtn) {
   qualityDrawerToggleBtn.addEventListener("click", () => {
     setQualityDrawerOpen(true);
     setDrawerOpen(false);
+    setInsightsDrawerOpen(false);
   });
 }
 
 if (qualityCloseBtn) {
   qualityCloseBtn.addEventListener("click", () => {
     setQualityDrawerOpen(false);
+  });
+}
+
+if (insightsDrawerToggleBtn) {
+  insightsDrawerToggleBtn.addEventListener("click", () => {
+    setInsightsDrawerOpen(true);
+    setDrawerOpen(false);
+    setQualityDrawerOpen(false);
+  });
+}
+
+if (insightsCloseBtn) {
+  insightsCloseBtn.addEventListener("click", () => {
+    setInsightsDrawerOpen(false);
   });
 }
 
@@ -1367,4 +1579,6 @@ syncConnectedNodeScaleLabel();
 updateTimelineLabel();
 setDrawerOpen(true);
 setQualityDrawerOpen(false);
+setInsightsDrawerOpen(false);
+clearInsightsPanels("Loading insights...");
 loadGraph();

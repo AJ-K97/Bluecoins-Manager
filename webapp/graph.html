@@ -38,6 +38,14 @@
         >
           ◫
         </button>
+        <button
+          id="insightsDrawerToggleBtn"
+          class="drawer-toggle insights-toggle"
+          type="button"
+          aria-label="Open Agent Insights"
+        >
+          ⌬
+        </button>
 
         <aside id="detailPanel" class="detail-panel">
           <div class="panel-head">
@@ -97,6 +105,40 @@
 
             <div class="quality-subtitle">Replay backtest trend</div>
             <div id="qualityReplay" class="quality-replay"></div>
+          </div>
+        </aside>
+
+        <aside id="insightsPanel" class="insights-panel collapsed">
+          <div class="panel-head">
+            <div class="panel-chip">AGENT_INSIGHTS</div>
+            <button id="insightsCloseBtn" class="drawer-close" type="button" aria-label="Close Agent Insights">
+              ×
+            </button>
+          </div>
+          <h2>Agent Insights</h2>
+          <div class="insights-block">
+            <div class="quality-head">
+              <h3>Diagnostics</h3>
+              <button id="insightsRefreshBtn" class="quality-refresh-btn" type="button">Refresh</button>
+            </div>
+            <div id="insightsSummary" class="quality-summary">Loading insights...</div>
+
+            <details class="insights-section" open>
+              <summary>Case Inspector</summary>
+              <label class="insights-label" for="insightsCaseSelect">Transaction</label>
+              <select id="insightsCaseSelect" class="insights-select"></select>
+              <div id="insightsCaseBody" class="insights-case-body">No cases loaded yet.</div>
+            </details>
+
+            <details class="insights-section">
+              <summary>Ambiguity & Risk</summary>
+              <div id="insightsRiskTable" class="quality-table-wrap"></div>
+            </details>
+
+            <details class="insights-section">
+              <summary>Stability & Learning Velocity</summary>
+              <div id="insightsStabilityTable" class="quality-table-wrap"></div>
+            </details>
           </div>
         </aside>
       </section>

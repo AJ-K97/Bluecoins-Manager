@@ -863,6 +863,276 @@ async def build_replay_report(
     }
 
 
+async def build_insights_report(
+    session,
+    *,
+    case_limit: int = 80,
+    risk_limit: int = 24,
+    keyword_limit: int = 36,
+):
+    stmt = (
+        select(
+            AIMemory.pattern_key,
+            AIMemory.user_selected_category_id,
+            AIMemory.ai_suggested_category_id,
+            AIMemory.ai_reasoning,
+            AIMemory.created_at,
+            Transaction.id,
+            Transaction.category_id,
+            Transaction.confidence_score,
+            Transaction.is_verified,
+            Transaction.decision_reason,
+            Transaction.description,
+            Transaction.amount,
+            Transaction.date,
+            Transaction.type,
+        )
+        .join(Transaction, Transaction.id == AIMemory.transaction_id)
+    )
+    res = await session.execute(stmt)
+    rows = res.all()
+
+    events = []
+    keyword_events = defaultdict(list)
+    category_ids = set()
+    for (
+        pattern_key,
+        user_selected_category_id,
+        ai_suggested_category_id,
+        ai_reasoning,
+        memory_created_at,
+        transaction_id,
+        tx_category_id,
+        confidence_score,
+        is_verified,
+        decision_reason,
+        tx_description,
+        tx_amount,
+        tx_date,
+        tx_type,
+    ) in rows:
+        keyword = _clean_keyword(pattern_key) or ""
+        resolved_category_id = _resolve_category_id(
+            user_selected_category_id, tx_category_id, ai_suggested_category_id
+        )
+        predicted_category_id = (
+            int(ai_suggested_category_id) if ai_suggested_category_id is not None else None
+        )
+        if resolved_category_id is not None:
+            category_ids.add(int(resolved_category_id))
+        if predicted_category_id is not None:
+            category_ids.add(predicted_category_id)
+        observed_at = _as_utc_datetime(tx_date) or _as_utc_datetime(memory_created_at)
+        reason = _clean_reason(ai_reasoning or decision_reason)
+        was_correct = (
+            predicted_category_id == resolved_category_id
+            if predicted_category_id is not None and resolved_category_id is not None
+            else None
+        )
+
+        event = {
+            "transaction_id": int(transaction_id) if transaction_id is not None else None,
+            "keyword": keyword,
+            "resolved_category_id": int(resolved_category_id) if resolved_category_id is not None else None,
+            "predicted_category_id": predicted_category_id,
+            "confidence": float(confidence_score) if confidence_score is not None else None,
+            "is_verified": bool(is_verified),
+            "reason": reason or "No explicit reasoning captured.",
+            "description": (tx_description or "").strip(),
+            "amount": float(tx_amount) if tx_amount is not None else None,
+            "tx_type": (tx_type or "").strip() or "unknown",
+            "observed_at": observed_at,
+            "date": _iso_date(observed_at),
+            "was_correct": was_correct,
+        }
+        events.append(event)
+        if keyword:
+            keyword_events[keyword].append(event)
+
+    category_map = await _fetch_category_map(session, category_ids)
+
+    keyword_profiles = {}
+    for keyword, rows_for_keyword in keyword_events.items():
+        counter = Counter()
+        for row in rows_for_keyword:
+            cid = row["resolved_category_id"]
+            if cid is not None:
+                counter[cid] += 1
+        total = sum(counter.values())
+        top_categories = []
+        if total > 0:
+            top_categories = [
+                {
+                    "category_id": cid,
+                    "category_label": _category_label_from_map(cid, category_map),
+                    "count": count,
+                    "ratio": round(count / total, 4),
+                }
+                for cid, count in counter.most_common(4)
+            ]
+
+        entropy = 0.0
+        if len(counter) > 1 and total > 0:
+            for count in counter.values():
+                p = count / total
+                entropy -= p * math.log(p, 2)
+            entropy /= math.log(len(counter), 2)
+
+        keyword_profiles[keyword] = {
+            "total": total,
+            "entropy": round(entropy, 4),
+            "top_categories": top_categories,
+        }
+
+    case_limit = max(15, min(240, int(case_limit)))
+    risk_limit = max(8, min(120, int(risk_limit)))
+    keyword_limit = max(8, min(160, int(keyword_limit)))
+
+    sorted_events = sorted(
+        events,
+        key=lambda row: row["observed_at"] or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    case_rows = []
+    for row in sorted_events[:case_limit]:
+        profile = keyword_profiles.get(row["keyword"], {})
+        case_rows.append(
+            {
+                "transaction_id": row["transaction_id"],
+                "date": row["date"],
+                "description": row["description"] or f"TX {row['transaction_id']}",
+                "amount": row["amount"],
+                "tx_type": row["tx_type"],
+                "keyword": row["keyword"] or "(none)",
+                "predicted_category": _category_label_from_map(row["predicted_category_id"], category_map),
+                "resolved_category": _category_label_from_map(row["resolved_category_id"], category_map),
+                "confidence": row["confidence"],
+                "is_verified": row["is_verified"],
+                "was_correct": row["was_correct"],
+                "reason": row["reason"],
+                "signal_snapshot": {
+                    "keyword_entropy": profile.get("entropy", 0.0),
+                    "top_category_memory": profile.get("top_categories", []),
+                },
+            }
+        )
+
+    risk_rows = []
+    for row in events:
+        profile = keyword_profiles.get(row["keyword"], {})
+        conf_risk = 1.0 - row["confidence"] if row["confidence"] is not None else 0.45
+        wrong_penalty = 0.35 if row["was_correct"] is False else 0.0
+        review_penalty = 0.12 if not row["is_verified"] else 0.0
+        ambiguity_penalty = float(profile.get("entropy", 0.0)) * 0.25
+        risk_score = min(1.0, conf_risk * 0.55 + wrong_penalty + review_penalty + ambiguity_penalty)
+        risk_rows.append(
+            {
+                "transaction_id": row["transaction_id"],
+                "date": row["date"],
+                "description": row["description"] or f"TX {row['transaction_id']}",
+                "keyword": row["keyword"] or "(none)",
+                "risk_score": round(risk_score, 4),
+                "confidence": row["confidence"],
+                "was_correct": row["was_correct"],
+                "is_verified": row["is_verified"],
+                "predicted_category": _category_label_from_map(row["predicted_category_id"], category_map),
+                "resolved_category": _category_label_from_map(row["resolved_category_id"], category_map),
+                "keyword_entropy": profile.get("entropy", 0.0),
+            }
+        )
+
+    risk_rows.sort(
+        key=lambda row: (
+            row["risk_score"],
+            row["date"] or "",
+        ),
+        reverse=True,
+    )
+    risk_rows = risk_rows[:risk_limit]
+
+    stability_rows = []
+    for keyword, rows_for_keyword in keyword_events.items():
+        ordered = sorted(
+            rows_for_keyword,
+            key=lambda row: row["observed_at"] or datetime.min.replace(tzinfo=timezone.utc),
+        )
+        resolved_seq = [row["resolved_category_id"] for row in ordered if row["resolved_category_id"] is not None]
+        if not resolved_seq:
+            continue
+
+        flips = 0
+        prev = None
+        for cid in resolved_seq:
+            if prev is not None and cid != prev:
+                flips += 1
+            prev = cid
+
+        corrections = sum(1 for row in ordered if row["was_correct"] is False)
+        stability_ratio = (
+            1.0 if len(resolved_seq) <= 1 else 1.0 - (flips / max(1, len(resolved_seq) - 1))
+        )
+
+        transactions_to_stability = None
+        stable_at_date = None
+        resolved_seen = 0
+        for idx, row in enumerate(ordered):
+            if row["resolved_category_id"] is None:
+                continue
+            resolved_seen += 1
+            tail = resolved_seq[resolved_seen - 1 :]
+            if len(set(tail)) == 1:
+                transactions_to_stability = resolved_seen
+                stable_at_date = row["observed_at"]
+                break
+
+        first_seen = ordered[0]["observed_at"]
+        time_to_stability_days = None
+        if first_seen is not None and stable_at_date is not None:
+            delta_days = (stable_at_date - first_seen).days
+            time_to_stability_days = max(0, delta_days)
+
+        profile = keyword_profiles.get(keyword, {})
+        dominant_category = resolved_seq[-1]
+        stability_rows.append(
+            {
+                "keyword": keyword,
+                "tx_count": len(ordered),
+                "flips": flips,
+                "stability_ratio": round(stability_ratio, 4),
+                "corrections": corrections,
+                "transactions_to_stability": transactions_to_stability,
+                "time_to_stability_days": time_to_stability_days,
+                "current_category": _category_label_from_map(dominant_category, category_map),
+                "keyword_entropy": profile.get("entropy", 0.0),
+                "first_seen_date": _iso_date(first_seen),
+                "last_seen_date": _iso_date(ordered[-1]["observed_at"]),
+            }
+        )
+
+    stability_rows.sort(key=lambda row: (row["stability_ratio"], -row["tx_count"]))
+    stability_rows = stability_rows[:keyword_limit]
+
+    risky_count = sum(1 for row in risk_rows if row["risk_score"] >= 0.6)
+    unstable_count = sum(
+        1 for row in stability_rows if row["tx_count"] >= 3 and row["stability_ratio"] < 0.75
+    )
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": {
+            "total_cases": len(events),
+            "case_rows": len(case_rows),
+            "risk_rows": len(risk_rows),
+            "stability_rows": len(stability_rows),
+            "risky_count": risky_count,
+            "unstable_keywords": unstable_count,
+        },
+        "case_inspector": case_rows,
+        "risk": risk_rows,
+        "stability": stability_rows,
+    }
+
+
 async def _graph_payload_from_query(query):
     min_weight = _coerce_float(query.get("min_weight", [None])[0], default=0.0)
     limit = _coerce_int(query.get("limit", [None])[0], default=250, minimum=25, maximum=1000)
@@ -927,6 +1197,34 @@ async def _replay_payload_from_query(query):
     )
     async with AsyncSessionLocal() as session:
         return await build_replay_report(session, months=months)
+
+
+async def _insights_payload_from_query(query):
+    case_limit = _coerce_int(
+        query.get("case_limit", [None])[0],
+        default=80,
+        minimum=15,
+        maximum=240,
+    )
+    risk_limit = _coerce_int(
+        query.get("risk_limit", [None])[0],
+        default=24,
+        minimum=8,
+        maximum=120,
+    )
+    keyword_limit = _coerce_int(
+        query.get("keyword_limit", [None])[0],
+        default=36,
+        minimum=8,
+        maximum=160,
+    )
+    async with AsyncSessionLocal() as session:
+        return await build_insights_report(
+            session,
+            case_limit=case_limit,
+            risk_limit=risk_limit,
+            keyword_limit=keyword_limit,
+        )
 
 
 class AsyncLoopRunner:
@@ -1001,6 +1299,9 @@ class GraphRequestHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/replay":
             self._serve_replay_payload(parse_qs(parsed.query))
             return
+        if parsed.path == "/api/insights":
+            self._serve_insights_payload(parse_qs(parsed.query))
+            return
 
         if parsed.path in {"", "/"}:
             self.path = "/graph.html"
@@ -1037,6 +1338,20 @@ class GraphRequestHandler(SimpleHTTPRequestHandler):
     def _serve_replay_payload(self, query):
         try:
             payload = self._run_async(_replay_payload_from_query(query))
+            data = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+        except Exception as exc:
+            data = json.dumps({"error": str(exc)}).encode("utf-8")
+            self.send_response(500)
+
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_insights_payload(self, query):
+        try:
+            payload = self._run_async(_insights_payload_from_query(query))
             data = json.dumps(payload).encode("utf-8")
             self.send_response(200)
         except Exception as exc:
