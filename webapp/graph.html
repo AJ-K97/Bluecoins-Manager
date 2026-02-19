@@ -41,6 +41,14 @@
                 </button>
               </div>
               <div class="sankey-controls" aria-label="Sankey search and filters">
+                <label class="sankey-field">
+                  <span>Mode</span>
+                  <select id="sankeyModeSelect">
+                    <option value="volume">Flow volume</option>
+                    <option value="error">Error flow</option>
+                    <option value="confidence">Confidence-weighted</option>
+                  </select>
+                </label>
                 <label class="sankey-field sankey-search">
                   <span>Search</span>
                   <input id="sankeySearchInput" type="text" placeholder="keyword, predicted, resolved..." />
@@ -84,7 +92,22 @@
                 <div id="sankeyKeywordDetailMeta" class="sankey-keyword-meta"></div>
                 <div id="sankeyKeywordDetailBody" class="sankey-keyword-body"></div>
               </aside>
+              <aside id="sankeyLinkDetailPanel" class="sankey-link-detail hidden" aria-live="polite">
+                <div class="panel-head">
+                  <div class="panel-chip">PATH_DETAIL</div>
+                  <button id="sankeyLinkDetailCloseBtn" class="drawer-close" type="button" aria-label="Close path detail">
+                    ×
+                  </button>
+                </div>
+                <h4 id="sankeyLinkDetailTitle">Path detail</h4>
+                <div id="sankeyLinkDetailMeta" class="sankey-keyword-meta"></div>
+                <div id="sankeyLinkDetailBody" class="sankey-keyword-body"></div>
+              </aside>
             </div>
+            <section class="sankey-path-table-wrap">
+              <div class="quality-subtitle">Top Decision Paths</div>
+              <div id="sankeyPathTable"></div>
+            </section>
           </section>
           <button id="nodeDrawerToggleBtn" class="drawer-toggle node-toggle" type="button" aria-label="Open Node Details">
             ◉

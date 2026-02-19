@@ -38,8 +38,11 @@ const state = {
     outcome: "all",
     verifiedOnly: false,
   },
+  sankeyMode: "volume",
   sankeyKeywordGroups: new Map(),
   sankeyPinnedKeyword: null,
+  sankeyPathRows: [],
+  sankeySelectedPathKey: null,
   breathe: {
     enabled: true,
     globalPulse: true,
@@ -130,11 +133,18 @@ const insightsCloseBtn = document.getElementById("insightsCloseBtn");
 const sankeySummary = document.getElementById("sankeySummary");
 const sankeySvgEl = document.getElementById("sankeySvg");
 const sankeyEmptyState = document.getElementById("sankeyEmptyState");
+const sankeyModeSelect = document.getElementById("sankeyModeSelect");
+const sankeyPathTable = document.getElementById("sankeyPathTable");
 const sankeyKeywordDetailPanel = document.getElementById("sankeyKeywordDetailPanel");
 const sankeyKeywordDetailTitle = document.getElementById("sankeyKeywordDetailTitle");
 const sankeyKeywordDetailMeta = document.getElementById("sankeyKeywordDetailMeta");
 const sankeyKeywordDetailBody = document.getElementById("sankeyKeywordDetailBody");
 const sankeyKeywordDetailCloseBtn = document.getElementById("sankeyKeywordDetailCloseBtn");
+const sankeyLinkDetailPanel = document.getElementById("sankeyLinkDetailPanel");
+const sankeyLinkDetailTitle = document.getElementById("sankeyLinkDetailTitle");
+const sankeyLinkDetailMeta = document.getElementById("sankeyLinkDetailMeta");
+const sankeyLinkDetailBody = document.getElementById("sankeyLinkDetailBody");
+const sankeyLinkDetailCloseBtn = document.getElementById("sankeyLinkDetailCloseBtn");
 const sankeySearchInput = document.getElementById("sankeySearchInput");
 const sankeyFieldFilter = document.getElementById("sankeyFieldFilter");
 const sankeyOutcomeFilter = document.getElementById("sankeyOutcomeFilter");
@@ -578,6 +588,7 @@ function persistSettings() {
       insightsDrawerOpen: state.insightsDrawerOpen,
       activeView: state.activeView,
       sankeyFilters: { ...state.sankeyFilters },
+      sankeyMode: state.sankeyMode,
       breathe: { ...state.breathe },
     };
     window.localStorage.setItem(GRAPH_SETTINGS_STORAGE_KEY, JSON.stringify(payload));
@@ -611,6 +622,9 @@ function loadPersistedSettings() {
         state.sankeyFilters.outcome = input.outcome;
       }
       if (typeof input.verifiedOnly === "boolean") state.sankeyFilters.verifiedOnly = input.verifiedOnly;
+    }
+    if (parsed.sankeyMode === "volume" || parsed.sankeyMode === "error" || parsed.sankeyMode === "confidence") {
+      state.sankeyMode = parsed.sankeyMode;
     }
     state.connectedNodeScale = clampNumber(parsed.connectedNodeScale, 0.55, 1.3, state.connectedNodeScale);
 
@@ -774,12 +788,14 @@ function setActiveView(viewName) {
     renderDecisionPathSankey(state.insightsData);
   } else if (state.graph) {
     hideSankeyKeywordDetail();
+    hideSankeyLinkDetail();
     renderGraph(state.graph);
   }
   persistSettings();
 }
 
 function applySankeyFilterControls() {
+  if (sankeyModeSelect) sankeyModeSelect.value = state.sankeyMode || "volume";
   if (sankeySearchInput) sankeySearchInput.value = state.sankeyFilters.search || "";
   if (sankeyFieldFilter) sankeyFieldFilter.value = state.sankeyFilters.field || "all";
   if (sankeyOutcomeFilter) sankeyOutcomeFilter.value = state.sankeyFilters.outcome || "all";
@@ -1734,10 +1750,14 @@ function clearInsightsPanels(message) {
 function clearSankeyPanel(message) {
   if (sankeySummary) sankeySummary.textContent = message;
   if (sankeySvgEl) d3.select(sankeySvgEl).selectAll("*").remove();
+  if (sankeyPathTable) sankeyPathTable.innerHTML = "";
   if (sankeyEmptyState) sankeyEmptyState.classList.remove("hidden");
+  state.sankeyPathRows = [];
   state.sankeyKeywordGroups = new Map();
   state.sankeyPinnedKeyword = null;
+  state.sankeySelectedPathKey = null;
   hideSankeyKeywordDetail();
+  hideSankeyLinkDetail();
 }
 
 function compactSankeyLabel(value, maxLen = 24) {
@@ -1784,6 +1804,11 @@ function caseMatchesSankeyFilters(row) {
 function hideSankeyKeywordDetail() {
   if (!sankeyKeywordDetailPanel) return;
   sankeyKeywordDetailPanel.classList.add("hidden");
+}
+
+function hideSankeyLinkDetail() {
+  if (!sankeyLinkDetailPanel) return;
+  sankeyLinkDetailPanel.classList.add("hidden");
 }
 
 function topBuckets(rows, accessor, limit = 3) {
@@ -1846,6 +1871,122 @@ function renderSankeyKeywordDetail(keywordLabel, rows) {
   sankeyKeywordDetailPanel.classList.remove("hidden");
 }
 
+function pathKey(keyword, predicted, resolved) {
+  return `${keyword}|||${predicted}|||${resolved}`;
+}
+
+function pathParts(key) {
+  const [keyword = "", predicted = "", resolved = ""] = String(key || "").split("|||");
+  return { keyword, predicted, resolved };
+}
+
+function renderSankeyPathTable(pathRows) {
+  if (!sankeyPathTable) return;
+  if (!pathRows.length) {
+    sankeyPathTable.innerHTML = `<div class="quality-line"><div class="quality-line-label">No ranked paths available for current mode/filters.</div></div>`;
+    return;
+  }
+  const rowsHtml = pathRows
+    .slice(0, 28)
+    .map((row) => {
+      const selected = state.sankeySelectedPathKey === row.key ? " class=\"is-selected\"" : "";
+      const pathText = `${compactSankeyLabel(row.keyword, 16)} -> ${compactSankeyLabel(row.predicted, 16)} -> ${compactSankeyLabel(row.resolved, 16)}`;
+      return `
+        <tr data-path-key="${escapeHtml(row.key)}"${selected}>
+          <td title="${escapeHtml(pathText)}">${escapeHtml(pathText)}</td>
+          <td class="metric-cell">${row.count}</td>
+          <td class="metric-cell">${formatPercent(row.count ? row.mismatchCount / row.count : 0)}</td>
+          <td class="metric-cell">${formatPercent(row.avgConfidence)}</td>
+          <td class="metric-cell">${escapeHtml(formatDate(row.lastSeenDate))}</td>
+        </tr>`;
+    })
+    .join("");
+  sankeyPathTable.innerHTML = `
+    <table class="quality-table">
+      <thead>
+        <tr>
+          <th>Path</th>
+          <th>Count</th>
+          <th>Mismatch</th>
+          <th>Avg Conf</th>
+          <th>Last Seen</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>`;
+
+  sankeyPathTable.querySelectorAll("tbody tr[data-path-key]").forEach((rowEl) => {
+    rowEl.addEventListener("click", () => {
+      const key = rowEl.getAttribute("data-path-key") || "";
+      if (!key) return;
+      state.sankeySelectedPathKey = key;
+      state.sankeyPinnedKeyword = null;
+      renderDecisionPathSankey(state.insightsData);
+    });
+  });
+}
+
+function renderSankeyLinkDetail(pathRow) {
+  if (!sankeyLinkDetailPanel || !sankeyLinkDetailTitle || !sankeyLinkDetailMeta || !sankeyLinkDetailBody || !pathRow) return;
+  const samples = (pathRow.rows || [])
+    .slice()
+    .sort((a, b) => (timelineMsFromDate(b?.date) || 0) - (timelineMsFromDate(a?.date) || 0))
+    .slice(0, 6)
+    .map((row) => {
+      const txId = row?.transaction_id ?? "-";
+      const date = formatDate(row?.date);
+      const conf = formatPercent(row?.confidence);
+      const reason = (row?.reason || "-").replace(/\s+/g, " ").trim();
+      const shortReason = reason.length > 88 ? `${reason.slice(0, 85)}...` : reason;
+      return `#${txId} ${date} | conf ${conf}\n${shortReason}`;
+    });
+  sankeyLinkDetailTitle.textContent = `${pathRow.keyword} -> ${shortCategoryLabel(pathRow.predicted)} -> ${shortCategoryLabel(pathRow.resolved)}`;
+  sankeyLinkDetailMeta.innerHTML = [
+    `<span class="node-detail-chip">Cases ${pathRow.count}</span>`,
+    `<span class="node-detail-chip">Mismatch ${formatPercent(pathRow.count ? pathRow.mismatchCount / pathRow.count : 0)}</span>`,
+    `<span class="node-detail-chip">Avg conf ${formatPercent(pathRow.avgConfidence)}</span>`,
+    `<span class="node-detail-chip">Last seen ${escapeHtml(formatDate(pathRow.lastSeenDate))}</span>`,
+  ].join("");
+  sankeyLinkDetailBody.textContent = ["Sample transactions:", ...(samples.length ? samples : ["-"])].join("\n\n");
+  sankeyLinkDetailPanel.classList.remove("hidden");
+}
+
+function findPathRowForLink(linkDatum) {
+  const rows = state.sankeyPathRows || [];
+  if (!rows.length || !linkDatum) return null;
+  if (linkDatum.type === "kw-pred") {
+    return (
+      rows.find((row) => row.keyword === linkDatum.source.label && row.predicted === linkDatum.target.label) || null
+    );
+  }
+  if (linkDatum.type === "pred-res") {
+    return (
+      rows.find((row) => row.predicted === linkDatum.source.label && row.resolved === linkDatum.target.label) || null
+    );
+  }
+  return null;
+}
+
+function applySelectedPathHighlight(allLinks) {
+  if (!allLinks) return;
+  const selectedKey = state.sankeySelectedPathKey;
+  if (!selectedKey) {
+    allLinks.classed("is-selected-path", false).classed("is-dimmed-path", false);
+    return;
+  }
+  const parts = pathParts(selectedKey);
+  const belongs = (link) => {
+    if (link.type === "kw-pred") {
+      return link.source.label === parts.keyword && link.target.label === parts.predicted;
+    }
+    if (link.type === "pred-res") {
+      return link.source.label === parts.predicted && link.target.label === parts.resolved;
+    }
+    return false;
+  };
+  allLinks.classed("is-selected-path", (link) => belongs(link)).classed("is-dimmed-path", (link) => !belongs(link));
+}
+
 function renderDecisionPathSankey(insightsPayload) {
   if (!sankeySvgEl || !sankeySummary) return;
   hideSankeyKeywordDetail();
@@ -1864,9 +2005,9 @@ function renderDecisionPathSankey(insightsPayload) {
     if (rowMs === null) return true;
     return rowMs <= cutoff;
   });
-  const cases = timelineCases.filter(caseMatchesSankeyFilters);
+  const filteredCases = timelineCases.filter(caseMatchesSankeyFilters);
 
-  if (!cases.length) {
+  if (!filteredCases.length) {
     const term = String(state.sankeyFilters.search || "").trim();
     const hasUserFilters =
       term.length > 0 ||
@@ -1885,15 +2026,30 @@ function renderDecisionPathSankey(insightsPayload) {
     return;
   }
 
+  const mode = state.sankeyMode || "volume";
+  const flowCases =
+    mode === "error"
+      ? filteredCases.filter((row) => {
+          const predicted = String(row?.predicted_category || "").trim();
+          const resolved = String(row?.resolved_category || "").trim();
+          return predicted && resolved && predicted !== resolved;
+        })
+      : filteredCases;
+  if (!flowCases.length) {
+    clearSankeyPanel("No rows available for current Sankey mode.");
+    return;
+  }
+
   const keywordLimit = 24;
   const predictedLimit = 10;
   const resolvedLimit = 10;
-  const keywords = topLabelSet(cases, (row) => row.keyword, keywordLimit);
-  const predicted = topLabelSet(cases, (row) => row.predicted_category, predictedLimit);
-  const resolved = topLabelSet(cases, (row) => row.resolved_category, resolvedLimit);
+  const keywords = topLabelSet(flowCases, (row) => row.keyword, keywordLimit);
+  const predicted = topLabelSet(flowCases, (row) => row.predicted_category, predictedLimit);
+  const resolved = topLabelSet(flowCases, (row) => row.resolved_category, resolvedLimit);
 
   const keywordCaseGroups = new Map();
-  const normalizedRows = cases.map((row) => {
+  const pathMap = new Map();
+  const normalizedRows = flowCases.map((row) => {
     const rawKeyword = String(row.keyword || "").trim() || "(none)";
     const rawPredicted = String(row.predicted_category || "").trim() || "Unknown";
     const rawResolved = String(row.resolved_category || "").trim() || "Unknown";
@@ -1905,9 +2061,47 @@ function renderDecisionPathSankey(insightsPayload) {
     const bucket = normalized.keyword;
     if (!keywordCaseGroups.has(bucket)) keywordCaseGroups.set(bucket, []);
     keywordCaseGroups.get(bucket).push(row);
+    const pKey = pathKey(normalized.keyword, normalized.predicted, normalized.resolved);
+    const entry = pathMap.get(pKey) || {
+      key: pKey,
+      keyword: normalized.keyword,
+      predicted: normalized.predicted,
+      resolved: normalized.resolved,
+      count: 0,
+      mismatchCount: 0,
+      confTotal: 0,
+      confCount: 0,
+      lastSeenDate: null,
+      rows: [],
+    };
+    entry.count += 1;
+    const mismatch = rawPredicted && rawResolved && rawPredicted !== rawResolved;
+    if (mismatch) entry.mismatchCount += 1;
+    const conf = Number(row?.confidence);
+    if (Number.isFinite(conf)) {
+      entry.confTotal += conf;
+      entry.confCount += 1;
+    }
+    const rowMs = timelineMsFromDate(row?.date);
+    const lastMs = timelineMsFromDate(entry.lastSeenDate);
+    if (rowMs !== null && (lastMs === null || rowMs > lastMs)) {
+      entry.lastSeenDate = row?.date || null;
+    }
+    entry.rows.push(row);
+    pathMap.set(pKey, entry);
     return normalized;
   });
   state.sankeyKeywordGroups = keywordCaseGroups;
+  state.sankeyPathRows = [...pathMap.values()]
+    .map((entry) => ({
+      ...entry,
+      avgConfidence: entry.confCount ? entry.confTotal / entry.confCount : null,
+    }))
+    .sort((a, b) => b.count - a.count);
+  if (state.sankeySelectedPathKey && !state.sankeyPathRows.some((row) => row.key === state.sankeySelectedPathKey)) {
+    state.sankeySelectedPathKey = null;
+  }
+  renderSankeyPathTable(state.sankeyPathRows);
 
   const nodeMap = new Map();
   const linksMap = new Map();
@@ -1916,19 +2110,28 @@ function renderDecisionPathSankey(insightsPayload) {
     if (!nodeMap.has(id)) nodeMap.set(id, { id, stage, label });
     return id;
   };
-  const addLink = (source, target, type) => {
+  const linkContribution = (row) => {
+    if (mode === "confidence") {
+      const conf = Number(row?.confidence);
+      return Number.isFinite(conf) ? Math.max(0.05, conf) : 0.2;
+    }
+    return 1;
+  };
+  const addLink = (source, target, type, contribution) => {
     const key = `${source}->${target}::${type}`;
     const current = linksMap.get(key) || { source, target, value: 0, type };
-    current.value += 1;
+    current.value += contribution;
     linksMap.set(key, current);
   };
 
-  normalizedRows.forEach((row) => {
+  normalizedRows.forEach((row, index) => {
+    const sourceRow = flowCases[index];
     const keywordId = ensureNode("kw", "keyword", row.keyword);
     const predictedId = ensureNode("pred", "predicted", row.predicted);
     const resolvedId = ensureNode("res", "resolved", row.resolved);
-    addLink(keywordId, predictedId, "kw-pred");
-    addLink(predictedId, resolvedId, "pred-res");
+    const contribution = linkContribution(sourceRow);
+    addLink(keywordId, predictedId, "kw-pred", contribution);
+    addLink(predictedId, resolvedId, "pred-res", contribution);
   });
 
   const nodes = [...nodeMap.values()];
@@ -1945,6 +2148,7 @@ function renderDecisionPathSankey(insightsPayload) {
   const svgSankey = d3.select(sankeySvgEl);
   svgSankey.selectAll("*").remove();
   svgSankey.attr("viewBox", `0 0 ${width} ${height}`);
+  svgSankey.classed("error-mode", mode === "error");
 
   const sankey = sankeyFactory()
     .nodeId((d) => d.id)
@@ -1984,7 +2188,7 @@ function renderDecisionPathSankey(insightsPayload) {
     .append("title")
     .text((d) => `${d.label}\n${d.value} cases`);
 
-  const labelMinCases = Math.max(2, Math.round(cases.length * 0.03));
+  const labelMinCases = Math.max(2, Math.round(flowCases.length * 0.03));
   const labelMinHeight = 14;
   nodeGroup
     .append("text")
@@ -2020,6 +2224,7 @@ function renderDecisionPathSankey(insightsPayload) {
     .text((d) => d.label);
 
   const allLinks = svgSankey.selectAll(".sankey-link");
+  applySelectedPathHighlight(allLinks);
   nodeGroup
     .on("mouseenter", (_, node) => {
       allLinks.classed("is-muted", true).classed("is-active", false);
@@ -2027,7 +2232,7 @@ function renderDecisionPathSankey(insightsPayload) {
         .filter((l) => l.source.id === node.id || l.target.id === node.id)
         .classed("is-muted", false)
         .classed("is-active", true);
-      if (state.sankeyPinnedKeyword) return;
+      if (state.sankeyPinnedKeyword || state.sankeySelectedPathKey) return;
       if (node.stage === "keyword") {
         renderSankeyKeywordDetail(node.label, state.sankeyKeywordGroups.get(node.label) || []);
       } else {
@@ -2036,22 +2241,40 @@ function renderDecisionPathSankey(insightsPayload) {
     })
     .on("mouseleave", () => {
       allLinks.classed("is-muted", false).classed("is-active", false);
-      if (!state.sankeyPinnedKeyword) hideSankeyKeywordDetail();
+      if (!state.sankeyPinnedKeyword && !state.sankeySelectedPathKey) hideSankeyKeywordDetail();
     });
 
   allLinks
     .on("mouseenter", function () {
       allLinks.classed("is-muted", true).classed("is-active", false);
       d3.select(this).classed("is-muted", false).classed("is-active", true);
-      if (!state.sankeyPinnedKeyword) hideSankeyKeywordDetail();
+      if (!state.sankeyPinnedKeyword && !state.sankeySelectedPathKey) hideSankeyKeywordDetail();
     })
     .on("mouseleave", () => {
       allLinks.classed("is-muted", false).classed("is-active", false);
+      applySelectedPathHighlight(allLinks);
+    })
+    .on("click", (event, linkDatum) => {
+      event.stopPropagation();
+      const row = findPathRowForLink(linkDatum);
+      if (!row) return;
+      state.sankeyPinnedKeyword = null;
+      state.sankeySelectedPathKey = row.key;
+      hideSankeyKeywordDetail();
+      renderSankeyLinkDetail(row);
+      applySelectedPathHighlight(allLinks);
+      renderSankeyPathTable(state.sankeyPathRows);
     });
 
   nodeGroup.on("click", (event, node) => {
     event.stopPropagation();
     if (node.stage !== "keyword") return;
+    if (state.sankeySelectedPathKey) {
+      state.sankeySelectedPathKey = null;
+      hideSankeyLinkDetail();
+      applySelectedPathHighlight(allLinks);
+      renderSankeyPathTable(state.sankeyPathRows);
+    }
     if (state.sankeyPinnedKeyword === node.label) {
       state.sankeyPinnedKeyword = null;
       hideSankeyKeywordDetail();
@@ -2063,7 +2286,11 @@ function renderDecisionPathSankey(insightsPayload) {
 
   svgSankey.on("click", () => {
     state.sankeyPinnedKeyword = null;
+    state.sankeySelectedPathKey = null;
     hideSankeyKeywordDetail();
+    hideSankeyLinkDetail();
+    applySelectedPathHighlight(allLinks);
+    renderSankeyPathTable(state.sankeyPathRows);
   });
 
   if (state.sankeyPinnedKeyword) {
@@ -2075,11 +2302,22 @@ function renderDecisionPathSankey(insightsPayload) {
       renderSankeyKeywordDetail(state.sankeyPinnedKeyword, rows);
     }
   }
+  if (state.sankeySelectedPathKey) {
+    const selected = state.sankeyPathRows.find((row) => row.key === state.sankeySelectedPathKey) || null;
+    if (selected) {
+      renderSankeyLinkDetail(selected);
+    } else {
+      hideSankeyLinkDetail();
+    }
+  } else {
+    hideSankeyLinkDetail();
+  }
 
   const rangeText = hasTimeline ? ` | through ${timelinePointLabel(cutoff)}` : "";
-  const filteredText = timelineCases.length === cases.length ? "" : ` | filtered ${cases.length}/${timelineCases.length}`;
+  const filteredText = timelineCases.length === filteredCases.length ? "" : ` | filtered ${filteredCases.length}/${timelineCases.length}`;
+  const modeText = mode === "error" ? "Error flow" : mode === "confidence" ? "Confidence-weighted" : "Flow volume";
   sankeySummary.textContent =
-    `${cases.length}/${allCases.length} cases${filteredText} | ${nodes.length} nodes | ${links.length} paths | top ${keywordLimit}/${predictedLimit}/${resolvedLimit} buckets${rangeText}`;
+    `${flowCases.length}/${allCases.length} cases${filteredText} | ${nodes.length} nodes | ${links.length} paths | ${modeText} | top ${keywordLimit}/${predictedLimit}/${resolvedLimit} buckets${rangeText}`;
   if (sankeyEmptyState) sankeyEmptyState.classList.add("hidden");
 }
 
@@ -3071,9 +3309,19 @@ if (sankeyViewTabBtn) {
   });
 }
 
+if (sankeyModeSelect) {
+  sankeyModeSelect.addEventListener("change", () => {
+    state.sankeyMode = sankeyModeSelect.value || "volume";
+    state.sankeySelectedPathKey = null;
+    persistSettings();
+    if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
+  });
+}
+
 if (sankeySearchInput) {
   sankeySearchInput.addEventListener("input", () => {
     state.sankeyFilters.search = sankeySearchInput.value || "";
+    state.sankeySelectedPathKey = null;
     persistSettings();
     if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
   });
@@ -3082,6 +3330,7 @@ if (sankeySearchInput) {
 if (sankeyFieldFilter) {
   sankeyFieldFilter.addEventListener("change", () => {
     state.sankeyFilters.field = sankeyFieldFilter.value || "all";
+    state.sankeySelectedPathKey = null;
     persistSettings();
     if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
   });
@@ -3090,6 +3339,7 @@ if (sankeyFieldFilter) {
 if (sankeyOutcomeFilter) {
   sankeyOutcomeFilter.addEventListener("change", () => {
     state.sankeyFilters.outcome = sankeyOutcomeFilter.value || "all";
+    state.sankeySelectedPathKey = null;
     persistSettings();
     if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
   });
@@ -3098,6 +3348,7 @@ if (sankeyOutcomeFilter) {
 if (sankeyVerifiedOnlyToggle) {
   sankeyVerifiedOnlyToggle.addEventListener("change", () => {
     state.sankeyFilters.verifiedOnly = sankeyVerifiedOnlyToggle.checked;
+    state.sankeySelectedPathKey = null;
     persistSettings();
     if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
   });
@@ -3109,6 +3360,7 @@ if (sankeyFilterResetBtn) {
     state.sankeyFilters.field = "all";
     state.sankeyFilters.outcome = "all";
     state.sankeyFilters.verifiedOnly = false;
+    state.sankeySelectedPathKey = null;
     applySankeyFilterControls();
     persistSettings();
     if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
@@ -3119,6 +3371,14 @@ if (sankeyKeywordDetailCloseBtn) {
   sankeyKeywordDetailCloseBtn.addEventListener("click", () => {
     state.sankeyPinnedKeyword = null;
     hideSankeyKeywordDetail();
+  });
+}
+
+if (sankeyLinkDetailCloseBtn) {
+  sankeyLinkDetailCloseBtn.addEventListener("click", () => {
+    state.sankeySelectedPathKey = null;
+    hideSankeyLinkDetail();
+    if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
   });
 }
 
