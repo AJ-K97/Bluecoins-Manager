@@ -70,13 +70,31 @@
                     <option value="match">Predicted == Resolved</option>
                   </select>
                 </label>
+                <label class="sankey-field">
+                  <span>Category Lens</span>
+                  <select id="sankeyCategoryLensSelect">
+                    <option value="">All resolved categories</option>
+                  </select>
+                </label>
                 <label class="sankey-check">
                   <input id="sankeyVerifiedOnlyToggle" type="checkbox" />
                   <span>Verified only</span>
                 </label>
+                <label class="sankey-field sankey-threshold-field">
+                  <span>Min path cases</span>
+                  <input id="sankeyMinCasesInput" type="number" min="1" step="1" value="1" />
+                </label>
+                <label class="sankey-field sankey-threshold-field">
+                  <span>Top paths</span>
+                  <input id="sankeyTopPathsInput" type="number" min="5" max="200" step="1" value="80" />
+                </label>
                 <button id="sankeyFilterResetBtn" class="dock-icon-button" type="button">Reset</button>
               </div>
               <div id="sankeySummary" class="quality-summary">Loading insights...</div>
+              <div class="sankey-zoombar">
+                <span id="sankeyZoomState" class="sankey-zoom-state hidden"></span>
+                <button id="sankeyZoomResetBtn" class="dock-icon-button hidden" type="button">Reset Zoom</button>
+              </div>
             </div>
             <div class="sankey-chart-wrap">
               <svg id="sankeySvg" class="sankey-svg" aria-label="Decision path sankey chart"></svg>

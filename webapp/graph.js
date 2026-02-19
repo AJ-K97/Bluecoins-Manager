@@ -39,10 +39,19 @@ const state = {
     verifiedOnly: false,
   },
   sankeyMode: "volume",
+  sankeyCategoryLens: "",
+  sankeyThresholds: {
+    minPathCases: 1,
+    topPaths: 80,
+  },
   sankeyKeywordGroups: new Map(),
   sankeyPinnedKeyword: null,
   sankeyPathRows: [],
   sankeySelectedPathKey: null,
+  sankeyZoom: {
+    stage: null,
+    label: null,
+  },
   breathe: {
     enabled: true,
     globalPulse: true,
@@ -133,7 +142,12 @@ const insightsCloseBtn = document.getElementById("insightsCloseBtn");
 const sankeySummary = document.getElementById("sankeySummary");
 const sankeySvgEl = document.getElementById("sankeySvg");
 const sankeyEmptyState = document.getElementById("sankeyEmptyState");
+const sankeyZoomState = document.getElementById("sankeyZoomState");
+const sankeyZoomResetBtn = document.getElementById("sankeyZoomResetBtn");
 const sankeyModeSelect = document.getElementById("sankeyModeSelect");
+const sankeyCategoryLensSelect = document.getElementById("sankeyCategoryLensSelect");
+const sankeyMinCasesInput = document.getElementById("sankeyMinCasesInput");
+const sankeyTopPathsInput = document.getElementById("sankeyTopPathsInput");
 const sankeyPathTable = document.getElementById("sankeyPathTable");
 const sankeyKeywordDetailPanel = document.getElementById("sankeyKeywordDetailPanel");
 const sankeyKeywordDetailTitle = document.getElementById("sankeyKeywordDetailTitle");
@@ -589,6 +603,8 @@ function persistSettings() {
       activeView: state.activeView,
       sankeyFilters: { ...state.sankeyFilters },
       sankeyMode: state.sankeyMode,
+      sankeyCategoryLens: state.sankeyCategoryLens,
+      sankeyThresholds: { ...state.sankeyThresholds },
       breathe: { ...state.breathe },
     };
     window.localStorage.setItem(GRAPH_SETTINGS_STORAGE_KEY, JSON.stringify(payload));
@@ -625,6 +641,14 @@ function loadPersistedSettings() {
     }
     if (parsed.sankeyMode === "volume" || parsed.sankeyMode === "error" || parsed.sankeyMode === "confidence") {
       state.sankeyMode = parsed.sankeyMode;
+    }
+    if (typeof parsed.sankeyCategoryLens === "string") {
+      state.sankeyCategoryLens = parsed.sankeyCategoryLens;
+    }
+    if (parsed.sankeyThresholds && typeof parsed.sankeyThresholds === "object") {
+      const input = parsed.sankeyThresholds;
+      state.sankeyThresholds.minPathCases = clampNumber(input.minPathCases, 1, 10000, state.sankeyThresholds.minPathCases);
+      state.sankeyThresholds.topPaths = clampNumber(input.topPaths, 5, 200, state.sankeyThresholds.topPaths);
     }
     state.connectedNodeScale = clampNumber(parsed.connectedNodeScale, 0.55, 1.3, state.connectedNodeScale);
 
@@ -784,6 +808,9 @@ function setActiveView(viewName) {
   if (graphWrap) graphWrap.classList.toggle("sankey-active", state.activeView === "sankey");
   if (sankeyViewPanel) sankeyViewPanel.classList.toggle("hidden", state.activeView !== "sankey");
   if (state.activeView === "sankey") {
+    setDrawerOpen(false);
+    setQualityDrawerOpen(false);
+    setInsightsDrawerOpen(false);
     stopTimelinePlayback();
     renderDecisionPathSankey(state.insightsData);
   } else if (state.graph) {
@@ -799,7 +826,51 @@ function applySankeyFilterControls() {
   if (sankeySearchInput) sankeySearchInput.value = state.sankeyFilters.search || "";
   if (sankeyFieldFilter) sankeyFieldFilter.value = state.sankeyFilters.field || "all";
   if (sankeyOutcomeFilter) sankeyOutcomeFilter.value = state.sankeyFilters.outcome || "all";
+  if (sankeyCategoryLensSelect) sankeyCategoryLensSelect.value = state.sankeyCategoryLens || "";
   if (sankeyVerifiedOnlyToggle) sankeyVerifiedOnlyToggle.checked = Boolean(state.sankeyFilters.verifiedOnly);
+  if (sankeyMinCasesInput) sankeyMinCasesInput.value = String(Math.round(state.sankeyThresholds.minPathCases || 1));
+  if (sankeyTopPathsInput) sankeyTopPathsInput.value = String(Math.round(state.sankeyThresholds.topPaths || 80));
+}
+
+function syncSankeyCategoryLensOptions(rows) {
+  if (!sankeyCategoryLensSelect) return;
+  const resolvedValues = Array.from(
+    new Set(
+      (rows || [])
+        .map((row) => String(row?.resolved_category || "").trim())
+        .filter(Boolean),
+    ),
+  ).sort((a, b) => a.localeCompare(b));
+  const selected = state.sankeyCategoryLens || "";
+  const stillExists = !selected || resolvedValues.includes(selected);
+  if (!stillExists) {
+    state.sankeyCategoryLens = "";
+  }
+  const options = [
+    `<option value="">All resolved categories</option>`,
+    ...resolvedValues.map((label) => `<option value="${escapeHtml(label)}"${label === state.sankeyCategoryLens ? " selected" : ""}>${escapeHtml(label)}</option>`),
+  ];
+  sankeyCategoryLensSelect.innerHTML = options.join("");
+}
+
+function clearSankeyZoom() {
+  state.sankeyZoom.stage = null;
+  state.sankeyZoom.label = null;
+}
+
+function updateSankeyZoomControls() {
+  if (!sankeyZoomState || !sankeyZoomResetBtn) return;
+  const stage = state.sankeyZoom.stage;
+  const label = state.sankeyZoom.label;
+  if (!stage || !label) {
+    sankeyZoomState.classList.add("hidden");
+    sankeyZoomState.textContent = "";
+    sankeyZoomResetBtn.classList.add("hidden");
+    return;
+  }
+  sankeyZoomState.classList.remove("hidden");
+  sankeyZoomState.textContent = `Zoom: ${stage} = ${label}`;
+  sankeyZoomResetBtn.classList.remove("hidden");
 }
 
 function updateWorkspaceLayout() {
@@ -1756,6 +1827,8 @@ function clearSankeyPanel(message) {
   state.sankeyKeywordGroups = new Map();
   state.sankeyPinnedKeyword = null;
   state.sankeySelectedPathKey = null;
+  clearSankeyZoom();
+  updateSankeyZoomControls();
   hideSankeyKeywordDetail();
   hideSankeyLinkDetail();
 }
@@ -2006,6 +2079,9 @@ function renderDecisionPathSankey(insightsPayload) {
     return rowMs <= cutoff;
   });
   const filteredCases = timelineCases.filter(caseMatchesSankeyFilters);
+  const rawKeywordLabel = (row) => String(row?.keyword || "").trim() || "(none)";
+  const rawPredictedLabel = (row) => String(row?.predicted_category || "").trim() || "Unknown";
+  const rawResolvedLabel = (row) => String(row?.resolved_category || "").trim() || "Unknown";
 
   if (!filteredCases.length) {
     const term = String(state.sankeyFilters.search || "").trim();
@@ -2026,23 +2102,64 @@ function renderDecisionPathSankey(insightsPayload) {
     return;
   }
 
+  syncSankeyCategoryLensOptions(filteredCases);
+  const lensCases = state.sankeyCategoryLens
+    ? filteredCases.filter((row) => rawResolvedLabel(row) === state.sankeyCategoryLens)
+    : filteredCases;
+  if (!lensCases.length) {
+    clearSankeyPanel("No rows available for the selected category lens.");
+    return;
+  }
+
+  const baseKeywordSet = topLabelSet(lensCases, rawKeywordLabel, 24);
+  const basePredictedSet = topLabelSet(lensCases, rawPredictedLabel, 10);
+  const baseResolvedSet = topLabelSet(lensCases, rawResolvedLabel, 10);
+
+  let zoomedCases = lensCases;
+  if (state.sankeyZoom.stage && state.sankeyZoom.label) {
+    if (state.sankeyZoom.stage === "keyword") {
+      if (state.sankeyZoom.label === "Other keywords") {
+        zoomedCases = lensCases.filter((row) => !baseKeywordSet.has(rawKeywordLabel(row)));
+      } else {
+        zoomedCases = lensCases.filter((row) => rawKeywordLabel(row) === state.sankeyZoom.label);
+      }
+    } else if (state.sankeyZoom.stage === "predicted") {
+      if (state.sankeyZoom.label === "Other predicted") {
+        zoomedCases = lensCases.filter((row) => !basePredictedSet.has(rawPredictedLabel(row)));
+      } else {
+        zoomedCases = lensCases.filter((row) => rawPredictedLabel(row) === state.sankeyZoom.label);
+      }
+    } else if (state.sankeyZoom.stage === "resolved") {
+      if (state.sankeyZoom.label === "Other resolved") {
+        zoomedCases = lensCases.filter((row) => !baseResolvedSet.has(rawResolvedLabel(row)));
+      } else {
+        zoomedCases = lensCases.filter((row) => rawResolvedLabel(row) === state.sankeyZoom.label);
+      }
+    }
+    if (!zoomedCases.length) {
+      clearSankeyZoom();
+      zoomedCases = lensCases;
+    }
+  }
+  updateSankeyZoomControls();
+
   const mode = state.sankeyMode || "volume";
   const flowCases =
     mode === "error"
-      ? filteredCases.filter((row) => {
+      ? zoomedCases.filter((row) => {
           const predicted = String(row?.predicted_category || "").trim();
           const resolved = String(row?.resolved_category || "").trim();
           return predicted && resolved && predicted !== resolved;
         })
-      : filteredCases;
+      : zoomedCases;
   if (!flowCases.length) {
     clearSankeyPanel("No rows available for current Sankey mode.");
     return;
   }
 
-  const keywordLimit = 24;
-  const predictedLimit = 10;
-  const resolvedLimit = 10;
+  const keywordLimit = state.sankeyZoom.stage === "keyword" ? 46 : 24;
+  const predictedLimit = state.sankeyZoom.stage === "predicted" ? 22 : 10;
+  const resolvedLimit = state.sankeyZoom.stage === "resolved" ? 22 : 10;
   const keywords = topLabelSet(flowCases, (row) => row.keyword, keywordLimit);
   const predicted = topLabelSet(flowCases, (row) => row.predicted_category, predictedLimit);
   const resolved = topLabelSet(flowCases, (row) => row.resolved_category, resolvedLimit);
@@ -2098,10 +2215,14 @@ function renderDecisionPathSankey(insightsPayload) {
       avgConfidence: entry.confCount ? entry.confTotal / entry.confCount : null,
     }))
     .sort((a, b) => b.count - a.count);
-  if (state.sankeySelectedPathKey && !state.sankeyPathRows.some((row) => row.key === state.sankeySelectedPathKey)) {
+  const minPathCases = Math.max(1, Math.round(Number(state.sankeyThresholds.minPathCases || 1)));
+  const topPaths = Math.max(5, Math.min(200, Math.round(Number(state.sankeyThresholds.topPaths || 80))));
+  const visiblePathRows = state.sankeyPathRows.filter((row) => row.count >= minPathCases).slice(0, topPaths);
+  const visiblePathKeySet = new Set(visiblePathRows.map((row) => row.key));
+  if (state.sankeySelectedPathKey && !visiblePathKeySet.has(state.sankeySelectedPathKey)) {
     state.sankeySelectedPathKey = null;
   }
-  renderSankeyPathTable(state.sankeyPathRows);
+  renderSankeyPathTable(visiblePathRows);
 
   const nodeMap = new Map();
   const linksMap = new Map();
@@ -2126,6 +2247,8 @@ function renderDecisionPathSankey(insightsPayload) {
 
   normalizedRows.forEach((row, index) => {
     const sourceRow = flowCases[index];
+    const pKey = pathKey(row.keyword, row.predicted, row.resolved);
+    if (!visiblePathKeySet.has(pKey)) return;
     const keywordId = ensureNode("kw", "keyword", row.keyword);
     const predictedId = ensureNode("pred", "predicted", row.predicted);
     const resolvedId = ensureNode("res", "resolved", row.resolved);
@@ -2263,17 +2386,18 @@ function renderDecisionPathSankey(insightsPayload) {
       hideSankeyKeywordDetail();
       renderSankeyLinkDetail(row);
       applySelectedPathHighlight(allLinks);
-      renderSankeyPathTable(state.sankeyPathRows);
+      renderSankeyPathTable(visiblePathRows);
     });
 
   nodeGroup.on("click", (event, node) => {
+    if (event.detail && event.detail > 1) return;
     event.stopPropagation();
     if (node.stage !== "keyword") return;
     if (state.sankeySelectedPathKey) {
       state.sankeySelectedPathKey = null;
       hideSankeyLinkDetail();
       applySelectedPathHighlight(allLinks);
-      renderSankeyPathTable(state.sankeyPathRows);
+      renderSankeyPathTable(visiblePathRows);
     }
     if (state.sankeyPinnedKeyword === node.label) {
       state.sankeyPinnedKeyword = null;
@@ -2284,13 +2408,29 @@ function renderDecisionPathSankey(insightsPayload) {
     renderSankeyKeywordDetail(node.label, state.sankeyKeywordGroups.get(node.label) || []);
   });
 
+  nodeGroup.on("dblclick", (event, node) => {
+    event.stopPropagation();
+    if (node.stage !== "keyword" && node.stage !== "predicted" && node.stage !== "resolved") return;
+    if (state.sankeyZoom.stage === node.stage && state.sankeyZoom.label === node.label) {
+      clearSankeyZoom();
+    } else {
+      state.sankeyZoom.stage = node.stage;
+      state.sankeyZoom.label = node.label;
+    }
+    state.sankeyPinnedKeyword = null;
+    state.sankeySelectedPathKey = null;
+    hideSankeyKeywordDetail();
+    hideSankeyLinkDetail();
+    renderDecisionPathSankey(state.insightsData);
+  });
+
   svgSankey.on("click", () => {
     state.sankeyPinnedKeyword = null;
     state.sankeySelectedPathKey = null;
     hideSankeyKeywordDetail();
     hideSankeyLinkDetail();
     applySelectedPathHighlight(allLinks);
-    renderSankeyPathTable(state.sankeyPathRows);
+    renderSankeyPathTable(visiblePathRows);
   });
 
   if (state.sankeyPinnedKeyword) {
@@ -2316,8 +2456,11 @@ function renderDecisionPathSankey(insightsPayload) {
   const rangeText = hasTimeline ? ` | through ${timelinePointLabel(cutoff)}` : "";
   const filteredText = timelineCases.length === filteredCases.length ? "" : ` | filtered ${filteredCases.length}/${timelineCases.length}`;
   const modeText = mode === "error" ? "Error flow" : mode === "confidence" ? "Confidence-weighted" : "Flow volume";
+  const lensText = state.sankeyCategoryLens ? ` | lens ${shortCategoryLabel(state.sankeyCategoryLens)}` : "";
+  const zoomText = state.sankeyZoom.stage ? ` | zoom ${state.sankeyZoom.stage}:${state.sankeyZoom.label}` : "";
+  const thresholdText = ` | threshold >=${minPathCases}, top ${topPaths}`;
   sankeySummary.textContent =
-    `${flowCases.length}/${allCases.length} cases${filteredText} | ${nodes.length} nodes | ${links.length} paths | ${modeText} | top ${keywordLimit}/${predictedLimit}/${resolvedLimit} buckets${rangeText}`;
+    `${flowCases.length}/${allCases.length} cases${filteredText}${lensText}${thresholdText} | ${nodes.length} nodes | ${links.length} paths | ${modeText}${zoomText} | top ${keywordLimit}/${predictedLimit}/${resolvedLimit} buckets${rangeText}`;
   if (sankeyEmptyState) sankeyEmptyState.classList.add("hidden");
 }
 
@@ -3318,6 +3461,17 @@ if (sankeyModeSelect) {
   });
 }
 
+if (sankeyZoomResetBtn) {
+  sankeyZoomResetBtn.addEventListener("click", () => {
+    clearSankeyZoom();
+    state.sankeyPinnedKeyword = null;
+    state.sankeySelectedPathKey = null;
+    hideSankeyKeywordDetail();
+    hideSankeyLinkDetail();
+    if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
+  });
+}
+
 if (sankeySearchInput) {
   sankeySearchInput.addEventListener("input", () => {
     state.sankeyFilters.search = sankeySearchInput.value || "";
@@ -3345,9 +3499,38 @@ if (sankeyOutcomeFilter) {
   });
 }
 
+if (sankeyCategoryLensSelect) {
+  sankeyCategoryLensSelect.addEventListener("change", () => {
+    state.sankeyCategoryLens = sankeyCategoryLensSelect.value || "";
+    clearSankeyZoom();
+    state.sankeyPinnedKeyword = null;
+    state.sankeySelectedPathKey = null;
+    persistSettings();
+    if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
+  });
+}
+
 if (sankeyVerifiedOnlyToggle) {
   sankeyVerifiedOnlyToggle.addEventListener("change", () => {
     state.sankeyFilters.verifiedOnly = sankeyVerifiedOnlyToggle.checked;
+    state.sankeySelectedPathKey = null;
+    persistSettings();
+    if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
+  });
+}
+
+if (sankeyMinCasesInput) {
+  sankeyMinCasesInput.addEventListener("change", () => {
+    state.sankeyThresholds.minPathCases = clampNumber(sankeyMinCasesInput.value, 1, 10000, 1);
+    state.sankeySelectedPathKey = null;
+    persistSettings();
+    if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
+  });
+}
+
+if (sankeyTopPathsInput) {
+  sankeyTopPathsInput.addEventListener("change", () => {
+    state.sankeyThresholds.topPaths = clampNumber(sankeyTopPathsInput.value, 5, 200, 80);
     state.sankeySelectedPathKey = null;
     persistSettings();
     if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
@@ -3360,7 +3543,11 @@ if (sankeyFilterResetBtn) {
     state.sankeyFilters.field = "all";
     state.sankeyFilters.outcome = "all";
     state.sankeyFilters.verifiedOnly = false;
+    state.sankeyCategoryLens = "";
+    state.sankeyThresholds.minPathCases = 1;
+    state.sankeyThresholds.topPaths = 80;
     state.sankeySelectedPathKey = null;
+    clearSankeyZoom();
     applySankeyFilterControls();
     persistSettings();
     if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);

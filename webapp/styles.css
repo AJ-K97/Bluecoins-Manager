@@ -236,6 +236,11 @@ body {
   flex: 1 1 260px;
 }
 
+.sankey-threshold-field {
+  min-width: 102px;
+  max-width: 130px;
+}
+
 .sankey-field span {
   font-family: "Space Mono", monospace;
   font-size: 0.62rem;
@@ -271,9 +276,32 @@ body {
   margin-top: 0.3rem;
 }
 
+.sankey-zoombar {
+  margin-top: 0.34rem;
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+}
+
+.sankey-zoom-state {
+  font-family: "Space Mono", monospace;
+  font-size: 0.66rem;
+  color: #4a6579;
+  border: 1px solid #c8d8e4;
+  border-radius: 999px;
+  padding: 0.16rem 0.46rem;
+  background: #f4f9fd;
+}
+
 .graph-wrap.sankey-active #graphSvg,
 .graph-wrap.sankey-active .node-detail-panel,
 .graph-wrap.sankey-active .node-toggle {
+  display: none;
+}
+
+.graph-wrap.sankey-active #drawerToggleBtn,
+.graph-wrap.sankey-active #qualityDrawerToggleBtn,
+.graph-wrap.sankey-active #insightsDrawerToggleBtn {
   display: none;
 }
 
