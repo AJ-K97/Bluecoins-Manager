@@ -78,6 +78,9 @@ async def build_keyword_category_graph(
     limit: int = 250,
     verified_only: bool = False,
     include_uncategorized: bool = False,
+    include_transactions: bool = False,
+    tx_per_keyword: int = 12,
+    tx_node_limit: int = 700,
 ):
     stmt = (
         select(
@@ -85,10 +88,15 @@ async def build_keyword_category_graph(
             AIMemory.user_selected_category_id,
             AIMemory.ai_suggested_category_id,
             AIMemory.ai_reasoning,
+            AIMemory.transaction_id,
             Transaction.category_id,
             Transaction.confidence_score,
             Transaction.is_verified,
             Transaction.decision_reason,
+            Transaction.description,
+            Transaction.amount,
+            Transaction.date,
+            Transaction.type,
         )
         .join(Transaction, Transaction.id == AIMemory.transaction_id)
     )
@@ -99,6 +107,8 @@ async def build_keyword_category_graph(
     rows = res.all()
 
     accumulators: Dict[Tuple[str, Optional[int]], EdgeAccumulator] = {}
+    keyword_transactions: Dict[str, list] = defaultdict(list)
+    seen_keyword_tx = set()
     category_ids = set()
 
     for (
@@ -106,10 +116,15 @@ async def build_keyword_category_graph(
         user_selected_category_id,
         ai_suggested_category_id,
         ai_reasoning,
+        transaction_id,
         tx_category_id,
         confidence_score,
         is_verified,
         decision_reason,
+        tx_description,
+        tx_amount,
+        tx_date,
+        tx_type,
     ) in rows:
         keyword = _clean_keyword(pattern_key)
         if not keyword:
@@ -144,6 +159,21 @@ async def build_keyword_category_graph(
 
         if category_id is not None:
             category_ids.add(category_id)
+
+        if transaction_id is not None:
+            tx_key = (keyword, int(transaction_id))
+            if tx_key not in seen_keyword_tx:
+                seen_keyword_tx.add(tx_key)
+                keyword_transactions[keyword].append(
+                    {
+                        "transaction_id": int(transaction_id),
+                        "description": (tx_description or "").strip(),
+                        "amount": float(tx_amount) if tx_amount is not None else None,
+                        "date": tx_date.isoformat() if tx_date else None,
+                        "type": (tx_type or "").strip() or "unknown",
+                        "confidence": float(confidence_score) if confidence_score is not None else 0.0,
+                    }
+                )
 
     category_map = {}
     if category_ids:
@@ -197,6 +227,7 @@ async def build_keyword_category_graph(
                 "id": f"{source_id}->{target_id}",
                 "source": source_id,
                 "target": target_id,
+                "edge_type": "keyword_category",
                 "keyword": edge.keyword,
                 "category_id": edge.category_id,
                 "category_label": category_label,
@@ -214,26 +245,96 @@ async def build_keyword_category_graph(
     edges.sort(key=lambda item: item["weight"], reverse=True)
     edges = edges[:limit]
 
+    tx_node_lookup = {}
+    if include_transactions and edges:
+        keyword_set = {edge["keyword"] for edge in edges}
+        tx_edges = []
+        tx_nodes = {}
+        tx_added = 0
+        for keyword in keyword_set:
+            transactions = keyword_transactions.get(keyword) or []
+            transactions.sort(key=lambda row: row.get("date") or "", reverse=True)
+            for tx in transactions[: max(1, tx_per_keyword)]:
+                if tx_added >= tx_node_limit:
+                    break
+                tx_id = tx["transaction_id"]
+                tx_node_id = f"transaction::{tx_id}"
+                keyword_node_id = f"keyword::{keyword}"
+                if tx_node_id not in tx_nodes:
+                    label = tx["description"] or f"TX {tx_id}"
+                    if len(label) > 56:
+                        label = label[:53] + "..."
+                    tx_nodes[tx_node_id] = {
+                        "id": tx_node_id,
+                        "label": label,
+                        "kind": "transaction",
+                        "transaction_id": tx_id,
+                        "description": tx["description"],
+                        "amount": tx["amount"],
+                        "date": tx["date"],
+                        "tx_type": tx["type"],
+                        "size": 3.2,
+                    }
+                    tx_node_lookup[tx_node_id] = tx_nodes[tx_node_id]
+                    tx_added += 1
+
+                tx_confidence = tx.get("confidence") or 0.0
+                tx_weight = round(0.18 + min(0.5, tx_confidence * 0.45), 4)
+                tx_edges.append(
+                    {
+                        "id": f"{tx_node_id}->{keyword_node_id}",
+                        "source": tx_node_id,
+                        "target": keyword_node_id,
+                        "edge_type": "transaction_keyword",
+                        "keyword": keyword,
+                        "reason": "Transaction matched resolved keyword.",
+                        "reasons": [{"text": "Transaction matched resolved keyword.", "count": 1}],
+                        "count": 1,
+                        "avg_confidence": round(tx_confidence, 4),
+                        "verified_ratio": 0.0,
+                        "weight": tx_weight,
+                        "transaction_id": tx_id,
+                        "transaction_label": tx_nodes[tx_node_id]["label"],
+                    }
+                )
+
+            if tx_added >= tx_node_limit:
+                break
+
+        if tx_edges:
+            edges.extend(tx_edges)
+
     node_weight = defaultdict(float)
     for edge in edges:
-        node_weight[edge["source"]] += edge["weight"]
-        node_weight[edge["target"]] += edge["weight"]
+        multiplier = 1.0 if edge.get("edge_type") == "keyword_category" else 0.2
+        node_weight[edge["source"]] += edge["weight"] * multiplier
+        node_weight[edge["target"]] += edge["weight"] * multiplier
 
     keyword_nodes = {}
     category_nodes = {}
+    transaction_nodes = {}
     for edge in edges:
         source_id = edge["source"]
         target_id = edge["target"]
         keyword_label = edge["keyword"]
-        if source_id not in keyword_nodes:
+        if source_id.startswith("keyword::") and source_id not in keyword_nodes:
             keyword_nodes[source_id] = {
                 "id": source_id,
                 "label": keyword_label,
                 "kind": "keyword",
                 "size": _node_size(node_weight[source_id], base=10.0),
             }
+        if source_id.startswith("transaction::"):
+            tx = tx_node_lookup.get(source_id) or {
+                "id": source_id,
+                "label": edge.get("transaction_label") or source_id,
+                "kind": "transaction",
+                "transaction_id": edge.get("transaction_id"),
+                "size": 3.2,
+            }
+            transaction_nodes[source_id] = tx
 
-        if target_id not in category_nodes:
+        if target_id.startswith("category::") and target_id not in category_nodes:
             category_nodes[target_id] = {
                 "id": target_id,
                 "label": edge["category_label"],
@@ -242,8 +343,18 @@ async def build_keyword_category_graph(
                 "category_type": edge["category_type"],
                 "size": _node_size(node_weight[target_id], base=14.0),
             }
+        if target_id.startswith("transaction::"):
+            transaction_nodes[target_id] = tx_node_lookup.get(target_id) or {
+                "id": target_id,
+                "label": edge.get("transaction_label") or target_id,
+                "kind": "transaction",
+                "transaction_id": edge.get("transaction_id"),
+                "size": 3.2,
+            }
 
-    nodes = list(keyword_nodes.values()) + list(category_nodes.values())
+    nodes = list(keyword_nodes.values()) + list(category_nodes.values()) + list(
+        transaction_nodes.values()
+    )
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -252,6 +363,9 @@ async def build_keyword_category_graph(
             "limit": limit,
             "verified_only": verified_only,
             "include_uncategorized": include_uncategorized,
+            "include_transactions": include_transactions,
+            "tx_per_keyword": tx_per_keyword,
+            "tx_node_limit": tx_node_limit,
         },
         "stats": {
             "rows_scanned": len(rows),
@@ -272,6 +386,19 @@ async def _graph_payload_from_query(query):
     include_uncategorized = _coerce_bool(
         query.get("include_uncategorized", [None])[0], default=False
     )
+    include_transactions = _coerce_bool(query.get("include_transactions", [None])[0], default=False)
+    tx_per_keyword = _coerce_int(
+        query.get("tx_per_keyword", [None])[0],
+        default=12,
+        minimum=2,
+        maximum=40,
+    )
+    tx_node_limit = _coerce_int(
+        query.get("tx_node_limit", [None])[0],
+        default=700,
+        minimum=100,
+        maximum=3000,
+    )
 
     async with AsyncSessionLocal() as session:
         return await build_keyword_category_graph(
@@ -280,6 +407,9 @@ async def _graph_payload_from_query(query):
             limit=limit,
             verified_only=verified_only,
             include_uncategorized=include_uncategorized,
+            include_transactions=include_transactions,
+            tx_per_keyword=tx_per_keyword,
+            tx_node_limit=tx_node_limit,
         )
 
 

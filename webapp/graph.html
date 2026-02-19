@@ -7,53 +7,87 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;700&family=Space+Grotesk:wght@500;700&family=Space+Mono:wght@400;700&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <div class="backdrop"></div>
-    <main class="shell">
-      <header class="header">
-        <div>
-          <h1>Agent Memory Graph</h1>
-          <p>Keyword to category links with confidence-based edge weight and reasoning.</p>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-dot" aria-hidden="true"></span>
+          <div>
+            <h1>Neural Memory</h1>
+            <p>Keyword-category connections with weighted reasoning</p>
+          </div>
         </div>
         <div class="pill" id="statsPill">Loading graph...</div>
       </header>
 
-      <section class="controls">
-        <label>
-          <span>Search</span>
-          <input id="searchInput" type="text" placeholder="keyword or category..." />
-        </label>
-        <label>
-          <span>Min Weight</span>
-          <input id="minWeightInput" type="number" min="0" step="0.1" value="0" />
-        </label>
-        <label>
-          <span>Edge Limit</span>
-          <input id="limitInput" type="number" min="25" max="1000" step="25" value="250" />
-        </label>
-        <label class="inline">
-          <input id="verifiedOnlyInput" type="checkbox" />
-          <span>Verified only</span>
-        </label>
-        <label class="inline">
-          <input id="showReasonsInput" type="checkbox" checked />
-          <span>Show reasons</span>
-        </label>
-        <button id="refreshBtn" type="button">Refresh</button>
-      </section>
-
-      <section class="graph-wrap">
+      <section class="graph-wrap" aria-label="Graph Canvas">
         <svg id="graphSvg" aria-label="Keyword category graph"></svg>
+        <button id="drawerToggleBtn" class="drawer-toggle" type="button" aria-label="Open Settings">
+          ⚙
+        </button>
+
         <aside id="detailPanel" class="detail-panel">
+          <div class="panel-head">
+            <div class="panel-chip">NODE_DETAILS</div>
+            <button id="drawerCloseBtn" class="drawer-close" type="button" aria-label="Close Settings">
+              ×
+            </button>
+          </div>
           <h2>Selection</h2>
           <div id="detailBody">Hover a node or edge to inspect details.</div>
+
+          <div class="settings-block">
+            <h3>Graph Settings</h3>
+            <label class="settings-row">
+              <input id="edgeTextToggle" type="checkbox" />
+              <span>Connection line text</span>
+            </label>
+            <label class="settings-row">
+              <input id="nodeTextToggle" type="checkbox" />
+              <span>Merchant/connected node text</span>
+            </label>
+            <label class="settings-range">
+              <span>Merchant/connected node size</span>
+              <input id="connectedNodeSizeRange" type="range" min="55" max="130" value="78" />
+              <output id="connectedNodeSizeValue">0.78x</output>
+            </label>
+          </div>
         </aside>
       </section>
+
+      <footer class="bottom-dock">
+        <div class="dock-search">
+          <span class="dock-icon" aria-hidden="true">⌕</span>
+          <input id="searchInput" type="text" placeholder="Query graph..." />
+        </div>
+
+        <div class="dock-divider"></div>
+
+        <label class="dock-field">
+          <span>Min</span>
+          <input id="minWeightInput" type="number" min="0" step="0.1" value="0" />
+        </label>
+        <label class="dock-field">
+          <span>Limit</span>
+          <input id="limitInput" type="number" min="25" max="1000" step="25" value="250" />
+        </label>
+        <label class="dock-toggle">
+          <input id="verifiedOnlyInput" type="checkbox" />
+          <span>Verified</span>
+        </label>
+        <button id="refreshBtn" class="dock-button" type="button">Refresh</button>
+
+        <div class="dock-divider"></div>
+
+        <button id="zoomOutBtn" class="dock-icon-button" type="button" aria-label="Zoom Out">−</button>
+        <button id="zoomResetBtn" class="dock-icon-button" type="button">100%</button>
+        <button id="zoomInBtn" class="dock-icon-button" type="button" aria-label="Zoom In">+</button>
+      </footer>
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
