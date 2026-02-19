@@ -28,7 +28,7 @@
       <section class="graph-wrap" aria-label="Graph Canvas">
         <svg id="graphSvg" aria-label="Keyword category graph"></svg>
         <button id="drawerToggleBtn" class="drawer-toggle" type="button" aria-label="Open Settings">
-          ⚙
+          S
         </button>
         <button
           id="qualityDrawerToggleBtn"
@@ -36,7 +36,7 @@
           type="button"
           aria-label="Open Model Quality"
         >
-          ◫
+          Q
         </button>
         <button
           id="insightsDrawerToggleBtn"
@@ -44,113 +44,137 @@
           type="button"
           aria-label="Open Agent Insights"
         >
-          ⌬
+          I
         </button>
 
         <aside id="detailPanel" class="detail-panel">
-          <div class="panel-head">
-            <div class="panel-chip">NODE_DETAILS</div>
-            <button id="drawerCloseBtn" class="drawer-close" type="button" aria-label="Close Settings">
-              ×
-            </button>
+          <div class="detail-sticky">
+            <div class="panel-head">
+              <div class="panel-chip">NODE_DETAILS</div>
+              <button id="drawerCloseBtn" class="drawer-close" type="button" aria-label="Close Settings">
+                ×
+              </button>
+            </div>
+            <h2>Selection</h2>
+            <div id="detailBody">Hover a node or edge to inspect details.</div>
           </div>
-          <h2>Selection</h2>
-          <div id="detailBody">Hover a node or edge to inspect details.</div>
-
-          <div class="settings-block">
+          <div class="settings-block settings-groups">
             <h3>Graph Settings</h3>
-            <label class="settings-row">
-              <input id="edgeTextToggle" type="checkbox" />
-              <span>Connection line text</span>
-            </label>
-            <label class="settings-row">
-              <input id="nodeTextToggle" type="checkbox" />
-              <span>Merchant/connected node text</span>
-            </label>
-            <label class="settings-row">
-              <input id="llmMissToggle" type="checkbox" checked />
-              <span>Initial LLM miss links</span>
-            </label>
-            <label class="settings-range">
-              <span>Merchant/connected node size</span>
-              <input id="connectedNodeSizeRange" type="range" min="55" max="130" value="78" />
-              <output id="connectedNodeSizeValue">0.78x</output>
-            </label>
-          </div>
 
-          <div class="settings-block">
-            <h3>Breathing Motion</h3>
-            <label class="settings-row">
-              <input id="breatheEnabledToggle" type="checkbox" checked />
-              <span>Enable breathing effects</span>
-            </label>
-            <label class="settings-row">
-              <input id="globalPulseToggle" type="checkbox" checked />
-              <span>Global slow pulse</span>
-            </label>
-            <label class="settings-range">
-              <span>Global pulse intensity</span>
-              <input id="globalPulseIntensityRange" type="range" min="0" max="100" value="52" />
-              <output id="globalPulseIntensityValue">0.52</output>
-            </label>
-            <label class="settings-range">
-              <span>Global pulse speed</span>
-              <input id="globalPulseSpeedRange" type="range" min="20" max="180" value="72" />
-              <output id="globalPulseSpeedValue">0.72x</output>
-            </label>
-            <label class="settings-row">
-              <input id="phaseLagToggle" type="checkbox" checked />
-              <span>Category-led phase lag</span>
-            </label>
-            <label class="settings-row">
-              <input id="edgeShimmerToggle" type="checkbox" checked />
-              <span>Edge flow shimmer</span>
-            </label>
-            <label class="settings-range">
-              <span>Edge shimmer intensity</span>
-              <input id="edgeShimmerIntensityRange" type="range" min="0" max="100" value="46" />
-              <output id="edgeShimmerIntensityValue">0.46</output>
-            </label>
-            <label class="settings-row">
-              <input id="interactionRippleToggle" type="checkbox" checked />
-              <span>Interaction ripple</span>
-            </label>
-            <label class="settings-range">
-              <span>Interaction ripple strength</span>
-              <input id="interactionRippleStrengthRange" type="range" min="10" max="200" value="100" />
-              <output id="interactionRippleStrengthValue">1.00x</output>
-            </label>
-            <label class="settings-row">
-              <input id="ambientDriftToggle" type="checkbox" checked />
-              <span>Ambient drift</span>
-            </label>
-            <label class="settings-range">
-              <span>Ambient drift strength</span>
-              <input id="ambientDriftStrengthRange" type="range" min="0" max="120" value="36" />
-              <output id="ambientDriftStrengthValue">0.36</output>
-            </label>
-            <label class="settings-row">
-              <input id="confidencePulseToggle" type="checkbox" checked />
-              <span>Confidence-driven pulse</span>
-            </label>
-            <label class="settings-row">
-              <input id="timelineHeartbeatToggle" type="checkbox" checked />
-              <span>Timeline heartbeat</span>
-            </label>
-            <label class="settings-range">
-              <span>Timeline heartbeat strength</span>
-              <input id="timelineHeartbeatStrengthRange" type="range" min="0" max="180" value="92" />
-              <output id="timelineHeartbeatStrengthValue">0.92</output>
-            </label>
-            <label class="settings-row">
-              <input id="backgroundFieldToggle" type="checkbox" checked />
-              <span>Background field motion</span>
-            </label>
-            <label class="settings-range">
-              <span>Background field intensity</span>
-              <input id="backgroundFieldIntensityRange" type="range" min="0" max="120" value="44" />
-              <output id="backgroundFieldIntensityValue">0.44</output>
-            </label>
+            <details id="settingsGraphSection" class="settings-section" open>
+              <summary>
+                <span>Graph</span>
+                <span class="settings-summary" id="graphSectionSummary">3 controls</span>
+              </summary>
+              <div class="settings-section-body">
+                <label class="settings-row">
+                  <input id="llmMissToggle" type="checkbox" checked />
+                  <span>Initial LLM miss links</span>
+                </label>
+                <label class="settings-range">
+                  <span>Merchant/connected node size</span>
+                  <input id="connectedNodeSizeRange" type="range" min="55" max="130" value="78" />
+                  <output id="connectedNodeSizeValue">0.78x</output>
+                </label>
+              </div>
+            </details>
+
+            <details id="settingsMotionSection" class="settings-section" open>
+              <summary>
+                <span>Motion</span>
+                <span class="settings-summary" id="motionSectionSummary">0/0 enabled</span>
+              </summary>
+              <div class="settings-section-body">
+                <label class="settings-row">
+                  <input id="breatheEnabledToggle" type="checkbox" checked />
+                  <span>Enable breathing effects</span>
+                </label>
+                <label class="settings-row">
+                  <input id="globalPulseToggle" type="checkbox" checked />
+                  <span>Global slow pulse</span>
+                </label>
+                <label class="settings-range">
+                  <span>Global pulse intensity</span>
+                  <input id="globalPulseIntensityRange" type="range" min="0" max="100" value="34" />
+                  <output id="globalPulseIntensityValue">0.34</output>
+                </label>
+                <label class="settings-range">
+                  <span>Global pulse speed</span>
+                  <input id="globalPulseSpeedRange" type="range" min="20" max="180" value="62" />
+                  <output id="globalPulseSpeedValue">0.62x</output>
+                </label>
+                <label class="settings-row">
+                  <input id="phaseLagToggle" type="checkbox" checked />
+                  <span>Category-led phase lag</span>
+                </label>
+                <label class="settings-row">
+                  <input id="edgeShimmerToggle" type="checkbox" checked />
+                  <span>Edge flow shimmer</span>
+                </label>
+                <label class="settings-range">
+                  <span>Edge shimmer intensity</span>
+                  <input id="edgeShimmerIntensityRange" type="range" min="0" max="100" value="30" />
+                  <output id="edgeShimmerIntensityValue">0.30</output>
+                </label>
+                <label class="settings-row">
+                  <input id="interactionRippleToggle" type="checkbox" checked />
+                  <span>Interaction ripple</span>
+                </label>
+                <label class="settings-range">
+                  <span>Interaction ripple strength</span>
+                  <input id="interactionRippleStrengthRange" type="range" min="10" max="200" value="86" />
+                  <output id="interactionRippleStrengthValue">0.86x</output>
+                </label>
+                <label class="settings-row">
+                  <input id="ambientDriftToggle" type="checkbox" checked />
+                  <span>Ambient drift</span>
+                </label>
+                <label class="settings-range">
+                  <span>Ambient drift strength</span>
+                  <input id="ambientDriftStrengthRange" type="range" min="0" max="120" value="22" />
+                  <output id="ambientDriftStrengthValue">0.22</output>
+                </label>
+                <label class="settings-row">
+                  <input id="confidencePulseToggle" type="checkbox" checked />
+                  <span>Confidence-driven pulse</span>
+                </label>
+                <label class="settings-row">
+                  <input id="timelineHeartbeatToggle" type="checkbox" checked />
+                  <span>Timeline heartbeat</span>
+                </label>
+                <label class="settings-range">
+                  <span>Timeline heartbeat strength</span>
+                  <input id="timelineHeartbeatStrengthRange" type="range" min="0" max="180" value="62" />
+                  <output id="timelineHeartbeatStrengthValue">0.62</output>
+                </label>
+                <label class="settings-row">
+                  <input id="backgroundFieldToggle" type="checkbox" checked />
+                  <span>Background field motion</span>
+                </label>
+                <label class="settings-range">
+                  <span>Background field intensity</span>
+                  <input id="backgroundFieldIntensityRange" type="range" min="0" max="120" value="28" />
+                  <output id="backgroundFieldIntensityValue">0.28</output>
+                </label>
+              </div>
+            </details>
+
+            <details id="settingsDisplaySection" class="settings-section">
+              <summary>
+                <span>Display</span>
+                <span class="settings-summary" id="displaySectionSummary">2 toggles</span>
+              </summary>
+              <div class="settings-section-body">
+                <label class="settings-row">
+                  <input id="edgeTextToggle" type="checkbox" />
+                  <span>Connection line text</span>
+                </label>
+                <label class="settings-row">
+                  <input id="nodeTextToggle" type="checkbox" />
+                  <span>Merchant/connected node text</span>
+                </label>
+              </div>
+            </details>
           </div>
         </aside>
 
@@ -219,41 +243,44 @@
       </section>
 
       <footer class="bottom-dock">
-        <div class="dock-search">
-          <span class="dock-icon" aria-hidden="true">⌕</span>
-          <input id="searchInput" type="text" placeholder="Query graph..." />
+        <div class="dock-group dock-group-query">
+          <div class="dock-search">
+            <span class="dock-icon" aria-hidden="true">⌕</span>
+            <input id="searchInput" type="text" placeholder="Query graph..." />
+          </div>
+          <label class="dock-field compact-field">
+            <span>Min Weight</span>
+            <input id="minWeightInput" type="number" min="0" step="0.1" value="0" />
+          </label>
+          <label class="dock-field compact-field">
+            <span>Limit</span>
+            <input id="limitInput" type="number" min="25" max="1000" step="25" value="250" />
+          </label>
+          <label class="dock-toggle">
+            <input id="verifiedOnlyInput" type="checkbox" />
+            <span>Verified</span>
+          </label>
+          <button id="refreshBtn" class="dock-button dock-button-primary" type="button">Refresh</button>
         </div>
 
         <div class="dock-divider"></div>
 
-        <label class="dock-field">
-          <span>Min</span>
-          <input id="minWeightInput" type="number" min="0" step="0.1" value="0" />
-        </label>
-        <label class="dock-field">
-          <span>Limit</span>
-          <input id="limitInput" type="number" min="25" max="1000" step="25" value="250" />
-        </label>
-        <label class="dock-toggle">
-          <input id="verifiedOnlyInput" type="checkbox" />
-          <span>Verified</span>
-        </label>
-        <button id="refreshBtn" class="dock-button" type="button">Refresh</button>
+        <div class="dock-group dock-group-timeline">
+          <button id="timelinePlayBtn" class="dock-button" type="button">Play</button>
+          <label class="dock-field timeline-field">
+            <span>Time</span>
+            <input id="timelineSlider" type="range" min="0" max="0" value="0" step="1" />
+          </label>
+          <div id="timelineValue" class="timeline-value">All time</div>
+        </div>
 
         <div class="dock-divider"></div>
 
-        <button id="timelinePlayBtn" class="dock-button" type="button">Play</button>
-        <label class="dock-field timeline-field">
-          <span>Time</span>
-          <input id="timelineSlider" type="range" min="0" max="0" value="0" step="1" />
-        </label>
-        <div id="timelineValue" class="timeline-value">All time</div>
-
-        <div class="dock-divider"></div>
-
-        <button id="zoomOutBtn" class="dock-icon-button" type="button" aria-label="Zoom Out">−</button>
-        <button id="zoomResetBtn" class="dock-icon-button" type="button">100%</button>
-        <button id="zoomInBtn" class="dock-icon-button" type="button" aria-label="Zoom In">+</button>
+        <div class="dock-group dock-group-zoom">
+          <button id="zoomOutBtn" class="dock-icon-button" type="button" aria-label="Zoom Out">−</button>
+          <button id="zoomResetBtn" class="dock-icon-button" type="button">100%</button>
+          <button id="zoomInBtn" class="dock-icon-button" type="button" aria-label="Zoom In">+</button>
+        </div>
       </footer>
     </main>
 

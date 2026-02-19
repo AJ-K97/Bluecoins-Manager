@@ -30,23 +30,24 @@ const state = {
   breathe: {
     enabled: true,
     globalPulse: true,
-    globalPulseIntensity: 0.52,
-    globalPulseSpeed: 0.72,
+    globalPulseIntensity: 0.34,
+    globalPulseSpeed: 0.62,
     phaseLag: true,
     edgeShimmer: true,
-    edgeShimmerIntensity: 0.46,
+    edgeShimmerIntensity: 0.3,
     interactionRipple: true,
-    interactionRippleStrength: 1,
+    interactionRippleStrength: 0.86,
     ambientDrift: true,
-    ambientDriftStrength: 0.36,
+    ambientDriftStrength: 0.22,
     confidencePulse: true,
     timelineHeartbeat: true,
-    timelineHeartbeatStrength: 0.92,
+    timelineHeartbeatStrength: 0.62,
     backgroundField: true,
-    backgroundFieldIntensity: 0.44,
+    backgroundFieldIntensity: 0.28,
   },
 };
 const GRAPH_SETTINGS_STORAGE_KEY = "bluecoins.graph.settings.v1";
+const MOTION_EASE = d3.easeCubicInOut;
 
 const svg = d3.select("#graphSvg");
 const statsPill = document.getElementById("statsPill");
@@ -115,6 +116,9 @@ const insightsCaseSelect = document.getElementById("insightsCaseSelect");
 const insightsCaseBody = document.getElementById("insightsCaseBody");
 const insightsRiskTable = document.getElementById("insightsRiskTable");
 const insightsStabilityTable = document.getElementById("insightsStabilityTable");
+const graphSectionSummary = document.getElementById("graphSectionSummary");
+const motionSectionSummary = document.getElementById("motionSectionSummary");
+const displaySectionSummary = document.getElementById("displaySectionSummary");
 
 function sourceId(edge) {
   return typeof edge.source === "object" ? edge.source.id : edge.source;
@@ -374,6 +378,31 @@ function syncBreathingLabels() {
   }
 }
 
+function updateSettingsSectionSummaries() {
+  if (graphSectionSummary) {
+    graphSectionSummary.textContent = `${state.showInitialMissLinks ? "Miss links on" : "Miss links off"} | ${state.connectedNodeScale.toFixed(2)}x`;
+  }
+  if (motionSectionSummary) {
+    const motionToggles = [
+      state.breathe.enabled,
+      state.breathe.globalPulse,
+      state.breathe.phaseLag,
+      state.breathe.edgeShimmer,
+      state.breathe.interactionRipple,
+      state.breathe.ambientDrift,
+      state.breathe.confidencePulse,
+      state.breathe.timelineHeartbeat,
+      state.breathe.backgroundField,
+    ];
+    const enabledCount = motionToggles.filter(Boolean).length;
+    motionSectionSummary.textContent = `${enabledCount}/${motionToggles.length} enabled`;
+  }
+  if (displaySectionSummary) {
+    const textCount = [state.showEdgeText, state.showNodeText].filter(Boolean).length;
+    displaySectionSummary.textContent = `${textCount}/2 text overlays`;
+  }
+}
+
 function triggerTimelineHeartbeatPulse() {
   if (!state.breathe.enabled || !state.breathe.timelineHeartbeat) return;
   const strength = Math.max(0, state.breathe.timelineHeartbeatStrength || 0);
@@ -543,11 +572,11 @@ function runNodePopAnimation(nodeIds) {
     .attr("r", (d) => ringTargetRadius(d) * 0.68)
     .transition()
     .duration(170)
-    .ease(d3.easeCubicOut)
+    .ease(MOTION_EASE)
     .attr("r", (d) => ringTargetRadius(d) * 1.08)
     .transition()
     .duration(130)
-    .ease(d3.easeCubicInOut)
+    .ease(MOTION_EASE)
     .attr("r", ringTargetRadius);
 
   nodeCore
@@ -556,11 +585,11 @@ function runNodePopAnimation(nodeIds) {
     .attr("r", (d) => coreTargetRadius(d) * 0.62)
     .transition()
     .duration(170)
-    .ease(d3.easeCubicOut)
+    .ease(MOTION_EASE)
     .attr("r", (d) => coreTargetRadius(d) * 1.1)
     .transition()
     .duration(130)
-    .ease(d3.easeCubicInOut)
+    .ease(MOTION_EASE)
     .attr("r", coreTargetRadius);
 }
 
@@ -748,9 +777,9 @@ function applyVisualState(options = {}) {
     .style("pointer-events", (d) => (visibility.visibleNodeIds.has(d.id) ? null : "none"))
     .style("opacity", (d) => {
       if (!visibility.visibleNodeIds.has(d.id)) return 0;
-      if (!filtered) return d.kind === "transaction" ? 0.84 : 0.98;
+      if (!filtered) return d.kind === "transaction" ? 0.88 : 0.99;
       if (activeNodeIds.has(d.id)) return 1;
-      return d.kind === "transaction" ? 0.16 : 0.2;
+      return d.kind === "transaction" ? 0.14 : 0.16;
     });
 
   if (nodeHit) {
@@ -763,10 +792,10 @@ function applyVisualState(options = {}) {
 
   nodeRing
     .attr("stroke", (d) => {
-      if (d.id === state.focusNodeId) return "#26363f";
-      if (d.kind === "keyword") return filtered && activeNodeIds.has(d.id) ? "#3f6a7f" : "#6f8f9f";
-      if (d.kind === "transaction") return "#8fa7b4";
-      return filtered && activeNodeIds.has(d.id) ? "#6f7c86" : "#98a3ab";
+      if (d.id === state.focusNodeId) return "#21445d";
+      if (d.kind === "keyword") return filtered && activeNodeIds.has(d.id) ? "#3e81a7" : "#6f99b2";
+      if (d.kind === "transaction") return "#7396ad";
+      return filtered && activeNodeIds.has(d.id) ? "#5e7388" : "#90a2b2";
     })
     .attr("stroke-width", (d) => {
       if (d.kind === "transaction") return 1.05;
@@ -777,31 +806,31 @@ function applyVisualState(options = {}) {
 
   nodeCore.attr("fill", (d) => {
     if (d.kind === "keyword") {
-      if (d.id === state.focusNodeId) return "#2f586b";
-      if (filtered && activeNodeIds.has(d.id)) return "#4f7a8d";
-      return "#5f8798";
+      if (d.id === state.focusNodeId) return "#2b6f95";
+      if (filtered && activeNodeIds.has(d.id)) return "#4f87aa";
+      return "#5d92b0";
     }
     if (d.kind === "category") {
-      if (d.id === state.focusNodeId) return "#6a7780";
-      if (filtered && activeNodeIds.has(d.id)) return "#7a8790";
-      return "#88949c";
+      if (d.id === state.focusNodeId) return "#51697d";
+      if (filtered && activeNodeIds.has(d.id)) return "#6a8397";
+      return "#7c93a6";
     }
-    if (filtered && activeNodeIds.has(d.id)) return "#8ca8b7";
-    return "#9fb8c4";
+    if (filtered && activeNodeIds.has(d.id)) return "#88a8ba";
+    return "#98b7c8";
   });
 
   link
     .style("display", (d) => (visibility.visibleEdgeIds.has(d.id) ? null : "none"))
     .style("pointer-events", (d) => (visibility.visibleEdgeIds.has(d.id) ? null : "none"))
     .attr("stroke", (d) => {
-      if (d.id === state.focusEdgeId) return "#5f8ea2";
+      if (d.id === state.focusEdgeId) return "#2f80aa";
       if (d.edge_type === "llm_initial_category") {
-        return filtered && activeEdgeIds.has(d.id) ? "#b74a56" : "#cb727d";
+        return filtered && activeEdgeIds.has(d.id) ? "#c34053" : "#cf5d6d";
       }
       if (d.edge_type === "transaction_keyword") {
-        return filtered && activeEdgeIds.has(d.id) ? "#8ea8b8" : "#bcc9d1";
+        return filtered && activeEdgeIds.has(d.id) ? "#6f93a9" : "#aebfcc";
       }
-      return filtered && activeEdgeIds.has(d.id) ? "#8ca8b6" : "#c9d0d5";
+      return filtered && activeEdgeIds.has(d.id) ? "#5f8fab" : "#9fb5c4";
     })
     .attr("stroke-width", (d) => {
       const base = strokeScale(d.weight);
@@ -818,14 +847,14 @@ function applyVisualState(options = {}) {
     .style("opacity", (d) => {
       if (!visibility.visibleEdgeIds.has(d.id)) return 0;
       if (!filtered) {
-        if (d.edge_type === "transaction_keyword") return 0.5;
-        if (d.edge_type === "llm_initial_category") return 0.62;
-        return 0.56;
+        if (d.edge_type === "transaction_keyword") return 0.54;
+        if (d.edge_type === "llm_initial_category") return 0.72;
+        return 0.64;
       }
       if (activeEdgeIds.has(d.id)) return 0.95;
-      if (d.edge_type === "transaction_keyword") return 0.22;
-      if (d.edge_type === "llm_initial_category") return 0.32;
-      return 0.12;
+      if (d.edge_type === "transaction_keyword") return 0.2;
+      if (d.edge_type === "llm_initial_category") return 0.34;
+      return 0.1;
     });
 
   edgeLabel
@@ -835,7 +864,7 @@ function applyVisualState(options = {}) {
     })
     .style("opacity", (d) => {
       if (!state.showEdgeText || !visibility.visibleEdgeIds.has(d.id)) return 0;
-      if (!filtered) return 0.4;
+      if (!filtered) return 0.56;
       return activeEdgeIds.has(d.id) ? 0.82 : 0.03;
     });
 
@@ -846,7 +875,7 @@ function applyVisualState(options = {}) {
     })
     .style("opacity", (d) => {
       if (!state.showNodeText || d.kind === "transaction" || !visibility.visibleNodeIds.has(d.id)) return 0;
-      if (!filtered) return 0.72;
+      if (!filtered) return 0.8;
       return activeNodeIds.has(d.id) ? 0.92 : 0.08;
     });
 
@@ -1058,7 +1087,7 @@ function emitInteractionRipple(node) {
   ripple
     .transition()
     .duration(680)
-    .ease(d3.easeCubicOut)
+    .ease(MOTION_EASE)
     .attr("r", burstRadius)
     .style("opacity", 0)
     .remove();
@@ -1111,6 +1140,7 @@ function startBreathingLoop() {
     const globalAmp = breathe.globalPulse ? breathe.globalPulseIntensity * 0.19 : 0;
     const pulseSpeed = Math.max(0.08, breathe.globalPulseSpeed || 0.72);
     const heartbeatBoost = breathe.timelineHeartbeat ? state.timelinePulse * 0.16 : 0;
+    const maxCompositeAmp = 0.22;
 
     nodeRing.attr("r", (d) => {
       const base = baseRingRadius(d);
@@ -1118,7 +1148,8 @@ function startBreathingLoop() {
       const confidencePulse = breathe.confidencePulse ? d.confidence_pulse : 1;
       const interactionPulse = state.interactionPulseByNode.get(d.id) || 0;
       const wave = Math.sin(t * pulseSpeed * 2.9 + d.phase_seed + phaseLag);
-      const amp = (globalAmp + heartbeatBoost + interactionPulse * 0.055) * confidencePulse;
+      const rawAmp = (globalAmp + heartbeatBoost + interactionPulse * 0.055) * confidencePulse;
+      const amp = Math.min(maxCompositeAmp, rawAmp);
       return Math.max(1.3, base * (1 + wave * amp));
     });
 
@@ -1128,7 +1159,8 @@ function startBreathingLoop() {
       const confidencePulse = breathe.confidencePulse ? d.confidence_pulse : 1;
       const interactionPulse = state.interactionPulseByNode.get(d.id) || 0;
       const wave = Math.sin(t * pulseSpeed * 2.9 + d.phase_seed + phaseLag + 0.45);
-      const amp = (globalAmp * 0.74 + heartbeatBoost * 0.92 + interactionPulse * 0.046) * confidencePulse;
+      const rawAmp = (globalAmp * 0.74 + heartbeatBoost * 0.92 + interactionPulse * 0.046) * confidencePulse;
+      const amp = Math.min(maxCompositeAmp * 0.9, rawAmp);
       return Math.max(1.1, base * (1 + wave * amp));
     });
 
@@ -1927,6 +1959,7 @@ if (edgeTextToggle) {
   edgeTextToggle.addEventListener("change", () => {
     state.showEdgeText = edgeTextToggle.checked;
     persistSettings();
+    updateSettingsSectionSummaries();
     applyVisualState();
   });
 }
@@ -1935,6 +1968,7 @@ if (nodeTextToggle) {
   nodeTextToggle.addEventListener("change", () => {
     state.showNodeText = nodeTextToggle.checked;
     persistSettings();
+    updateSettingsSectionSummaries();
     applyVisualState();
   });
 }
@@ -1943,6 +1977,7 @@ if (llmMissToggle) {
   llmMissToggle.addEventListener("change", () => {
     state.showInitialMissLinks = llmMissToggle.checked;
     persistSettings();
+    updateSettingsSectionSummaries();
     applyVisualState();
   });
 }
@@ -1952,12 +1987,14 @@ if (connectedNodeSizeRange) {
     state.connectedNodeScale = Number(connectedNodeSizeRange.value) / 100;
     syncConnectedNodeScaleLabel();
     persistSettings();
+    updateSettingsSectionSummaries();
     if (state.graph) renderGraph(state.graph);
   });
 }
 
 function refreshBreathingRuntime() {
   syncBreathingLabels();
+  updateSettingsSectionSummaries();
   persistSettings();
   if (!state.selections) return;
   startBreathingLoop();
@@ -2232,6 +2269,7 @@ if (timelineSlider) {
 if (timelinePlayBtn) timelinePlayBtn.disabled = true;
 syncConnectedNodeScaleLabel();
 syncBreathingLabels();
+updateSettingsSectionSummaries();
 updateTimelineLabel();
 setDrawerOpen(state.drawerOpen);
 setQualityDrawerOpen(state.qualityDrawerOpen);
