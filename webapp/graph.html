@@ -55,16 +55,31 @@
                 ×
               </button>
             </div>
-            <h2>Selection</h2>
+            <div class="heading-row">
+              <h2>Selection</h2>
+              <button class="help-trigger" type="button" data-help-key="selection_panel" aria-label="Help: Selection panel">
+                ?
+              </button>
+            </div>
             <div id="detailBody">Hover a node or edge to inspect details.</div>
           </div>
           <div class="settings-block settings-groups">
-            <h3>Graph Settings</h3>
+            <div class="heading-row compact">
+              <h3>Graph Settings</h3>
+              <button class="help-trigger" type="button" data-help-key="settings_overview" aria-label="Help: Graph settings">
+                ?
+              </button>
+            </div>
 
             <details id="settingsGraphSection" class="settings-section" open>
               <summary>
                 <span>Graph</span>
-                <span class="settings-summary" id="graphSectionSummary">3 controls</span>
+                <span class="settings-summary-wrap">
+                  <span class="settings-summary" id="graphSectionSummary">3 controls</span>
+                  <button class="help-trigger" type="button" data-help-key="settings_graph" aria-label="Help: Graph settings">
+                    ?
+                  </button>
+                </span>
               </summary>
               <div class="settings-section-body">
                 <label class="settings-row">
@@ -82,7 +97,12 @@
             <details id="settingsMotionSection" class="settings-section" open>
               <summary>
                 <span>Motion</span>
-                <span class="settings-summary" id="motionSectionSummary">0/0 enabled</span>
+                <span class="settings-summary-wrap">
+                  <span class="settings-summary" id="motionSectionSummary">0/0 enabled</span>
+                  <button class="help-trigger" type="button" data-help-key="settings_motion" aria-label="Help: Motion settings">
+                    ?
+                  </button>
+                </span>
               </summary>
               <div class="settings-section-body">
                 <label class="settings-row">
@@ -162,7 +182,12 @@
             <details id="settingsDisplaySection" class="settings-section">
               <summary>
                 <span>Display</span>
-                <span class="settings-summary" id="displaySectionSummary">2 toggles</span>
+                <span class="settings-summary-wrap">
+                  <span class="settings-summary" id="displaySectionSummary">2 toggles</span>
+                  <button class="help-trigger" type="button" data-help-key="settings_display" aria-label="Help: Display settings">
+                    ?
+                  </button>
+                </span>
               </summary>
               <div class="settings-section-body">
                 <label class="settings-row">
@@ -185,24 +210,54 @@
               ×
             </button>
           </div>
-          <h2>Model Quality</h2>
+          <div class="heading-row">
+            <h2>Model Quality</h2>
+            <button class="help-trigger" type="button" data-help-key="quality_overview" aria-label="Help: Model quality">
+              ?
+            </button>
+          </div>
           <div class="quality-block">
             <div class="quality-head">
-              <h3>Metrics</h3>
+              <div class="heading-row compact">
+                <h3>Metrics</h3>
+                <button class="help-trigger" type="button" data-help-key="quality_metrics" aria-label="Help: Quality metrics">
+                  ?
+                </button>
+              </div>
               <button id="qualityRefreshBtn" class="quality-refresh-btn" type="button">Refresh</button>
             </div>
             <div id="qualitySummary" class="quality-summary">Loading quality metrics...</div>
 
-            <div class="quality-subtitle">Per-category performance</div>
+            <div class="quality-subtitle">
+              <span>Per-category performance</span>
+              <button class="help-trigger" type="button" data-help-key="quality_per_category" aria-label="Help: Per-category performance">
+                ?
+              </button>
+            </div>
             <div id="qualityCategoryTable" class="quality-table-wrap"></div>
 
-            <div class="quality-subtitle">Confusion matrix</div>
+            <div class="quality-subtitle">
+              <span>Confusion matrix</span>
+              <button class="help-trigger" type="button" data-help-key="quality_confusion" aria-label="Help: Confusion matrix">
+                ?
+              </button>
+            </div>
             <div id="qualityConfusion" class="quality-table-wrap"></div>
 
-            <div class="quality-subtitle">Confidence calibration</div>
+            <div class="quality-subtitle">
+              <span>Confidence calibration</span>
+              <button class="help-trigger" type="button" data-help-key="quality_calibration" aria-label="Help: Confidence calibration">
+                ?
+              </button>
+            </div>
             <div id="qualityCalibration" class="quality-calibration"></div>
 
-            <div class="quality-subtitle">Replay backtest trend</div>
+            <div class="quality-subtitle">
+              <span>Replay backtest trend</span>
+              <button class="help-trigger" type="button" data-help-key="quality_replay" aria-label="Help: Replay trend">
+                ?
+              </button>
+            </div>
             <div id="qualityReplay" class="quality-replay"></div>
           </div>
         </aside>
@@ -214,28 +269,53 @@
               ×
             </button>
           </div>
-          <h2>Agent Insights</h2>
+          <div class="heading-row">
+            <h2>Agent Insights</h2>
+            <button class="help-trigger" type="button" data-help-key="insights_overview" aria-label="Help: Agent insights">
+              ?
+            </button>
+          </div>
           <div class="insights-block">
             <div class="quality-head">
-              <h3>Diagnostics</h3>
+              <div class="heading-row compact">
+                <h3>Diagnostics</h3>
+                <button class="help-trigger" type="button" data-help-key="insights_diagnostics" aria-label="Help: Diagnostics">
+                  ?
+                </button>
+              </div>
               <button id="insightsRefreshBtn" class="quality-refresh-btn" type="button">Refresh</button>
             </div>
             <div id="insightsSummary" class="quality-summary">Loading insights...</div>
 
             <details class="insights-section" open>
-              <summary>Case Inspector</summary>
+              <summary>
+                <span>Case Inspector</span>
+                <button class="help-trigger" type="button" data-help-key="insights_case_inspector" aria-label="Help: Case inspector">
+                  ?
+                </button>
+              </summary>
               <label class="insights-label" for="insightsCaseSelect">Transaction</label>
               <select id="insightsCaseSelect" class="insights-select"></select>
               <div id="insightsCaseBody" class="insights-case-body">No cases loaded yet.</div>
             </details>
 
             <details class="insights-section">
-              <summary>Ambiguity & Risk</summary>
+              <summary>
+                <span>Ambiguity & Risk</span>
+                <button class="help-trigger" type="button" data-help-key="insights_risk" aria-label="Help: Ambiguity and risk">
+                  ?
+                </button>
+              </summary>
               <div id="insightsRiskTable" class="quality-table-wrap"></div>
             </details>
 
             <details class="insights-section">
-              <summary>Stability & Learning Velocity</summary>
+              <summary>
+                <span>Stability & Learning Velocity</span>
+                <button class="help-trigger" type="button" data-help-key="insights_stability" aria-label="Help: Stability and learning velocity">
+                  ?
+                </button>
+              </summary>
               <div id="insightsStabilityTable" class="quality-table-wrap"></div>
             </details>
           </div>
@@ -261,6 +341,9 @@
             <span>Verified</span>
           </label>
           <button id="refreshBtn" class="dock-button dock-button-primary" type="button">Refresh</button>
+          <button class="help-trigger dock-help" type="button" data-help-key="dock_query" aria-label="Help: Query and filters">
+            ?
+          </button>
         </div>
 
         <div class="dock-divider"></div>
@@ -272,6 +355,9 @@
             <input id="timelineSlider" type="range" min="0" max="0" value="0" step="1" />
           </label>
           <div id="timelineValue" class="timeline-value">All time</div>
+          <button class="help-trigger dock-help" type="button" data-help-key="dock_timeline" aria-label="Help: Timeline controls">
+            ?
+          </button>
         </div>
 
         <div class="dock-divider"></div>
@@ -280,8 +366,19 @@
           <button id="zoomOutBtn" class="dock-icon-button" type="button" aria-label="Zoom Out">−</button>
           <button id="zoomResetBtn" class="dock-icon-button" type="button">100%</button>
           <button id="zoomInBtn" class="dock-icon-button" type="button" aria-label="Zoom In">+</button>
+          <button class="help-trigger dock-help" type="button" data-help-key="dock_zoom" aria-label="Help: Zoom controls">
+            ?
+          </button>
         </div>
       </footer>
+
+      <div id="helpPopover" class="help-popover hidden" role="dialog" aria-live="polite" aria-label="Context help">
+        <div class="help-popover-head">
+          <h4 id="helpPopoverTitle">Help</h4>
+          <button id="helpPopoverClose" type="button" class="help-close" aria-label="Close help">×</button>
+        </div>
+        <div id="helpPopoverBody" class="help-popover-body"></div>
+      </div>
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>

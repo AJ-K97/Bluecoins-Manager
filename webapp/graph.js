@@ -119,6 +119,127 @@ const insightsStabilityTable = document.getElementById("insightsStabilityTable")
 const graphSectionSummary = document.getElementById("graphSectionSummary");
 const motionSectionSummary = document.getElementById("motionSectionSummary");
 const displaySectionSummary = document.getElementById("displaySectionSummary");
+const helpPopover = document.getElementById("helpPopover");
+const helpPopoverTitle = document.getElementById("helpPopoverTitle");
+const helpPopoverBody = document.getElementById("helpPopoverBody");
+const helpPopoverClose = document.getElementById("helpPopoverClose");
+
+const HELP_CONTENT = {
+  selection_panel: {
+    title: "Selection Panel",
+    does: "Shows contextual details for the currently hovered or pinned node/edge.",
+    analysis: "Reads live graph context (edge type, dates, confidence, reason rollups, and linked transactions).",
+    meaning: "Use it to validate why a category was chosen and which signals are driving memory strength.",
+  },
+  settings_overview: {
+    title: "Graph Settings",
+    does: "Controls how the knowledge graph is rendered and animated.",
+    analysis: "Applies display/motion toggles on top of the same underlying graph payload.",
+    meaning: "Change visual emphasis without altering any model decisions or stored categorization data.",
+  },
+  settings_graph: {
+    title: "Graph Group",
+    does: "Adjusts structural visibility for core graph interpretation.",
+    analysis: "Toggles initial-miss links and scales merchant-connected nodes.",
+    meaning: "Use this when comparing stable category memory versus correction history.",
+  },
+  settings_motion: {
+    title: "Motion Group",
+    does: "Controls breathing and ambient animation effects.",
+    analysis: "Animates graph layers using confidence, interaction, and timeline heartbeat signals.",
+    meaning: "Useful for pattern perception, but not a source of model truth on its own.",
+  },
+  settings_display: {
+    title: "Display Group",
+    does: "Enables optional text overlays for node and edge labels.",
+    analysis: "Shows/hides labels while preserving node/edge geometry and weights.",
+    meaning: "Helpful for explanation mode; disable for cleaner structural inspection.",
+  },
+  quality_overview: {
+    title: "Model Quality",
+    does: "Summarizes aggregate classification performance over reviewed/scored transactions.",
+    analysis: "Computes accuracy, macro-F1, calibration, and confusion distributions from scored history.",
+    meaning: "Use this panel to measure whether categorization is improving globally over time.",
+  },
+  quality_metrics: {
+    title: "Quality Metrics",
+    does: "Shows overall precision-quality indicators for the model.",
+    analysis: "Combines scored outcome counts and category-level metrics into top-line KPIs.",
+    meaning: "Treat this as your primary health check before drilling into edge cases.",
+  },
+  quality_per_category: {
+    title: "Per-category Performance",
+    does: "Breaks quality metrics down by category label.",
+    analysis: "Calculates support, precision, recall, and F1 for each category.",
+    meaning: "Highlights which categories are strong, weak, or under-trained.",
+  },
+  quality_confusion: {
+    title: "Confusion Matrix",
+    does: "Shows where predictions are being confused between categories.",
+    analysis: "Counts actual-vs-predicted outcomes for the most represented classes.",
+    meaning: "Use strong off-diagonal cells to identify recurring misclassification patterns.",
+  },
+  quality_calibration: {
+    title: "Confidence Calibration",
+    does: "Compares predicted confidence against actual correctness.",
+    analysis: "Bins confidence ranges and computes realized accuracy per bin.",
+    meaning: "If confidence > accuracy consistently, the model is overconfident.",
+  },
+  quality_replay: {
+    title: "Replay Backtest Trend",
+    does: "Tracks performance progression across recent time windows.",
+    analysis: "Replays historical periods and reports monthly/periodic accuracy.",
+    meaning: "Use this to confirm learning trend direction, not just snapshot quality.",
+  },
+  insights_overview: {
+    title: "Agent Insights",
+    does: "Surfaces ambiguity, instability, and correction dynamics in agent behavior.",
+    analysis: "Combines case-level outcomes with keyword-level stability signals.",
+    meaning: "Use this panel to inspect how the agent learns, not just whether it is accurate.",
+  },
+  insights_diagnostics: {
+    title: "Diagnostics",
+    does: "Provides live summary counts for risk and stability dimensions.",
+    analysis: "Aggregates case inspector + risk + stability datasets from insights API.",
+    meaning: "A quick triage view before drilling into specific cases.",
+  },
+  insights_case_inspector: {
+    title: "Case Inspector",
+    does: "Shows transaction-by-transaction reasoning snapshots.",
+    analysis: "Includes keyword, predicted/resolved category, confidence, and memory context.",
+    meaning: "Best tool for auditing an individual categorization decision end-to-end.",
+  },
+  insights_risk: {
+    title: "Ambiguity & Risk",
+    does: "Lists high-risk transactions likely to be misclassified.",
+    analysis: "Ranks items using risk score, confidence, correctness, and resolved outcomes.",
+    meaning: "Use top rows as priority candidates for review or memory rule updates.",
+  },
+  insights_stability: {
+    title: "Stability & Learning Velocity",
+    does: "Shows how quickly keywords converge to stable categorization.",
+    analysis: "Measures flips, corrections, entropy, and time-to-stability by keyword.",
+    meaning: "Low stability suggests unresolved ambiguity or insufficient feedback cycles.",
+  },
+  dock_query: {
+    title: "Query & Filters",
+    does: "Controls graph retrieval scope and filtering before rendering.",
+    analysis: "Applies min-weight, record limit, verification filter, and text query matching.",
+    meaning: "Use this to narrow investigation to stronger evidence or specific keywords/categories.",
+  },
+  dock_timeline: {
+    title: "Timeline Controls",
+    does: "Replays graph growth over time with manual and auto playback.",
+    analysis: "Shows only nodes/edges available up to the selected time cutoff.",
+    meaning: "Use this to study how agent memory evolves as new transactions arrive.",
+  },
+  dock_zoom: {
+    title: "Zoom & Focus",
+    does: "Adjusts viewport magnification for structural inspection.",
+    analysis: "Applies D3 zoom transforms without changing graph data.",
+    meaning: "Use high zoom for local reasoning paths and reset for global cluster context.",
+  },
+};
 
 function sourceId(edge) {
   return typeof edge.source === "object" ? edge.source.id : edge.source;
@@ -161,6 +282,62 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function closeHelpPopover() {
+  if (!helpPopover) return;
+  helpPopover.classList.add("hidden");
+  helpPopover.dataset.key = "";
+  helpPopover.dataset.anchor = "";
+}
+
+function renderHelpBody(helpItem) {
+  if (!helpPopoverBody) return;
+  const does = escapeHtml(helpItem?.does || "No help content available.");
+  const analysis = escapeHtml(helpItem?.analysis || "No analysis details available.");
+  const meaning = escapeHtml(helpItem?.meaning || "No interpretation guidance available.");
+  helpPopoverBody.innerHTML = [
+    `<p><strong>What it does:</strong> ${does}</p>`,
+    `<p><strong>What it analyzes:</strong> ${analysis}</p>`,
+    `<p><strong>What it means:</strong> ${meaning}</p>`,
+  ].join("");
+}
+
+function openHelpPopover(helpKey, anchorEl) {
+  if (!helpPopover || !helpPopoverTitle || !anchorEl) return;
+  const item = HELP_CONTENT[helpKey] || {
+    title: "Help",
+    does: "No help content available for this control yet.",
+    analysis: "No analysis details available.",
+    meaning: "No interpretation guidance available.",
+  };
+  helpPopoverTitle.textContent = item.title;
+  renderHelpBody(item);
+
+  const anchorRect = anchorEl.getBoundingClientRect();
+  helpPopover.classList.remove("hidden");
+  helpPopover.dataset.key = helpKey;
+
+  const popRect = helpPopover.getBoundingClientRect();
+  const gap = 10;
+  let left = anchorRect.right + gap;
+  let top = anchorRect.top - 8;
+
+  if (left + popRect.width > window.innerWidth - 8) {
+    left = anchorRect.left - popRect.width - gap;
+  }
+  if (left < 8) {
+    left = Math.max(8, Math.min(window.innerWidth - popRect.width - 8, anchorRect.left));
+    top = anchorRect.bottom + gap;
+  }
+  if (top + popRect.height > window.innerHeight - 8) {
+    top = Math.max(8, window.innerHeight - popRect.height - 8);
+  }
+  if (top < 8) top = 8;
+
+  helpPopover.style.left = `${Math.round(left)}px`;
+  helpPopover.style.top = `${Math.round(top)}px`;
+  helpPopover.dataset.anchor = helpKey;
 }
 
 function shortCategoryLabel(rawLabel) {
@@ -2214,6 +2391,43 @@ if (zoomResetBtn) {
     svg.transition().duration(180).call(state.zoomBehavior.transform, d3.zoomIdentity);
   });
 }
+
+if (helpPopoverClose) {
+  helpPopoverClose.addEventListener("click", () => {
+    closeHelpPopover();
+  });
+}
+
+document.addEventListener("click", (event) => {
+  const trigger = event.target.closest(".help-trigger");
+  const clickedPopover = event.target.closest("#helpPopover");
+  if (trigger) {
+    event.preventDefault();
+    event.stopPropagation();
+    const key = trigger.dataset.helpKey || "";
+    if (!key) return;
+    const isSame = !helpPopover?.classList.contains("hidden") && helpPopover?.dataset.key === key;
+    if (isSame) {
+      closeHelpPopover();
+      return;
+    }
+    openHelpPopover(key, trigger);
+    return;
+  }
+  if (!clickedPopover) {
+    closeHelpPopover();
+  }
+});
+
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closeHelpPopover();
+  }
+});
+
+window.addEventListener("resize", () => {
+  closeHelpPopover();
+});
 
 window.addEventListener("resize", () => {
   if (state.graph) renderGraph(state.graph);
