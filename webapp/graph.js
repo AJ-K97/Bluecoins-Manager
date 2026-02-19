@@ -4,12 +4,19 @@ const state = {
   searchTerm: "",
   focusNodeId: null,
   focusEdgeId: null,
+  pinnedNodeId: null,
   tagNodeId: null,
   zoomBehavior: null,
   showEdgeText: false,
   showNodeText: false,
   connectedNodeScale: 0.78,
   drawerOpen: true,
+  timelinePoints: [],
+  timelineIndex: 0,
+  isTimelinePlaying: false,
+  timelineTimer: null,
+  lastVisibleNodeIds: new Set(),
+  lastVisibleEdgeIds: new Set(),
 };
 
 const svg = d3.select("#graphSvg");
@@ -33,6 +40,10 @@ const drawerCloseBtn = document.getElementById("drawerCloseBtn");
 const zoomInBtn = document.getElementById("zoomInBtn");
 const zoomOutBtn = document.getElementById("zoomOutBtn");
 const zoomResetBtn = document.getElementById("zoomResetBtn");
+
+const timelinePlayBtn = document.getElementById("timelinePlayBtn");
+const timelineSlider = document.getElementById("timelineSlider");
+const timelineValue = document.getElementById("timelineValue");
 
 function sourceId(edge) {
   return typeof edge.source === "object" ? edge.source.id : edge.source;
@@ -59,9 +70,44 @@ function formatAmount(value) {
   return value.toFixed(2);
 }
 
+function timelineMsFromDate(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T00:00:00Z` : raw;
+  const ms = Date.parse(normalized);
+  if (!Number.isFinite(ms)) return null;
+  return ms;
+}
+
+function timelinePointLabel(ms) {
+  if (!Number.isFinite(ms)) return "All time";
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+function timelineMsForEdge(edge) {
+  if (edge.edge_type === "transaction_keyword") {
+    return timelineMsFromDate(edge.transaction_date);
+  }
+  return timelineMsFromDate(edge.first_seen_date || edge.last_seen_date);
+}
+
+function timelineMsForNode(node) {
+  return timelineMsFromDate(node.first_seen_date || node.date || node.last_seen_date);
+}
+
+function edgeKeyword(edge) {
+  if (edge.keyword) return String(edge.keyword);
+  const sid = sourceId(edge);
+  if (typeof sid === "string" && sid.startsWith("keyword::")) {
+    return sid.slice("keyword::".length);
+  }
+  return "";
+}
+
 function nodeRadius(node) {
   if (node.kind === "transaction") {
-    return 2.7;
+    return 3.5;
   }
   return Math.max(4.4, node.size * state.connectedNodeScale);
 }
@@ -85,6 +131,7 @@ function setDefaultDetail() {
   setDetailPanel(
     [
       "Hover a node or edge to inspect details.",
+      "Click a node to lock focus and zoom. Click blank canvas to clear focus.",
       "",
       "Merchant nodes connect to categories.",
       "Small satellite nodes are transactions linked by keyword.",
@@ -95,7 +142,7 @@ function setDefaultDetail() {
 function updateStats(stats) {
   statsPill.textContent =
     `Rows ${stats.rows_scanned} | Nodes ${stats.total_nodes} | ` +
-    `Edges ${stats.total_edges_after_limit}`;
+    `Edges ${stats.total_edges_after_limit} | Time ${stats.timeline_points || 0}`;
 }
 
 function updateZoomIndicator(transform) {
@@ -115,20 +162,241 @@ function setDrawerOpen(isOpen) {
   drawerToggleBtn.classList.toggle("hidden", state.drawerOpen);
 }
 
-function collectActiveSets() {
+function stopTimelinePlayback() {
+  if (state.timelineTimer !== null) {
+    window.clearInterval(state.timelineTimer);
+    state.timelineTimer = null;
+  }
+  state.isTimelinePlaying = false;
+  if (timelinePlayBtn) {
+    timelinePlayBtn.textContent = "Play";
+    timelinePlayBtn.classList.remove("active");
+  }
+}
+
+function getTimelineCutoffMs() {
+  if (!state.timelinePoints.length) return null;
+  const idx = Math.max(0, Math.min(state.timelineIndex, state.timelinePoints.length - 1));
+  return state.timelinePoints[idx];
+}
+
+function updateTimelineLabel() {
+  if (!timelineValue) return;
+  const cutoff = getTimelineCutoffMs();
+  if (cutoff === null) {
+    timelineValue.textContent = "All time";
+    timelineValue.classList.add("disabled");
+    return;
+  }
+
+  timelineValue.classList.remove("disabled");
+  timelineValue.textContent = timelinePointLabel(cutoff);
+}
+
+function setTimelineIndex(nextIndex, options = {}) {
+  const shouldApply = options.apply !== false;
+  if (!state.timelinePoints.length) {
+    state.timelineIndex = 0;
+    updateTimelineLabel();
+    if (timelineSlider) timelineSlider.value = "0";
+    if (shouldApply) applyVisualState({ animateTimeline: true });
+    return;
+  }
+
+  const upper = state.timelinePoints.length - 1;
+  const clamped = Math.max(0, Math.min(upper, Number(nextIndex) || 0));
+  state.timelineIndex = clamped;
+  if (timelineSlider) timelineSlider.value = String(clamped);
+  updateTimelineLabel();
+  if (shouldApply) applyVisualState({ animateTimeline: true });
+}
+
+function setupTimeline(graph, nodeData, edgeData) {
+  const previousCutoff = getTimelineCutoffMs();
+  stopTimelinePlayback();
+
+  const points = new Set();
+  (graph.timeline?.points || []).forEach((item) => {
+    const ms = timelineMsFromDate(item);
+    if (ms !== null) points.add(ms);
+  });
+  nodeData.forEach((node) => {
+    if (Number.isFinite(node.timeline_ms)) points.add(node.timeline_ms);
+  });
+  edgeData.forEach((edge) => {
+    if (Number.isFinite(edge.timeline_ms)) points.add(edge.timeline_ms);
+  });
+
+  state.timelinePoints = Array.from(points).sort((a, b) => a - b);
+
+  if (!timelineSlider || !timelinePlayBtn) {
+    updateTimelineLabel();
+    return;
+  }
+
+  if (!state.timelinePoints.length) {
+    timelineSlider.min = "0";
+    timelineSlider.max = "0";
+    timelineSlider.step = "1";
+    timelineSlider.value = "0";
+    timelineSlider.disabled = true;
+    timelinePlayBtn.disabled = true;
+    timelinePlayBtn.classList.remove("active");
+    state.timelineIndex = 0;
+    updateTimelineLabel();
+    return;
+  }
+
+  timelineSlider.disabled = false;
+  timelinePlayBtn.disabled = state.timelinePoints.length <= 1;
+  timelineSlider.min = "0";
+  timelineSlider.max = String(state.timelinePoints.length - 1);
+  timelineSlider.step = "1";
+
+  let nextIndex = state.timelinePoints.length - 1;
+  if (previousCutoff !== null) {
+    const closest = state.timelinePoints.filter((ms) => ms <= previousCutoff).pop();
+    if (closest !== undefined) {
+      nextIndex = state.timelinePoints.indexOf(closest);
+    }
+  }
+
+  setTimelineIndex(nextIndex, { apply: false });
+}
+
+function runNodePopAnimation(nodeIds) {
+  const selections = state.selections;
+  if (!selections || !nodeIds || nodeIds.size === 0) return;
+
+  const idSet = nodeIds instanceof Set ? nodeIds : new Set(nodeIds);
+  const { nodeRing, nodeCore } = selections;
+  const ringTargetRadius = (d) => nodeRadius(d) + (d.kind === "transaction" ? 0.95 : 2.0);
+  const coreTargetRadius = (d) => Math.max(2.1, nodeRadius(d) - (d.kind === "transaction" ? 0.05 : 2.8));
+
+  nodeRing
+    .filter((d) => idSet.has(d.id))
+    .interrupt()
+    .attr("r", (d) => ringTargetRadius(d) * 0.68)
+    .transition()
+    .duration(170)
+    .ease(d3.easeCubicOut)
+    .attr("r", (d) => ringTargetRadius(d) * 1.08)
+    .transition()
+    .duration(130)
+    .ease(d3.easeCubicInOut)
+    .attr("r", ringTargetRadius);
+
+  nodeCore
+    .filter((d) => idSet.has(d.id))
+    .interrupt()
+    .attr("r", (d) => coreTargetRadius(d) * 0.62)
+    .transition()
+    .duration(170)
+    .ease(d3.easeCubicOut)
+    .attr("r", (d) => coreTargetRadius(d) * 1.1)
+    .transition()
+    .duration(130)
+    .ease(d3.easeCubicInOut)
+    .attr("r", coreTargetRadius);
+}
+
+function stepTimelineForward() {
+  if (!state.timelinePoints.length) {
+    stopTimelinePlayback();
+    return;
+  }
+  const atEnd = state.timelineIndex >= state.timelinePoints.length - 1;
+  if (atEnd) {
+    stopTimelinePlayback();
+    return;
+  }
+  setTimelineIndex(state.timelineIndex + 1);
+}
+
+function toggleTimelinePlayback() {
+  if (state.isTimelinePlaying) {
+    stopTimelinePlayback();
+    return;
+  }
+
+  if (state.timelinePoints.length <= 1) return;
+  if (state.timelineIndex >= state.timelinePoints.length - 1) {
+    setTimelineIndex(0);
+  }
+
+  state.isTimelinePlaying = true;
+  if (timelinePlayBtn) {
+    timelinePlayBtn.textContent = "Pause";
+    timelinePlayBtn.classList.add("active");
+  }
+
+  state.timelineTimer = window.setInterval(() => {
+    stepTimelineForward();
+  }, 900);
+}
+
+function collectVisibilitySets() {
+  const selections = state.selections;
+  const visibleNodeIds = new Set();
+  const visibleEdgeIds = new Set();
+  if (!selections) {
+    return { visibleNodeIds, visibleEdgeIds, hasTimeline: false };
+  }
+
+  const cutoff = getTimelineCutoffMs();
+  const hasTimeline = cutoff !== null;
+  const edgesInWindow = selections.edgeData.filter((edge) => {
+    return !hasTimeline || edge.timeline_ms === null || edge.timeline_ms <= cutoff;
+  });
+  const keywordsWithVisibleTransactions = new Set();
+
+  edgesInWindow.forEach((edge) => {
+    if (edge.edge_type !== "transaction_keyword") return;
+    visibleEdgeIds.add(edge.id);
+    visibleNodeIds.add(sourceId(edge));
+    visibleNodeIds.add(targetId(edge));
+    const keyword = edgeKeyword(edge);
+    if (keyword) keywordsWithVisibleTransactions.add(keyword);
+  });
+
+  edgesInWindow.forEach((edge) => {
+    if (edge.edge_type !== "keyword_category") return;
+    const keyword = edgeKeyword(edge);
+    if (keyword && !keywordsWithVisibleTransactions.has(keyword)) return;
+    visibleEdgeIds.add(edge.id);
+    visibleNodeIds.add(sourceId(edge));
+    visibleNodeIds.add(targetId(edge));
+  });
+
+  selections.nodeData.forEach((node) => {
+    if (visibleNodeIds.has(node.id)) return;
+    const nodeVisibleByDate = !hasTimeline || node.timeline_ms === null || node.timeline_ms <= cutoff;
+    if (node.kind === "transaction" && nodeVisibleByDate) {
+      visibleNodeIds.add(node.id);
+    }
+  });
+
+  return { visibleNodeIds, visibleEdgeIds, hasTimeline };
+}
+
+function collectActiveSets(visibility) {
   const selections = state.selections;
   const activeNodeIds = new Set();
   const activeEdgeIds = new Set();
-  if (!selections) return { activeNodeIds, activeEdgeIds, filtered: false };
+  if (!selections) {
+    return { activeNodeIds, activeEdgeIds, filtered: false };
+  }
 
   const term = state.searchTerm.trim().toLowerCase();
   if (term) {
     selections.nodeData.forEach((node) => {
+      if (!visibility.visibleNodeIds.has(node.id)) return;
       const haystack = `${node.label} ${node.kind} ${node.description || ""}`.toLowerCase();
       if (haystack.includes(term)) activeNodeIds.add(node.id);
     });
 
     selections.edgeData.forEach((edge) => {
+      if (!visibility.visibleEdgeIds.has(edge.id)) return;
       const sid = sourceId(edge);
       const tid = targetId(edge);
       const haystack = `${edge.keyword || ""} ${edge.category_label || ""} ${edge.reason || ""} ${
@@ -142,9 +410,10 @@ function collectActiveSets() {
     });
   }
 
-  if (state.focusNodeId) {
+  if (state.focusNodeId && visibility.visibleNodeIds.has(state.focusNodeId)) {
     activeNodeIds.add(state.focusNodeId);
     selections.edgeData.forEach((edge) => {
+      if (!visibility.visibleEdgeIds.has(edge.id)) return;
       const sid = sourceId(edge);
       const tid = targetId(edge);
       if (sid === state.focusNodeId || tid === state.focusNodeId) {
@@ -155,7 +424,7 @@ function collectActiveSets() {
     });
   }
 
-  if (state.focusEdgeId) {
+  if (state.focusEdgeId && visibility.visibleEdgeIds.has(state.focusEdgeId)) {
     const edge = selections.edgeData.find((row) => row.id === state.focusEdgeId);
     if (edge) {
       activeEdgeIds.add(edge.id);
@@ -167,32 +436,67 @@ function collectActiveSets() {
   return {
     activeNodeIds,
     activeEdgeIds,
-    filtered:
-      term.length > 0 || state.focusNodeId !== null || state.focusEdgeId !== null,
+    filtered: term.length > 0 || state.focusNodeId !== null || state.focusEdgeId !== null,
   };
 }
 
-function applyVisualState() {
+function applyVisualState(options = {}) {
   const selections = state.selections;
   if (!selections) return;
-  const { nodeGroup, nodeRing, nodeCore, nodeLabel, link, edgeLabel, strokeScale } = selections;
-  const { activeNodeIds, activeEdgeIds, filtered } = collectActiveSets();
 
-  nodeGroup.style("opacity", (d) => {
-    if (!filtered) return d.kind === "transaction" ? 0.64 : 0.98;
-    if (activeNodeIds.has(d.id)) return 1;
-    return d.kind === "transaction" ? 0.06 : 0.2;
-  });
+  const { nodeGroup, nodeRing, nodeCore, nodeLabel, link, edgeLabel, strokeScale } = selections;
+  const visibility = collectVisibilitySets();
+  const shouldAnimateTimeline = Boolean(options.animateTimeline);
+  const newlyVisibleNodeIds = new Set();
+  const newlyLinkedNodeIds = new Set();
+
+  if (shouldAnimateTimeline) {
+    visibility.visibleNodeIds.forEach((nodeId) => {
+      if (!state.lastVisibleNodeIds.has(nodeId)) {
+        newlyVisibleNodeIds.add(nodeId);
+      }
+    });
+    visibility.visibleEdgeIds.forEach((edgeId) => {
+      if (state.lastVisibleEdgeIds.has(edgeId)) return;
+      const edge = selections.edgeById?.get(edgeId);
+      if (!edge) return;
+      newlyLinkedNodeIds.add(sourceId(edge));
+      newlyLinkedNodeIds.add(targetId(edge));
+    });
+  }
+
+  if (state.pinnedNodeId && !visibility.visibleNodeIds.has(state.pinnedNodeId)) {
+    state.pinnedNodeId = null;
+  }
+  if (state.focusNodeId && !visibility.visibleNodeIds.has(state.focusNodeId)) {
+    state.focusNodeId = null;
+    state.tagNodeId = null;
+  }
+  if (state.focusEdgeId && !visibility.visibleEdgeIds.has(state.focusEdgeId)) {
+    state.focusEdgeId = null;
+  }
+
+  const { activeNodeIds, activeEdgeIds, filtered } = collectActiveSets(visibility);
+
+  nodeGroup
+    .style("display", (d) => (visibility.visibleNodeIds.has(d.id) ? null : "none"))
+    .style("pointer-events", (d) => (visibility.visibleNodeIds.has(d.id) ? null : "none"))
+    .style("opacity", (d) => {
+      if (!visibility.visibleNodeIds.has(d.id)) return 0;
+      if (!filtered) return d.kind === "transaction" ? 0.84 : 0.98;
+      if (activeNodeIds.has(d.id)) return 1;
+      return d.kind === "transaction" ? 0.16 : 0.2;
+    });
 
   nodeRing
     .attr("stroke", (d) => {
       if (d.id === state.focusNodeId) return "#26363f";
       if (d.kind === "keyword") return filtered && activeNodeIds.has(d.id) ? "#3f6a7f" : "#6f8f9f";
-      if (d.kind === "transaction") return "#d8dcdf";
+      if (d.kind === "transaction") return "#8fa7b4";
       return filtered && activeNodeIds.has(d.id) ? "#6f7c86" : "#98a3ab";
     })
     .attr("stroke-width", (d) => {
-      if (d.kind === "transaction") return 0.9;
+      if (d.kind === "transaction") return 1.05;
       if (d.id === state.focusNodeId) return 2.6;
       if (filtered && activeNodeIds.has(d.id)) return 1.8;
       return 1.25;
@@ -209,44 +513,66 @@ function applyVisualState() {
       if (filtered && activeNodeIds.has(d.id)) return "#7a8790";
       return "#88949c";
     }
-    return "#cfd5d9";
+    if (filtered && activeNodeIds.has(d.id)) return "#8ca8b7";
+    return "#9fb8c4";
   });
 
   link
+    .style("display", (d) => (visibility.visibleEdgeIds.has(d.id) ? null : "none"))
+    .style("pointer-events", (d) => (visibility.visibleEdgeIds.has(d.id) ? null : "none"))
     .attr("stroke", (d) => {
       if (d.id === state.focusEdgeId) return "#5f8ea2";
       if (d.edge_type === "transaction_keyword") {
-        return filtered && activeEdgeIds.has(d.id) ? "#b8c3ca" : "#d5dade";
+        return filtered && activeEdgeIds.has(d.id) ? "#8ea8b8" : "#bcc9d1";
       }
       return filtered && activeEdgeIds.has(d.id) ? "#8ca8b6" : "#c9d0d5";
     })
     .attr("stroke-width", (d) => {
       const base = strokeScale(d.weight);
       if (d.edge_type === "transaction_keyword") {
-        const txBase = Math.max(0.6, base * 0.72);
+        const txBase = Math.max(0.82, base * 0.92);
         return filtered && activeEdgeIds.has(d.id) ? txBase * 1.2 : txBase;
       }
       return filtered && activeEdgeIds.has(d.id) ? base * 1.16 : base;
     })
     .style("opacity", (d) => {
-      if (!filtered) return d.edge_type === "transaction_keyword" ? 0.3 : 0.56;
-      return activeEdgeIds.has(d.id) ? 0.95 : 0.12;
+      if (!visibility.visibleEdgeIds.has(d.id)) return 0;
+      if (!filtered) return d.edge_type === "transaction_keyword" ? 0.5 : 0.56;
+      return activeEdgeIds.has(d.id) ? 0.95 : d.edge_type === "transaction_keyword" ? 0.22 : 0.12;
     });
 
-  edgeLabel.style("opacity", (d) => {
-    if (!state.showEdgeText) return 0;
-    if (!filtered) return d.edge_type === "transaction_keyword" ? 0 : 0.4;
-    return activeEdgeIds.has(d.id) && d.edge_type !== "transaction_keyword" ? 0.82 : 0.03;
-  });
+  edgeLabel
+    .style("display", (d) => {
+      if (!state.showEdgeText || d.edge_type === "transaction_keyword") return "none";
+      return visibility.visibleEdgeIds.has(d.id) ? null : "none";
+    })
+    .style("opacity", (d) => {
+      if (!state.showEdgeText || !visibility.visibleEdgeIds.has(d.id)) return 0;
+      if (!filtered) return 0.4;
+      return activeEdgeIds.has(d.id) ? 0.82 : 0.03;
+    });
 
-  nodeLabel.style("opacity", (d) => {
-    if (!state.showNodeText || d.kind === "transaction") return 0;
-    if (!filtered) return 0.72;
-    return activeNodeIds.has(d.id) ? 0.92 : 0.08;
-  });
+  nodeLabel
+    .style("display", (d) => {
+      if (!state.showNodeText || d.kind === "transaction") return "none";
+      return visibility.visibleNodeIds.has(d.id) ? null : "none";
+    })
+    .style("opacity", (d) => {
+      if (!state.showNodeText || d.kind === "transaction" || !visibility.visibleNodeIds.has(d.id)) return 0;
+      if (!filtered) return 0.72;
+      return activeNodeIds.has(d.id) ? 0.92 : 0.08;
+    });
+
+  if (shouldAnimateTimeline) {
+    const nodesToPop = new Set([...newlyVisibleNodeIds, ...newlyLinkedNodeIds]);
+    runNodePopAnimation(nodesToPop);
+  }
+
+  state.lastVisibleNodeIds = new Set(visibility.visibleNodeIds);
+  state.lastVisibleEdgeIds = new Set(visibility.visibleEdgeIds);
 }
 
-function renderNodeDetails(node, edgeData) {
+function renderNodeDetails(node, edgeData, visibleEdgeIds = null) {
   if (node.kind === "transaction") {
     setDetailPanel(
       [
@@ -260,9 +586,10 @@ function renderNodeDetails(node, edgeData) {
     return;
   }
 
-  const nodeEdges = edgeData.filter(
-    (edge) => sourceId(edge) === node.id || targetId(edge) === node.id,
-  );
+  const nodeEdges = edgeData.filter((edge) => {
+    if (visibleEdgeIds && !visibleEdgeIds.has(edge.id)) return false;
+    return sourceId(edge) === node.id || targetId(edge) === node.id;
+  });
 
   const topEdges = nodeEdges
     .filter((edge) => edge.edge_type === "keyword_category")
@@ -280,7 +607,7 @@ function renderNodeDetails(node, edgeData) {
       `Connections: ${nodeEdges.length}`,
       txCount > 0 ? `Transactions linked: ${txCount}` : "",
       "",
-      topEdges.length ? topEdges.join("\n") : "No category connections",
+      topEdges.length ? topEdges.join("\n") : "No category connections in this time window",
     ]
       .filter(Boolean)
       .join("\n"),
@@ -294,6 +621,7 @@ function renderEdgeDetails(edge) {
         "Transaction -> Merchant Keyword",
         `Keyword: ${edge.keyword}`,
         `Transaction ID: ${edge.transaction_id}`,
+        `Date: ${formatDate(edge.transaction_date)}`,
         `Weight: ${edge.weight.toFixed(2)}`,
       ].join("\n"),
     );
@@ -308,6 +636,7 @@ function renderEdgeDetails(edge) {
   setDetailPanel(
     [
       `${edge.keyword} -> ${edge.category_label}`,
+      `First seen: ${formatDate(edge.first_seen_date)}`,
       `Weight: ${edge.weight.toFixed(2)}`,
       `Confidence: ${edge.avg_confidence.toFixed(2)}`,
       `Verified: ${(edge.verified_ratio * 100).toFixed(0)}%`,
@@ -318,20 +647,44 @@ function renderEdgeDetails(edge) {
   );
 }
 
+function focusNodeWithZoom(node) {
+  if (!state.zoomBehavior || !state.selections) return;
+  if (!Number.isFinite(node?.x) || !Number.isFinite(node?.y)) return;
+
+  const width = state.selections.width;
+  const height = state.selections.height;
+  const targetScale = node.kind === "transaction" ? 2.8 : 2.2;
+
+  const transform = d3.zoomIdentity
+    .translate(width / 2, height / 2)
+    .scale(targetScale)
+    .translate(-node.x, -node.y);
+
+  svg.transition().duration(320).call(state.zoomBehavior.transform, transform);
+}
+
 function renderGraph(graph) {
   const width = svg.node().clientWidth || 1200;
   const height = svg.node().clientHeight || 760;
   svg.selectAll("*").remove();
 
-  const nodeData = graph.nodes.map((item) => ({ ...item }));
-  const edgeData = graph.edges.map((item) => ({ ...item }));
+  const nodeData = graph.nodes.map((item) => ({
+    ...item,
+    timeline_ms: timelineMsForNode(item),
+  }));
+  const edgeData = graph.edges.map((item) => ({
+    ...item,
+    timeline_ms: timelineMsForEdge(item),
+  }));
 
   state.focusNodeId = null;
   state.focusEdgeId = null;
+  state.pinnedNodeId = null;
   state.tagNodeId = null;
 
   if (!nodeData.length || !edgeData.length) {
     setDetailPanel("No graph edges found. Import or review transactions to build memory links.");
+    setupTimeline(graph, nodeData, edgeData);
     return;
   }
 
@@ -391,13 +744,13 @@ function renderGraph(graph) {
   const nodeRing = nodeGroup
     .append("circle")
     .attr("class", "node-ring")
-    .attr("r", (d) => nodeRadius(d) + (d.kind === "transaction" ? 0.85 : 2.0))
+    .attr("r", (d) => nodeRadius(d) + (d.kind === "transaction" ? 0.95 : 2.0))
     .attr("fill", "#f9f9fa");
 
   const nodeCore = nodeGroup
     .append("circle")
     .attr("class", "node-core")
-    .attr("r", (d) => Math.max(1.8, nodeRadius(d) - (d.kind === "transaction" ? 0.2 : 2.8)));
+    .attr("r", (d) => Math.max(2.1, nodeRadius(d) - (d.kind === "transaction" ? 0.05 : 2.8)));
 
   const nodeLabel = viewport
     .append("g")
@@ -432,23 +785,29 @@ function renderGraph(graph) {
       return;
     }
 
+    const visibility = collectVisibilitySets();
+    if (!visibility.visibleNodeIds.has(node.id)) {
+      floatingTag.style("display", "none");
+      return;
+    }
+
     const label = fitTagText(node.label);
     floatingTagText.text(label);
     const bbox = floatingTagText.node().getBBox();
     const horizontalPad = 8;
     const verticalPad = 4;
-    const width = bbox.width + horizontalPad * 2;
-    const height = bbox.height + verticalPad * 2;
-    const x = node.x - width / 2;
+    const tagWidth = bbox.width + horizontalPad * 2;
+    const tagHeight = bbox.height + verticalPad * 2;
+    const x = node.x - tagWidth / 2;
     const y = node.y + nodeRadius(node) + 14;
 
     floatingTagRect
       .attr("x", x)
       .attr("y", y)
-      .attr("width", width)
-      .attr("height", height);
+      .attr("width", tagWidth)
+      .attr("height", tagHeight);
 
-    floatingTagText.attr("x", x + horizontalPad).attr("y", y + height - verticalPad - 1);
+    floatingTagText.attr("x", x + horizontalPad).attr("y", y + tagHeight - verticalPad - 1);
     floatingTag.style("display", null);
   }
 
@@ -495,23 +854,40 @@ function renderGraph(graph) {
 
   nodeGroup
     .on("mouseenter", (_, node) => {
+      if (state.pinnedNodeId && state.pinnedNodeId !== node.id) return;
       state.focusNodeId = node.id;
       state.focusEdgeId = null;
       state.tagNodeId = node.id;
       applyVisualState();
-      renderNodeDetails(node, edgeData);
+      const visible = collectVisibilitySets();
+      renderNodeDetails(node, edgeData, visible.visibleEdgeIds);
       updateFloatingTagPosition();
     })
-    .on("mouseleave", () => {
+    .on("mouseleave", (_, node) => {
+      if (state.pinnedNodeId === node.id) return;
+      if (state.pinnedNodeId !== null) return;
       state.focusNodeId = null;
       state.tagNodeId = null;
       applyVisualState();
       setDefaultDetail();
       updateFloatingTagPosition();
+    })
+    .on("click", (event, node) => {
+      event.stopPropagation();
+      state.pinnedNodeId = node.id;
+      state.focusNodeId = node.id;
+      state.focusEdgeId = null;
+      state.tagNodeId = node.id;
+      applyVisualState();
+      const visible = collectVisibilitySets();
+      renderNodeDetails(node, edgeData, visible.visibleEdgeIds);
+      updateFloatingTagPosition();
+      focusNodeWithZoom(node);
     });
 
   link
     .on("mouseenter", (_, edge) => {
+      if (state.pinnedNodeId) return;
       state.focusNodeId = null;
       state.focusEdgeId = edge.id;
       state.tagNodeId = null;
@@ -520,11 +896,23 @@ function renderGraph(graph) {
       updateFloatingTagPosition();
     })
     .on("mouseleave", () => {
+      if (state.pinnedNodeId) return;
       state.focusEdgeId = null;
       applyVisualState();
       setDefaultDetail();
       updateFloatingTagPosition();
     });
+
+  svg.on("click", () => {
+    if (state.pinnedNodeId === null) return;
+    state.pinnedNodeId = null;
+    state.focusNodeId = null;
+    state.focusEdgeId = null;
+    state.tagNodeId = null;
+    applyVisualState();
+    setDefaultDetail();
+    updateFloatingTagPosition();
+  });
 
   simulation.on("tick", () => {
     link
@@ -556,14 +944,19 @@ function renderGraph(graph) {
     link,
     edgeLabel,
     strokeScale,
+    edgeById: new Map(edgeData.map((edge) => [edge.id, edge])),
+    width,
+    height,
   };
 
+  setupTimeline(graph, nodeData, edgeData);
   applyVisualState();
   setDefaultDetail();
   updateFloatingTagPosition();
 }
 
 async function loadGraph() {
+  stopTimelinePlayback();
   statsPill.textContent = "Loading graph...";
   setDetailPanel("Loading keyword-category memory links...");
   const query = buildQueryString();
@@ -575,7 +968,7 @@ async function loadGraph() {
       throw new Error(payload.error || `Request failed with ${response.status}`);
     }
     state.graph = payload;
-    updateStats(payload.stats);
+    updateStats(payload.stats || {});
     renderGraph(payload);
   } catch (error) {
     statsPill.textContent = "Failed to load graph";
@@ -611,6 +1004,19 @@ if (connectedNodeSizeRange) {
     state.connectedNodeScale = Number(connectedNodeSizeRange.value) / 100;
     syncConnectedNodeScaleLabel();
     if (state.graph) renderGraph(state.graph);
+  });
+}
+
+if (timelineSlider) {
+  timelineSlider.addEventListener("input", () => {
+    stopTimelinePlayback();
+    setTimelineIndex(Number(timelineSlider.value || 0));
+  });
+}
+
+if (timelinePlayBtn) {
+  timelinePlayBtn.addEventListener("click", () => {
+    toggleTimelinePlayback();
   });
 }
 
@@ -651,11 +1057,21 @@ window.addEventListener("resize", () => {
   if (state.graph) renderGraph(state.graph);
 });
 
+window.addEventListener("beforeunload", () => {
+  stopTimelinePlayback();
+});
+
 if (edgeTextToggle) edgeTextToggle.checked = state.showEdgeText;
 if (nodeTextToggle) nodeTextToggle.checked = state.showNodeText;
-if (connectedNodeSizeRange) connectedNodeSizeRange.value = String(
-  Math.round(state.connectedNodeScale * 100),
-);
+if (connectedNodeSizeRange) {
+  connectedNodeSizeRange.value = String(Math.round(state.connectedNodeScale * 100));
+}
+if (timelineSlider) {
+  timelineSlider.disabled = true;
+  timelineSlider.value = "0";
+}
+if (timelinePlayBtn) timelinePlayBtn.disabled = true;
 syncConnectedNodeScaleLabel();
+updateTimelineLabel();
 setDrawerOpen(true);
 loadGraph();

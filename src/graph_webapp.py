@@ -4,7 +4,7 @@ import math
 import webbrowser
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,6 +25,8 @@ class EdgeAccumulator:
     confidence_count: int = 0
     verified_count: int = 0
     reason_counts: Counter = field(default_factory=Counter)
+    first_seen_at: Optional[datetime] = None
+    last_seen_at: Optional[datetime] = None
 
 
 def _clean_keyword(raw_keyword: Optional[str]) -> str:
@@ -69,6 +71,37 @@ def _coerce_int(value: Optional[str], default: int, minimum: int, maximum: int) 
 
 def _node_size(total_weight: float, base: float) -> float:
     return round(base + min(34.0, math.sqrt(max(0.1, total_weight)) * 4.0), 2)
+
+
+def _as_utc_datetime(raw_value) -> Optional[datetime]:
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, datetime):
+        if raw_value.tzinfo is None:
+            return raw_value.replace(tzinfo=timezone.utc)
+        return raw_value.astimezone(timezone.utc)
+    if isinstance(raw_value, date):
+        return datetime.combine(raw_value, time.min, tzinfo=timezone.utc)
+    return None
+
+
+def _iso_date(raw_value) -> Optional[str]:
+    parsed = _as_utc_datetime(raw_value)
+    if parsed is None:
+        return None
+    return parsed.date().isoformat()
+
+
+def _update_bounds(bounds: dict, node_id: str, seen_at: Optional[datetime]) -> None:
+    if seen_at is None:
+        return
+    slot = bounds.setdefault(node_id, {"first": None, "last": None})
+    first = slot["first"]
+    last = slot["last"]
+    if first is None or seen_at < first:
+        slot["first"] = seen_at
+    if last is None or seen_at > last:
+        slot["last"] = seen_at
 
 
 async def build_keyword_category_graph(
@@ -157,6 +190,13 @@ async def build_keyword_category_graph(
         if reason_text:
             edge.reason_counts[reason_text] += 1
 
+        tx_dt = _as_utc_datetime(tx_date)
+        if tx_dt is not None:
+            if edge.first_seen_at is None or tx_dt < edge.first_seen_at:
+                edge.first_seen_at = tx_dt
+            if edge.last_seen_at is None or tx_dt > edge.last_seen_at:
+                edge.last_seen_at = tx_dt
+
         if category_id is not None:
             category_ids.add(category_id)
 
@@ -169,7 +209,7 @@ async def build_keyword_category_graph(
                         "transaction_id": int(transaction_id),
                         "description": (tx_description or "").strip(),
                         "amount": float(tx_amount) if tx_amount is not None else None,
-                        "date": tx_date.isoformat() if tx_date else None,
+                        "date": _iso_date(tx_date),
                         "type": (tx_type or "").strip() or "unknown",
                         "confidence": float(confidence_score) if confidence_score is not None else 0.0,
                     }
@@ -238,6 +278,8 @@ async def build_keyword_category_graph(
                 "avg_confidence": round(avg_confidence, 4),
                 "verified_ratio": round(verified_ratio, 4),
                 "weight": round(weight, 4),
+                "first_seen_date": _iso_date(edge.first_seen_at),
+                "last_seen_date": _iso_date(edge.last_seen_at),
             }
         )
 
@@ -295,6 +337,7 @@ async def build_keyword_category_graph(
                         "weight": tx_weight,
                         "transaction_id": tx_id,
                         "transaction_label": tx_nodes[tx_node_id]["label"],
+                        "transaction_date": tx.get("date"),
                     }
                 )
 
@@ -305,10 +348,15 @@ async def build_keyword_category_graph(
             edges.extend(tx_edges)
 
     node_weight = defaultdict(float)
+    node_timeline_bounds = {}
     for edge in edges:
         multiplier = 1.0 if edge.get("edge_type") == "keyword_category" else 0.2
         node_weight[edge["source"]] += edge["weight"] * multiplier
         node_weight[edge["target"]] += edge["weight"] * multiplier
+        edge_first = _as_utc_datetime(edge.get("first_seen_date") or edge.get("transaction_date"))
+        edge_last = _as_utc_datetime(edge.get("last_seen_date") or edge.get("transaction_date"))
+        _update_bounds(node_timeline_bounds, edge["source"], edge_first)
+        _update_bounds(node_timeline_bounds, edge["target"], edge_last or edge_first)
 
     keyword_nodes = {}
     category_nodes = {}
@@ -318,23 +366,34 @@ async def build_keyword_category_graph(
         target_id = edge["target"]
         keyword_label = edge["keyword"]
         if source_id.startswith("keyword::") and source_id not in keyword_nodes:
+            keyword_bounds = node_timeline_bounds.get(source_id) or {}
             keyword_nodes[source_id] = {
                 "id": source_id,
                 "label": keyword_label,
                 "kind": "keyword",
                 "size": _node_size(node_weight[source_id], base=10.0),
+                "first_seen_date": _iso_date(keyword_bounds.get("first")),
+                "last_seen_date": _iso_date(keyword_bounds.get("last")),
             }
         if source_id.startswith("transaction::"):
-            tx = tx_node_lookup.get(source_id) or {
-                "id": source_id,
-                "label": edge.get("transaction_label") or source_id,
-                "kind": "transaction",
-                "transaction_id": edge.get("transaction_id"),
-                "size": 3.2,
-            }
+            tx = dict(
+                tx_node_lookup.get(source_id)
+                or {
+                    "id": source_id,
+                    "label": edge.get("transaction_label") or source_id,
+                    "kind": "transaction",
+                    "transaction_id": edge.get("transaction_id"),
+                    "size": 3.2,
+                }
+            )
+            tx_date = tx.get("date") or edge.get("transaction_date")
+            if tx_date:
+                tx["first_seen_date"] = tx_date
+                tx["last_seen_date"] = tx_date
             transaction_nodes[source_id] = tx
 
         if target_id.startswith("category::") and target_id not in category_nodes:
+            category_bounds = node_timeline_bounds.get(target_id) or {}
             category_nodes[target_id] = {
                 "id": target_id,
                 "label": edge["category_label"],
@@ -342,19 +401,49 @@ async def build_keyword_category_graph(
                 "category_id": edge["category_id"],
                 "category_type": edge["category_type"],
                 "size": _node_size(node_weight[target_id], base=14.0),
+                "first_seen_date": _iso_date(category_bounds.get("first")),
+                "last_seen_date": _iso_date(category_bounds.get("last")),
             }
         if target_id.startswith("transaction::"):
-            transaction_nodes[target_id] = tx_node_lookup.get(target_id) or {
-                "id": target_id,
-                "label": edge.get("transaction_label") or target_id,
-                "kind": "transaction",
-                "transaction_id": edge.get("transaction_id"),
-                "size": 3.2,
-            }
+            tx = dict(
+                tx_node_lookup.get(target_id)
+                or {
+                    "id": target_id,
+                    "label": edge.get("transaction_label") or target_id,
+                    "kind": "transaction",
+                    "transaction_id": edge.get("transaction_id"),
+                    "size": 3.2,
+                }
+            )
+            tx_date = tx.get("date") or edge.get("transaction_date")
+            if tx_date:
+                tx["first_seen_date"] = tx_date
+                tx["last_seen_date"] = tx_date
+            transaction_nodes[target_id] = tx
 
     nodes = list(keyword_nodes.values()) + list(category_nodes.values()) + list(
         transaction_nodes.values()
     )
+
+    timeline_points = set()
+    for node in nodes:
+        for key in ("first_seen_date", "last_seen_date", "date"):
+            value = node.get(key)
+            if value:
+                timeline_points.add(value)
+    for edge in edges:
+        for key in ("first_seen_date", "last_seen_date", "transaction_date"):
+            value = edge.get(key)
+            if value:
+                timeline_points.add(value)
+
+    sorted_timeline_points = sorted(timeline_points)
+    timeline = {
+        "points": sorted_timeline_points,
+        "start": sorted_timeline_points[0] if sorted_timeline_points else None,
+        "end": sorted_timeline_points[-1] if sorted_timeline_points else None,
+        "count": len(sorted_timeline_points),
+    }
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -373,7 +462,9 @@ async def build_keyword_category_graph(
             "total_edges_after_filter": total_edges_before_limit,
             "total_edges_after_limit": len(edges),
             "total_nodes": len(nodes),
+            "timeline_points": timeline["count"],
         },
+        "timeline": timeline,
         "nodes": nodes,
         "edges": edges,
     }

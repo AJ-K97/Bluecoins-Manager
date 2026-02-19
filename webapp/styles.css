@@ -313,9 +313,38 @@ body {
   background: #edf1f3;
 }
 
+.dock-button.active {
+  background: #dce9ef;
+  border-color: #aec4cf;
+  color: #365260;
+}
+
 .dock-icon-button {
   min-width: 36px;
   font-family: "Space Mono", monospace;
+}
+
+.timeline-field {
+  min-width: 220px;
+  flex: 1;
+}
+
+.timeline-field input[type="range"] {
+  width: min(42vw, 320px);
+  accent-color: #5f8798;
+}
+
+.timeline-value {
+  min-width: 96px;
+  text-align: center;
+  color: #697076;
+  font-family: "Space Mono", monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+}
+
+.timeline-value.disabled {
+  color: #9ca2a8;
 }
 
 .graph-node-label {
@@ -385,6 +414,14 @@ body {
   .dock-search {
     min-width: 180px;
     flex: 1 1 100%;
+  }
+
+  .timeline-field {
+    flex: 1 1 100%;
+  }
+
+  .timeline-field input[type="range"] {
+    width: 100%;
   }
 
   #graphSvg {
