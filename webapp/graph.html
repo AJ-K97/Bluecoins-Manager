@@ -73,6 +73,17 @@
             <div class="sankey-chart-wrap">
               <svg id="sankeySvg" class="sankey-svg" aria-label="Decision path sankey chart"></svg>
               <div id="sankeyEmptyState" class="sankey-empty hidden">No case inspector data available for Sankey view.</div>
+              <aside id="sankeyKeywordDetailPanel" class="sankey-keyword-detail hidden" aria-live="polite">
+                <div class="panel-head">
+                  <div class="panel-chip">KEYWORD_DETAIL</div>
+                  <button id="sankeyKeywordDetailCloseBtn" class="drawer-close" type="button" aria-label="Close keyword detail">
+                    ×
+                  </button>
+                </div>
+                <h4 id="sankeyKeywordDetailTitle">Keyword</h4>
+                <div id="sankeyKeywordDetailMeta" class="sankey-keyword-meta"></div>
+                <div id="sankeyKeywordDetailBody" class="sankey-keyword-body"></div>
+              </aside>
             </div>
           </section>
           <button id="nodeDrawerToggleBtn" class="drawer-toggle node-toggle" type="button" aria-label="Open Node Details">

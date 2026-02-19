@@ -38,6 +38,8 @@ const state = {
     outcome: "all",
     verifiedOnly: false,
   },
+  sankeyKeywordGroups: new Map(),
+  sankeyPinnedKeyword: null,
   breathe: {
     enabled: true,
     globalPulse: true,
@@ -128,6 +130,11 @@ const insightsCloseBtn = document.getElementById("insightsCloseBtn");
 const sankeySummary = document.getElementById("sankeySummary");
 const sankeySvgEl = document.getElementById("sankeySvg");
 const sankeyEmptyState = document.getElementById("sankeyEmptyState");
+const sankeyKeywordDetailPanel = document.getElementById("sankeyKeywordDetailPanel");
+const sankeyKeywordDetailTitle = document.getElementById("sankeyKeywordDetailTitle");
+const sankeyKeywordDetailMeta = document.getElementById("sankeyKeywordDetailMeta");
+const sankeyKeywordDetailBody = document.getElementById("sankeyKeywordDetailBody");
+const sankeyKeywordDetailCloseBtn = document.getElementById("sankeyKeywordDetailCloseBtn");
 const sankeySearchInput = document.getElementById("sankeySearchInput");
 const sankeyFieldFilter = document.getElementById("sankeyFieldFilter");
 const sankeyOutcomeFilter = document.getElementById("sankeyOutcomeFilter");
@@ -766,6 +773,7 @@ function setActiveView(viewName) {
     stopTimelinePlayback();
     renderDecisionPathSankey(state.insightsData);
   } else if (state.graph) {
+    hideSankeyKeywordDetail();
     renderGraph(state.graph);
   }
   persistSettings();
@@ -1727,6 +1735,9 @@ function clearSankeyPanel(message) {
   if (sankeySummary) sankeySummary.textContent = message;
   if (sankeySvgEl) d3.select(sankeySvgEl).selectAll("*").remove();
   if (sankeyEmptyState) sankeyEmptyState.classList.remove("hidden");
+  state.sankeyKeywordGroups = new Map();
+  state.sankeyPinnedKeyword = null;
+  hideSankeyKeywordDetail();
 }
 
 function compactSankeyLabel(value, maxLen = 24) {
@@ -1770,8 +1781,74 @@ function caseMatchesSankeyFilters(row) {
   return keyword.includes(term) || predictedText.includes(term) || resolvedText.includes(term);
 }
 
+function hideSankeyKeywordDetail() {
+  if (!sankeyKeywordDetailPanel) return;
+  sankeyKeywordDetailPanel.classList.add("hidden");
+}
+
+function topBuckets(rows, accessor, limit = 3) {
+  const counts = new Map();
+  rows.forEach((row) => {
+    const key = String(accessor(row) || "").trim() || "Unknown";
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit);
+}
+
+function renderSankeyKeywordDetail(keywordLabel, rows) {
+  if (!sankeyKeywordDetailPanel || !sankeyKeywordDetailTitle || !sankeyKeywordDetailMeta || !sankeyKeywordDetailBody) return;
+  if (!rows || !rows.length) {
+    hideSankeyKeywordDetail();
+    return;
+  }
+  const total = rows.length;
+  const mismatchCount = rows.filter((row) => {
+    const predicted = String(row?.predicted_category || "").trim();
+    const resolved = String(row?.resolved_category || "").trim();
+    return predicted && resolved && predicted !== resolved;
+  }).length;
+  const verifiedCount = rows.filter((row) => Boolean(row?.is_verified)).length;
+  const confRows = rows
+    .map((row) => Number(row?.confidence))
+    .filter((value) => Number.isFinite(value));
+  const avgConfidence = confRows.length ? confRows.reduce((acc, value) => acc + value, 0) / confRows.length : null;
+  const topPredicted = topBuckets(rows, (row) => row?.predicted_category, 3)
+    .map(([label, count]) => `${shortCategoryLabel(label)} (${count})`)
+    .join(", ");
+  const topResolved = topBuckets(rows, (row) => row?.resolved_category, 3)
+    .map(([label, count]) => `${shortCategoryLabel(label)} (${count})`)
+    .join(", ");
+  const recentRows = rows
+    .slice()
+    .sort((a, b) => (timelineMsFromDate(b?.date) || 0) - (timelineMsFromDate(a?.date) || 0))
+    .slice(0, 4)
+    .map((row) => {
+      const tx = row?.transaction_id ?? "-";
+      const date = formatDate(row?.date);
+      const resolved = shortCategoryLabel(row?.resolved_category || "Unknown");
+      return `#${tx} ${date} -> ${resolved}`;
+    });
+
+  sankeyKeywordDetailTitle.textContent = keywordLabel || "Keyword";
+  sankeyKeywordDetailMeta.innerHTML = [
+    `<span class="node-detail-chip">Cases ${total}</span>`,
+    `<span class="node-detail-chip">Mismatch ${formatPercent(total ? mismatchCount / total : 0)}</span>`,
+    `<span class="node-detail-chip">Verified ${formatPercent(total ? verifiedCount / total : 0)}</span>`,
+    `<span class="node-detail-chip">Avg conf ${formatPercent(avgConfidence)}</span>`,
+  ].join("");
+  sankeyKeywordDetailBody.textContent = [
+    `Top predicted: ${topPredicted || "-"}`,
+    `Top resolved: ${topResolved || "-"}`,
+    "",
+    "Recent transactions:",
+    ...(recentRows.length ? recentRows : ["-"]),
+  ].join("\n");
+  sankeyKeywordDetailPanel.classList.remove("hidden");
+}
+
 function renderDecisionPathSankey(insightsPayload) {
   if (!sankeySvgEl || !sankeySummary) return;
+  hideSankeyKeywordDetail();
   const sankeyFactory = d3.sankey;
   if (typeof sankeyFactory !== "function") {
     clearSankeyPanel("Sankey renderer failed to load (d3-sankey unavailable).");
@@ -1815,16 +1892,22 @@ function renderDecisionPathSankey(insightsPayload) {
   const predicted = topLabelSet(cases, (row) => row.predicted_category, predictedLimit);
   const resolved = topLabelSet(cases, (row) => row.resolved_category, resolvedLimit);
 
+  const keywordCaseGroups = new Map();
   const normalizedRows = cases.map((row) => {
     const rawKeyword = String(row.keyword || "").trim() || "(none)";
     const rawPredicted = String(row.predicted_category || "").trim() || "Unknown";
     const rawResolved = String(row.resolved_category || "").trim() || "Unknown";
-    return {
+    const normalized = {
       keyword: keywords.has(rawKeyword) ? rawKeyword : "Other keywords",
       predicted: predicted.has(rawPredicted) ? rawPredicted : "Other predicted",
       resolved: resolved.has(rawResolved) ? rawResolved : "Other resolved",
     };
+    const bucket = normalized.keyword;
+    if (!keywordCaseGroups.has(bucket)) keywordCaseGroups.set(bucket, []);
+    keywordCaseGroups.get(bucket).push(row);
+    return normalized;
   });
+  state.sankeyKeywordGroups = keywordCaseGroups;
 
   const nodeMap = new Map();
   const linksMap = new Map();
@@ -1944,19 +2027,54 @@ function renderDecisionPathSankey(insightsPayload) {
         .filter((l) => l.source.id === node.id || l.target.id === node.id)
         .classed("is-muted", false)
         .classed("is-active", true);
+      if (state.sankeyPinnedKeyword) return;
+      if (node.stage === "keyword") {
+        renderSankeyKeywordDetail(node.label, state.sankeyKeywordGroups.get(node.label) || []);
+      } else {
+        hideSankeyKeywordDetail();
+      }
     })
     .on("mouseleave", () => {
       allLinks.classed("is-muted", false).classed("is-active", false);
+      if (!state.sankeyPinnedKeyword) hideSankeyKeywordDetail();
     });
 
   allLinks
     .on("mouseenter", function () {
       allLinks.classed("is-muted", true).classed("is-active", false);
       d3.select(this).classed("is-muted", false).classed("is-active", true);
+      if (!state.sankeyPinnedKeyword) hideSankeyKeywordDetail();
     })
     .on("mouseleave", () => {
       allLinks.classed("is-muted", false).classed("is-active", false);
     });
+
+  nodeGroup.on("click", (event, node) => {
+    event.stopPropagation();
+    if (node.stage !== "keyword") return;
+    if (state.sankeyPinnedKeyword === node.label) {
+      state.sankeyPinnedKeyword = null;
+      hideSankeyKeywordDetail();
+      return;
+    }
+    state.sankeyPinnedKeyword = node.label;
+    renderSankeyKeywordDetail(node.label, state.sankeyKeywordGroups.get(node.label) || []);
+  });
+
+  svgSankey.on("click", () => {
+    state.sankeyPinnedKeyword = null;
+    hideSankeyKeywordDetail();
+  });
+
+  if (state.sankeyPinnedKeyword) {
+    const rows = state.sankeyKeywordGroups.get(state.sankeyPinnedKeyword) || [];
+    if (!rows.length) {
+      state.sankeyPinnedKeyword = null;
+      hideSankeyKeywordDetail();
+    } else {
+      renderSankeyKeywordDetail(state.sankeyPinnedKeyword, rows);
+    }
+  }
 
   const rangeText = hasTimeline ? ` | through ${timelinePointLabel(cutoff)}` : "";
   const filteredText = timelineCases.length === cases.length ? "" : ` | filtered ${cases.length}/${timelineCases.length}`;
@@ -2994,6 +3112,13 @@ if (sankeyFilterResetBtn) {
     applySankeyFilterControls();
     persistSettings();
     if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
+  });
+}
+
+if (sankeyKeywordDetailCloseBtn) {
+  sankeyKeywordDetailCloseBtn.addEventListener("click", () => {
+    state.sankeyPinnedKeyword = null;
+    hideSankeyKeywordDetail();
   });
 }
 

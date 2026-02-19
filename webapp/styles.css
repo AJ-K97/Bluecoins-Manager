@@ -906,6 +906,46 @@ body {
   background: rgba(247, 251, 255, 0.82);
 }
 
+.sankey-keyword-detail {
+  position: absolute;
+  top: 0.65rem;
+  right: 0.65rem;
+  width: min(330px, 42%);
+  max-height: calc(100% - 1.3rem);
+  overflow-y: auto;
+  border: 1px solid #c8d7e2;
+  border-radius: 10px;
+  background: rgba(251, 254, 255, 0.95);
+  box-shadow: var(--shadow-2);
+  padding: 0.55rem 0.62rem 0.58rem;
+  z-index: 4;
+}
+
+.sankey-keyword-detail h4 {
+  margin: 0.42rem 0 0.36rem;
+  font-family: "Space Grotesk", sans-serif;
+  color: #263f53;
+  font-size: 0.98rem;
+}
+
+.sankey-keyword-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.sankey-keyword-meta .node-detail-chip {
+  font-size: 0.64rem;
+}
+
+.sankey-keyword-body {
+  margin-top: 0.44rem;
+  color: #496175;
+  font-size: 0.74rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
 .sankey-node-rect {
   fill: #7da3bc;
   stroke: #5f849f;
