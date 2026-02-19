@@ -77,6 +77,81 @@
               <output id="connectedNodeSizeValue">0.78x</output>
             </label>
           </div>
+
+          <div class="settings-block">
+            <h3>Breathing Motion</h3>
+            <label class="settings-row">
+              <input id="breatheEnabledToggle" type="checkbox" checked />
+              <span>Enable breathing effects</span>
+            </label>
+            <label class="settings-row">
+              <input id="globalPulseToggle" type="checkbox" checked />
+              <span>Global slow pulse</span>
+            </label>
+            <label class="settings-range">
+              <span>Global pulse intensity</span>
+              <input id="globalPulseIntensityRange" type="range" min="0" max="100" value="52" />
+              <output id="globalPulseIntensityValue">0.52</output>
+            </label>
+            <label class="settings-range">
+              <span>Global pulse speed</span>
+              <input id="globalPulseSpeedRange" type="range" min="20" max="180" value="72" />
+              <output id="globalPulseSpeedValue">0.72x</output>
+            </label>
+            <label class="settings-row">
+              <input id="phaseLagToggle" type="checkbox" checked />
+              <span>Category-led phase lag</span>
+            </label>
+            <label class="settings-row">
+              <input id="edgeShimmerToggle" type="checkbox" checked />
+              <span>Edge flow shimmer</span>
+            </label>
+            <label class="settings-range">
+              <span>Edge shimmer intensity</span>
+              <input id="edgeShimmerIntensityRange" type="range" min="0" max="100" value="46" />
+              <output id="edgeShimmerIntensityValue">0.46</output>
+            </label>
+            <label class="settings-row">
+              <input id="interactionRippleToggle" type="checkbox" checked />
+              <span>Interaction ripple</span>
+            </label>
+            <label class="settings-range">
+              <span>Interaction ripple strength</span>
+              <input id="interactionRippleStrengthRange" type="range" min="10" max="200" value="100" />
+              <output id="interactionRippleStrengthValue">1.00x</output>
+            </label>
+            <label class="settings-row">
+              <input id="ambientDriftToggle" type="checkbox" checked />
+              <span>Ambient drift</span>
+            </label>
+            <label class="settings-range">
+              <span>Ambient drift strength</span>
+              <input id="ambientDriftStrengthRange" type="range" min="0" max="120" value="36" />
+              <output id="ambientDriftStrengthValue">0.36</output>
+            </label>
+            <label class="settings-row">
+              <input id="confidencePulseToggle" type="checkbox" checked />
+              <span>Confidence-driven pulse</span>
+            </label>
+            <label class="settings-row">
+              <input id="timelineHeartbeatToggle" type="checkbox" checked />
+              <span>Timeline heartbeat</span>
+            </label>
+            <label class="settings-range">
+              <span>Timeline heartbeat strength</span>
+              <input id="timelineHeartbeatStrengthRange" type="range" min="0" max="180" value="92" />
+              <output id="timelineHeartbeatStrengthValue">0.92</output>
+            </label>
+            <label class="settings-row">
+              <input id="backgroundFieldToggle" type="checkbox" checked />
+              <span>Background field motion</span>
+            </label>
+            <label class="settings-range">
+              <span>Background field intensity</span>
+              <input id="backgroundFieldIntensityRange" type="range" min="0" max="120" value="44" />
+              <output id="backgroundFieldIntensityValue">0.44</output>
+            </label>
+          </div>
         </aside>
 
         <aside id="qualityPanel" class="quality-panel collapsed">

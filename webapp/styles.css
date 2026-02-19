@@ -104,12 +104,16 @@ body {
   right: 1rem;
   top: 1rem;
   width: min(350px, calc(100% - 2rem));
+  max-height: calc(100% - 2rem);
   background: var(--panel);
   border: 1px solid var(--panel-border);
   border-radius: 12px;
   box-shadow: 0 12px 22px rgba(21, 31, 37, 0.08);
   padding: 0.85rem 0.9rem;
   transition: transform 180ms ease, opacity 180ms ease;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
   z-index: 14;
 }
 
@@ -274,18 +278,21 @@ body {
 }
 
 .quality-block::-webkit-scrollbar,
-.insights-block::-webkit-scrollbar {
+.insights-block::-webkit-scrollbar,
+.detail-panel::-webkit-scrollbar {
   width: 9px;
 }
 
 .quality-block::-webkit-scrollbar-track,
-.insights-block::-webkit-scrollbar-track {
+.insights-block::-webkit-scrollbar-track,
+.detail-panel::-webkit-scrollbar-track {
   background: rgba(216, 220, 223, 0.55);
   border-radius: 999px;
 }
 
 .quality-block::-webkit-scrollbar-thumb,
-.insights-block::-webkit-scrollbar-thumb {
+.insights-block::-webkit-scrollbar-thumb,
+.detail-panel::-webkit-scrollbar-thumb {
   background: rgba(111, 136, 151, 0.75);
   border-radius: 999px;
   border: 2px solid rgba(216, 220, 223, 0.45);
@@ -629,11 +636,20 @@ body {
   letter-spacing: 0.06em;
 }
 
+.graph-field-layer ellipse {
+  filter: blur(32px);
+}
+
+.interaction-ripple {
+  pointer-events: none;
+}
+
 @media (max-width: 1080px) {
   .detail-panel {
     position: static;
     width: auto;
     margin: 0.75rem;
+    max-height: none;
     transform: none;
     opacity: 1;
     pointer-events: auto;

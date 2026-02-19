@@ -22,7 +22,30 @@ const state = {
   timelineTimer: null,
   lastVisibleNodeIds: new Set(),
   lastVisibleEdgeIds: new Set(),
+  animationFrameId: null,
+  timelinePulse: 0,
+  interactionPulseByNode: new Map(),
+  backgroundFieldLastUpdateMs: 0,
+  breathe: {
+    enabled: true,
+    globalPulse: true,
+    globalPulseIntensity: 0.52,
+    globalPulseSpeed: 0.72,
+    phaseLag: true,
+    edgeShimmer: true,
+    edgeShimmerIntensity: 0.46,
+    interactionRipple: true,
+    interactionRippleStrength: 1,
+    ambientDrift: true,
+    ambientDriftStrength: 0.36,
+    confidencePulse: true,
+    timelineHeartbeat: true,
+    timelineHeartbeatStrength: 0.92,
+    backgroundField: true,
+    backgroundFieldIntensity: 0.44,
+  },
 };
+const GRAPH_SETTINGS_STORAGE_KEY = "bluecoins.graph.settings.v1";
 
 const svg = d3.select("#graphSvg");
 const statsPill = document.getElementById("statsPill");
@@ -42,6 +65,29 @@ const nodeTextToggle = document.getElementById("nodeTextToggle");
 const llmMissToggle = document.getElementById("llmMissToggle");
 const connectedNodeSizeRange = document.getElementById("connectedNodeSizeRange");
 const connectedNodeSizeValue = document.getElementById("connectedNodeSizeValue");
+const breatheEnabledToggle = document.getElementById("breatheEnabledToggle");
+const globalPulseToggle = document.getElementById("globalPulseToggle");
+const globalPulseIntensityRange = document.getElementById("globalPulseIntensityRange");
+const globalPulseIntensityValue = document.getElementById("globalPulseIntensityValue");
+const globalPulseSpeedRange = document.getElementById("globalPulseSpeedRange");
+const globalPulseSpeedValue = document.getElementById("globalPulseSpeedValue");
+const phaseLagToggle = document.getElementById("phaseLagToggle");
+const edgeShimmerToggle = document.getElementById("edgeShimmerToggle");
+const edgeShimmerIntensityRange = document.getElementById("edgeShimmerIntensityRange");
+const edgeShimmerIntensityValue = document.getElementById("edgeShimmerIntensityValue");
+const interactionRippleToggle = document.getElementById("interactionRippleToggle");
+const interactionRippleStrengthRange = document.getElementById("interactionRippleStrengthRange");
+const interactionRippleStrengthValue = document.getElementById("interactionRippleStrengthValue");
+const ambientDriftToggle = document.getElementById("ambientDriftToggle");
+const ambientDriftStrengthRange = document.getElementById("ambientDriftStrengthRange");
+const ambientDriftStrengthValue = document.getElementById("ambientDriftStrengthValue");
+const confidencePulseToggle = document.getElementById("confidencePulseToggle");
+const timelineHeartbeatToggle = document.getElementById("timelineHeartbeatToggle");
+const timelineHeartbeatStrengthRange = document.getElementById("timelineHeartbeatStrengthRange");
+const timelineHeartbeatStrengthValue = document.getElementById("timelineHeartbeatStrengthValue");
+const backgroundFieldToggle = document.getElementById("backgroundFieldToggle");
+const backgroundFieldIntensityRange = document.getElementById("backgroundFieldIntensityRange");
+const backgroundFieldIntensityValue = document.getElementById("backgroundFieldIntensityValue");
 const drawerToggleBtn = document.getElementById("drawerToggleBtn");
 const drawerCloseBtn = document.getElementById("drawerCloseBtn");
 const qualityDrawerToggleBtn = document.getElementById("qualityDrawerToggleBtn");
@@ -209,11 +255,136 @@ function syncConnectedNodeScaleLabel() {
   connectedNodeSizeValue.textContent = `${state.connectedNodeScale.toFixed(2)}x`;
 }
 
+function clampNumber(value, min, max, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(min, Math.min(max, numeric));
+}
+
+function persistSettings() {
+  try {
+    const payload = {
+      showEdgeText: state.showEdgeText,
+      showNodeText: state.showNodeText,
+      showInitialMissLinks: state.showInitialMissLinks,
+      connectedNodeScale: state.connectedNodeScale,
+      drawerOpen: state.drawerOpen,
+      qualityDrawerOpen: state.qualityDrawerOpen,
+      insightsDrawerOpen: state.insightsDrawerOpen,
+      breathe: { ...state.breathe },
+    };
+    window.localStorage.setItem(GRAPH_SETTINGS_STORAGE_KEY, JSON.stringify(payload));
+  } catch (_error) {
+    // Ignore storage failures (private mode / quota / disabled).
+  }
+}
+
+function loadPersistedSettings() {
+  try {
+    const raw = window.localStorage.getItem(GRAPH_SETTINGS_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return;
+
+    if (typeof parsed.showEdgeText === "boolean") state.showEdgeText = parsed.showEdgeText;
+    if (typeof parsed.showNodeText === "boolean") state.showNodeText = parsed.showNodeText;
+    if (typeof parsed.showInitialMissLinks === "boolean") state.showInitialMissLinks = parsed.showInitialMissLinks;
+    if (typeof parsed.drawerOpen === "boolean") state.drawerOpen = parsed.drawerOpen;
+    if (typeof parsed.qualityDrawerOpen === "boolean") state.qualityDrawerOpen = parsed.qualityDrawerOpen;
+    if (typeof parsed.insightsDrawerOpen === "boolean") state.insightsDrawerOpen = parsed.insightsDrawerOpen;
+    state.connectedNodeScale = clampNumber(parsed.connectedNodeScale, 0.55, 1.3, state.connectedNodeScale);
+
+    if (parsed.breathe && typeof parsed.breathe === "object") {
+      const input = parsed.breathe;
+      if (typeof input.enabled === "boolean") state.breathe.enabled = input.enabled;
+      if (typeof input.globalPulse === "boolean") state.breathe.globalPulse = input.globalPulse;
+      if (typeof input.phaseLag === "boolean") state.breathe.phaseLag = input.phaseLag;
+      if (typeof input.edgeShimmer === "boolean") state.breathe.edgeShimmer = input.edgeShimmer;
+      if (typeof input.interactionRipple === "boolean") state.breathe.interactionRipple = input.interactionRipple;
+      if (typeof input.ambientDrift === "boolean") state.breathe.ambientDrift = input.ambientDrift;
+      if (typeof input.confidencePulse === "boolean") state.breathe.confidencePulse = input.confidencePulse;
+      if (typeof input.timelineHeartbeat === "boolean") state.breathe.timelineHeartbeat = input.timelineHeartbeat;
+      if (typeof input.backgroundField === "boolean") state.breathe.backgroundField = input.backgroundField;
+      state.breathe.globalPulseIntensity = clampNumber(input.globalPulseIntensity, 0, 1, state.breathe.globalPulseIntensity);
+      state.breathe.globalPulseSpeed = clampNumber(input.globalPulseSpeed, 0.2, 1.8, state.breathe.globalPulseSpeed);
+      state.breathe.edgeShimmerIntensity = clampNumber(input.edgeShimmerIntensity, 0, 1, state.breathe.edgeShimmerIntensity);
+      state.breathe.interactionRippleStrength = clampNumber(
+        input.interactionRippleStrength,
+        0.1,
+        2,
+        state.breathe.interactionRippleStrength,
+      );
+      state.breathe.ambientDriftStrength = clampNumber(input.ambientDriftStrength, 0, 1.2, state.breathe.ambientDriftStrength);
+      state.breathe.timelineHeartbeatStrength = clampNumber(
+        input.timelineHeartbeatStrength,
+        0,
+        1.8,
+        state.breathe.timelineHeartbeatStrength,
+      );
+      state.breathe.backgroundFieldIntensity = clampNumber(
+        input.backgroundFieldIntensity,
+        0,
+        1.2,
+        state.breathe.backgroundFieldIntensity,
+      );
+    }
+
+    // Ensure at most one drawer opens at startup.
+    if (state.qualityDrawerOpen && state.insightsDrawerOpen) state.insightsDrawerOpen = false;
+    if (state.drawerOpen && state.qualityDrawerOpen) state.drawerOpen = false;
+    if (state.drawerOpen && state.insightsDrawerOpen) state.drawerOpen = false;
+  } catch (_error) {
+    // Ignore malformed local storage values.
+  }
+}
+
+function hashToUnit(value) {
+  const text = String(value || "");
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  const positive = hash >>> 0;
+  return (positive % 10000) / 10000;
+}
+
+function syncBreathingLabels() {
+  if (globalPulseIntensityValue) {
+    globalPulseIntensityValue.textContent = state.breathe.globalPulseIntensity.toFixed(2);
+  }
+  if (globalPulseSpeedValue) {
+    globalPulseSpeedValue.textContent = `${state.breathe.globalPulseSpeed.toFixed(2)}x`;
+  }
+  if (edgeShimmerIntensityValue) {
+    edgeShimmerIntensityValue.textContent = state.breathe.edgeShimmerIntensity.toFixed(2);
+  }
+  if (interactionRippleStrengthValue) {
+    interactionRippleStrengthValue.textContent = `${state.breathe.interactionRippleStrength.toFixed(2)}x`;
+  }
+  if (ambientDriftStrengthValue) {
+    ambientDriftStrengthValue.textContent = state.breathe.ambientDriftStrength.toFixed(2);
+  }
+  if (timelineHeartbeatStrengthValue) {
+    timelineHeartbeatStrengthValue.textContent = state.breathe.timelineHeartbeatStrength.toFixed(2);
+  }
+  if (backgroundFieldIntensityValue) {
+    backgroundFieldIntensityValue.textContent = state.breathe.backgroundFieldIntensity.toFixed(2);
+  }
+}
+
+function triggerTimelineHeartbeatPulse() {
+  if (!state.breathe.enabled || !state.breathe.timelineHeartbeat) return;
+  const strength = Math.max(0, state.breathe.timelineHeartbeatStrength || 0);
+  state.timelinePulse = Math.min(2, state.timelinePulse + 0.65 * strength);
+}
+
 function setDrawerOpen(isOpen) {
   state.drawerOpen = Boolean(isOpen);
   if (!detailPanel || !drawerToggleBtn) return;
   detailPanel.classList.toggle("collapsed", !state.drawerOpen);
   drawerToggleBtn.classList.toggle("hidden", state.drawerOpen);
+  persistSettings();
 }
 
 function setQualityDrawerOpen(isOpen) {
@@ -221,6 +392,7 @@ function setQualityDrawerOpen(isOpen) {
   if (!qualityPanel || !qualityDrawerToggleBtn) return;
   qualityPanel.classList.toggle("collapsed", !state.qualityDrawerOpen);
   qualityDrawerToggleBtn.classList.toggle("hidden", state.qualityDrawerOpen);
+  persistSettings();
 }
 
 function setInsightsDrawerOpen(isOpen) {
@@ -228,6 +400,7 @@ function setInsightsDrawerOpen(isOpen) {
   if (!insightsPanel || !insightsDrawerToggleBtn) return;
   insightsPanel.classList.toggle("collapsed", !state.insightsDrawerOpen);
   insightsDrawerToggleBtn.classList.toggle("hidden", state.insightsDrawerOpen);
+  persistSettings();
 }
 
 async function fetchJsonOrThrow(url, label) {
@@ -293,9 +466,11 @@ function setTimelineIndex(nextIndex, options = {}) {
 
   const upper = state.timelinePoints.length - 1;
   const clamped = Math.max(0, Math.min(upper, Number(nextIndex) || 0));
+  const changed = clamped !== state.timelineIndex;
   state.timelineIndex = clamped;
   if (timelineSlider) timelineSlider.value = String(clamped);
   updateTimelineLabel();
+  if (changed) triggerTimelineHeartbeatPulse();
   if (shouldApply) applyVisualState({ animateTimeline: true });
 }
 
@@ -827,6 +1002,191 @@ function createZoomReactiveGrid(defs, width, height) {
   return { gridRect, updateGridTransform };
 }
 
+function createBackgroundField(width, height) {
+  const fieldLayer = svg
+    .append("g")
+    .attr("class", "graph-field-layer")
+    .attr("pointer-events", "none");
+
+  const auraA = fieldLayer
+    .append("ellipse")
+    .attr("cx", width * 0.24)
+    .attr("cy", height * 0.31)
+    .attr("rx", Math.max(180, width * 0.18))
+    .attr("ry", Math.max(120, height * 0.16))
+    .attr("fill", "rgba(128, 164, 181, 0.16)");
+
+  const auraB = fieldLayer
+    .append("ellipse")
+    .attr("cx", width * 0.78)
+    .attr("cy", height * 0.63)
+    .attr("rx", Math.max(220, width * 0.2))
+    .attr("ry", Math.max(140, height * 0.18))
+    .attr("fill", "rgba(116, 151, 166, 0.14)");
+
+  return { fieldLayer, auraA, auraB };
+}
+
+function emitInteractionRipple(node) {
+  const selections = state.selections;
+  if (!selections || !state.breathe.enabled || !state.breathe.interactionRipple) return;
+  if (!Number.isFinite(node?.x) || !Number.isFinite(node?.y)) return;
+
+  const base = nodeRadius(node);
+  const strength = Math.max(0.2, state.breathe.interactionRippleStrength || 0);
+  const burstRadius = Math.max(16, (base + 22) * (0.85 + strength * 0.55));
+  const ripple = selections.viewport
+    .append("circle")
+    .attr("class", "interaction-ripple")
+    .attr("cx", node.x)
+    .attr("cy", node.y)
+    .attr("r", Math.max(3, base * 0.65))
+    .attr("fill", "none")
+    .attr("stroke", "rgba(94, 142, 166, 0.42)")
+    .attr("stroke-width", Math.max(0.8, 1.35 * strength))
+    .style("opacity", 0.8);
+
+  ripple
+    .transition()
+    .duration(680)
+    .ease(d3.easeCubicOut)
+    .attr("r", burstRadius)
+    .style("opacity", 0)
+    .remove();
+
+  const previous = state.interactionPulseByNode.get(node.id) || 0;
+  state.interactionPulseByNode.set(node.id, Math.min(1.5, previous + 0.78 * strength));
+}
+
+function stopBreathingLoop() {
+  if (state.animationFrameId !== null) {
+    window.cancelAnimationFrame(state.animationFrameId);
+    state.animationFrameId = null;
+  }
+}
+
+function startBreathingLoop() {
+  stopBreathingLoop();
+  const selections = state.selections;
+  if (!selections) return;
+
+  const { nodeRing, nodeCore, link, edgeData, nodeData, simulation, fieldLayer, auraA, auraB, gridRect } = selections;
+  const baseRingRadius = (node) => nodeRadius(node) + (node.kind === "transaction" ? 0.95 : 2.0);
+  const baseCoreRadius = (node) => Math.max(2.1, nodeRadius(node) - (node.kind === "transaction" ? 0.05 : 2.8));
+
+  function frame(nowMs) {
+    const breathe = state.breathe;
+    if (!state.selections || selections !== state.selections) return;
+    const t = nowMs * 0.001;
+
+    state.timelinePulse *= 0.945;
+    state.interactionPulseByNode.forEach((value, key) => {
+      const next = value * 0.93;
+      if (next < 0.02) {
+        state.interactionPulseByNode.delete(key);
+      } else {
+        state.interactionPulseByNode.set(key, next);
+      }
+    });
+
+    if (!breathe.enabled) {
+      nodeRing.attr("r", (d) => baseRingRadius(d));
+      nodeCore.attr("r", (d) => baseCoreRadius(d));
+      link.attr("stroke-dasharray", null).attr("stroke-dashoffset", null);
+      if (fieldLayer) fieldLayer.style("opacity", 0);
+      if (gridRect) gridRect.attr("opacity", 0.5);
+      state.animationFrameId = window.requestAnimationFrame(frame);
+      return;
+    }
+
+    const globalAmp = breathe.globalPulse ? breathe.globalPulseIntensity * 0.19 : 0;
+    const pulseSpeed = Math.max(0.08, breathe.globalPulseSpeed || 0.72);
+    const heartbeatBoost = breathe.timelineHeartbeat ? state.timelinePulse * 0.16 : 0;
+
+    nodeRing.attr("r", (d) => {
+      const base = baseRingRadius(d);
+      const phaseLag = breathe.phaseLag ? d.phase_lag : 0;
+      const confidencePulse = breathe.confidencePulse ? d.confidence_pulse : 1;
+      const interactionPulse = state.interactionPulseByNode.get(d.id) || 0;
+      const wave = Math.sin(t * pulseSpeed * 2.9 + d.phase_seed + phaseLag);
+      const amp = (globalAmp + heartbeatBoost + interactionPulse * 0.055) * confidencePulse;
+      return Math.max(1.3, base * (1 + wave * amp));
+    });
+
+    nodeCore.attr("r", (d) => {
+      const base = baseCoreRadius(d);
+      const phaseLag = breathe.phaseLag ? d.phase_lag : 0;
+      const confidencePulse = breathe.confidencePulse ? d.confidence_pulse : 1;
+      const interactionPulse = state.interactionPulseByNode.get(d.id) || 0;
+      const wave = Math.sin(t * pulseSpeed * 2.9 + d.phase_seed + phaseLag + 0.45);
+      const amp = (globalAmp * 0.74 + heartbeatBoost * 0.92 + interactionPulse * 0.046) * confidencePulse;
+      return Math.max(1.1, base * (1 + wave * amp));
+    });
+
+    if (breathe.edgeShimmer) {
+      const shimmer = Math.max(0.02, breathe.edgeShimmerIntensity || 0);
+      link
+        .attr("stroke-dasharray", (d) => {
+          if (d.edge_type === "transaction_keyword") return `${2 + shimmer * 4} ${6 + shimmer * 11}`;
+          if (d.edge_type === "llm_initial_category") return `${4 + shimmer * 5} ${8 + shimmer * 8}`;
+          return `${4 + shimmer * 4} ${8 + shimmer * 7}`;
+        })
+        .attr("stroke-dashoffset", (d) => {
+          const direction = d.edge_type === "llm_initial_category" ? 1 : -1;
+          const speed = 18 + shimmer * 70;
+          return direction * ((t * speed + d.phase_seed * 34) % 480);
+        });
+    } else {
+      link.attr("stroke-dasharray", null).attr("stroke-dashoffset", null);
+    }
+
+    if (breathe.ambientDrift && simulation) {
+      const driftStrength = Math.max(0, breathe.ambientDriftStrength || 0);
+      if (driftStrength > 0) {
+        nodeData.forEach((node) => {
+          if (node.fx !== null || node.fy !== null) return;
+          if (node.kind === "transaction") return;
+          const drift = driftStrength * 0.00062;
+          node.vx += Math.sin(t * 0.74 + node.phase_seed * 3.2) * drift;
+          node.vy += Math.cos(t * 0.67 + node.phase_seed * 4.1) * drift;
+        });
+        simulation.alpha(Math.max(simulation.alpha(), 0.035));
+      }
+    }
+
+    if (fieldLayer && auraA && auraB) {
+      if (breathe.backgroundField) {
+        const intensity = Math.max(0, breathe.backgroundFieldIntensity || 0);
+        fieldLayer.style("opacity", Math.min(0.58, 0.12 + intensity * 0.33));
+        if (nowMs - state.backgroundFieldLastUpdateMs >= 66) {
+          state.backgroundFieldLastUpdateMs = nowMs;
+          auraA
+            .attr("cx", selections.width * (0.23 + Math.sin(t * 0.1) * 0.009))
+            .attr("cy", selections.height * (0.3 + Math.cos(t * 0.11) * 0.009));
+          auraB
+            .attr("cx", selections.width * (0.78 + Math.cos(t * 0.09) * 0.011))
+            .attr("cy", selections.height * (0.64 + Math.sin(t * 0.1) * 0.009));
+        }
+      } else {
+        fieldLayer.style("opacity", 0);
+      }
+    }
+
+    if (gridRect) {
+      if (breathe.backgroundField) {
+        const gridPulse = 0.46 + Math.sin(t * 0.35) * 0.04 * Math.max(0.1, breathe.backgroundFieldIntensity || 0);
+        gridRect.attr("opacity", Math.max(0.34, gridPulse));
+      } else {
+        gridRect.attr("opacity", 0.5);
+      }
+    }
+
+    state.animationFrameId = window.requestAnimationFrame(frame);
+  }
+
+  state.animationFrameId = window.requestAnimationFrame(frame);
+}
+
 function clearQualityPanels(message) {
   if (qualitySummary) qualitySummary.textContent = message;
   if (qualityCategoryTable) qualityCategoryTable.innerHTML = "";
@@ -1156,15 +1516,47 @@ function renderGraph(graph) {
     ...item,
     timeline_ms: timelineMsForNode(item),
   }));
-  const edgeData = graph.edges.map((item) => ({
-    ...item,
-    timeline_ms: timelineMsForEdge(item),
-  }));
+  const edgeData = graph.edges.map((item) => {
+    const sid = typeof item.source === "object" ? item.source.id : item.source;
+    const tid = typeof item.target === "object" ? item.target.id : item.target;
+    return {
+      ...item,
+      source: sid,
+      target: tid,
+      timeline_ms: timelineMsForEdge(item),
+      phase_seed: hashToUnit(`${sid}->${tid}:${item.edge_type}`) * Math.PI * 2,
+    };
+  });
+
+  const nodeConfidence = new Map();
+  edgeData.forEach((edge) => {
+    const conf = Number(edge.avg_confidence);
+    if (!Number.isFinite(conf)) return;
+    const sid = sourceId(edge);
+    const tid = targetId(edge);
+    const left = nodeConfidence.get(sid) || { total: 0, count: 0 };
+    const right = nodeConfidence.get(tid) || { total: 0, count: 0 };
+    left.total += conf;
+    left.count += 1;
+    right.total += conf;
+    right.count += 1;
+    nodeConfidence.set(sid, left);
+    nodeConfidence.set(tid, right);
+  });
+  nodeData.forEach((node) => {
+    const confEntry = nodeConfidence.get(node.id);
+    const avgConf = confEntry?.count ? confEntry.total / confEntry.count : 0.62;
+    node.phase_seed = hashToUnit(node.id) * Math.PI * 2;
+    node.phase_lag = node.kind === "category" ? 0 : node.kind === "keyword" ? 0.92 : 1.72;
+    node.confidence_score = Math.max(0, Math.min(1, avgConf));
+    node.confidence_pulse = 0.64 + (1 - node.confidence_score) * 0.92;
+  });
 
   state.focusNodeId = null;
   state.focusEdgeId = null;
   state.pinnedNodeId = null;
   state.tagNodeId = null;
+  state.backgroundFieldLastUpdateMs = 0;
 
   if (!nodeData.length || !edgeData.length) {
     setDetailPanel("No graph edges found. Import or review transactions to build memory links.");
@@ -1182,6 +1574,7 @@ function renderGraph(graph) {
     .attr("height", "140%");
   noise.append("feGaussianBlur").attr("in", "SourceGraphic").attr("stdDeviation", 0.2);
   const grid = createZoomReactiveGrid(defs, width, height);
+  const field = createBackgroundField(width, height);
 
   const viewport = svg.append("g").attr("class", "viewport");
 
@@ -1345,6 +1738,7 @@ function renderGraph(graph) {
       state.focusNodeId = node.id;
       state.focusEdgeId = null;
       state.tagNodeId = node.id;
+      emitInteractionRipple(node);
       applyVisualState();
       const visible = collectVisibilitySets();
       renderNodeDetails(node, edgeData, visible.visibleEdgeIds);
@@ -1365,6 +1759,7 @@ function renderGraph(graph) {
       state.focusNodeId = node.id;
       state.focusEdgeId = null;
       state.tagNodeId = node.id;
+      emitInteractionRipple(node);
       applyVisualState();
       const visible = collectVisibilitySets();
       renderNodeDetails(node, edgeData, visible.visibleEdgeIds);
@@ -1424,6 +1819,7 @@ function renderGraph(graph) {
   state.selections = {
     nodeData,
     edgeData,
+    viewport,
     nodeGroup,
     nodeRing,
     nodeCore,
@@ -1434,16 +1830,23 @@ function renderGraph(graph) {
     edgeById: new Map(edgeData.map((edge) => [edge.id, edge])),
     width,
     height,
+    simulation,
+    gridRect: grid?.gridRect || null,
+    fieldLayer: field?.fieldLayer || null,
+    auraA: field?.auraA || null,
+    auraB: field?.auraB || null,
   };
 
   setupTimeline(graph, nodeData, edgeData);
   applyVisualState();
+  startBreathingLoop();
   setDefaultDetail();
   updateFloatingTagPosition();
 }
 
 async function loadGraph() {
   stopTimelinePlayback();
+  stopBreathingLoop();
   statsPill.textContent = "Loading graph...";
   setDetailPanel("Loading keyword-category memory links...");
   const query = buildQueryString();
@@ -1475,6 +1878,7 @@ searchInput.addEventListener("input", () => {
 if (edgeTextToggle) {
   edgeTextToggle.addEventListener("change", () => {
     state.showEdgeText = edgeTextToggle.checked;
+    persistSettings();
     applyVisualState();
   });
 }
@@ -1482,6 +1886,7 @@ if (edgeTextToggle) {
 if (nodeTextToggle) {
   nodeTextToggle.addEventListener("change", () => {
     state.showNodeText = nodeTextToggle.checked;
+    persistSettings();
     applyVisualState();
   });
 }
@@ -1489,6 +1894,7 @@ if (nodeTextToggle) {
 if (llmMissToggle) {
   llmMissToggle.addEventListener("change", () => {
     state.showInitialMissLinks = llmMissToggle.checked;
+    persistSettings();
     applyVisualState();
   });
 }
@@ -1497,7 +1903,135 @@ if (connectedNodeSizeRange) {
   connectedNodeSizeRange.addEventListener("input", () => {
     state.connectedNodeScale = Number(connectedNodeSizeRange.value) / 100;
     syncConnectedNodeScaleLabel();
+    persistSettings();
     if (state.graph) renderGraph(state.graph);
+  });
+}
+
+function refreshBreathingRuntime() {
+  syncBreathingLabels();
+  persistSettings();
+  if (!state.selections) return;
+  startBreathingLoop();
+}
+
+if (breatheEnabledToggle) {
+  breatheEnabledToggle.addEventListener("change", () => {
+    state.breathe.enabled = breatheEnabledToggle.checked;
+    refreshBreathingRuntime();
+  });
+}
+
+if (globalPulseToggle) {
+  globalPulseToggle.addEventListener("change", () => {
+    state.breathe.globalPulse = globalPulseToggle.checked;
+    refreshBreathingRuntime();
+  });
+}
+
+if (globalPulseIntensityRange) {
+  globalPulseIntensityRange.addEventListener("input", () => {
+    state.breathe.globalPulseIntensity = Number(globalPulseIntensityRange.value || 0) / 100;
+    syncBreathingLabels();
+    persistSettings();
+  });
+}
+
+if (globalPulseSpeedRange) {
+  globalPulseSpeedRange.addEventListener("input", () => {
+    state.breathe.globalPulseSpeed = Number(globalPulseSpeedRange.value || 0) / 100;
+    syncBreathingLabels();
+    persistSettings();
+  });
+}
+
+if (phaseLagToggle) {
+  phaseLagToggle.addEventListener("change", () => {
+    state.breathe.phaseLag = phaseLagToggle.checked;
+    refreshBreathingRuntime();
+  });
+}
+
+if (edgeShimmerToggle) {
+  edgeShimmerToggle.addEventListener("change", () => {
+    state.breathe.edgeShimmer = edgeShimmerToggle.checked;
+    refreshBreathingRuntime();
+  });
+}
+
+if (edgeShimmerIntensityRange) {
+  edgeShimmerIntensityRange.addEventListener("input", () => {
+    state.breathe.edgeShimmerIntensity = Number(edgeShimmerIntensityRange.value || 0) / 100;
+    syncBreathingLabels();
+    persistSettings();
+  });
+}
+
+if (interactionRippleToggle) {
+  interactionRippleToggle.addEventListener("change", () => {
+    state.breathe.interactionRipple = interactionRippleToggle.checked;
+    refreshBreathingRuntime();
+  });
+}
+
+if (interactionRippleStrengthRange) {
+  interactionRippleStrengthRange.addEventListener("input", () => {
+    state.breathe.interactionRippleStrength = Number(interactionRippleStrengthRange.value || 0) / 100;
+    syncBreathingLabels();
+    persistSettings();
+  });
+}
+
+if (ambientDriftToggle) {
+  ambientDriftToggle.addEventListener("change", () => {
+    state.breathe.ambientDrift = ambientDriftToggle.checked;
+    refreshBreathingRuntime();
+  });
+}
+
+if (ambientDriftStrengthRange) {
+  ambientDriftStrengthRange.addEventListener("input", () => {
+    state.breathe.ambientDriftStrength = Number(ambientDriftStrengthRange.value || 0) / 100;
+    syncBreathingLabels();
+    persistSettings();
+  });
+}
+
+if (confidencePulseToggle) {
+  confidencePulseToggle.addEventListener("change", () => {
+    state.breathe.confidencePulse = confidencePulseToggle.checked;
+    refreshBreathingRuntime();
+  });
+}
+
+if (timelineHeartbeatToggle) {
+  timelineHeartbeatToggle.addEventListener("change", () => {
+    state.breathe.timelineHeartbeat = timelineHeartbeatToggle.checked;
+    if (!state.breathe.timelineHeartbeat) state.timelinePulse = 0;
+    refreshBreathingRuntime();
+  });
+}
+
+if (timelineHeartbeatStrengthRange) {
+  timelineHeartbeatStrengthRange.addEventListener("input", () => {
+    state.breathe.timelineHeartbeatStrength = Number(timelineHeartbeatStrengthRange.value || 0) / 100;
+    syncBreathingLabels();
+    persistSettings();
+  });
+}
+
+if (backgroundFieldToggle) {
+  backgroundFieldToggle.addEventListener("change", () => {
+    state.breathe.backgroundField = backgroundFieldToggle.checked;
+    refreshBreathingRuntime();
+  });
+}
+
+if (backgroundFieldIntensityRange) {
+  backgroundFieldIntensityRange.addEventListener("input", () => {
+    state.breathe.backgroundFieldIntensity = Number(backgroundFieldIntensityRange.value || 0) / 100;
+    syncBreathingLabels();
+    persistSettings();
   });
 }
 
@@ -1602,7 +2136,10 @@ window.addEventListener("resize", () => {
 
 window.addEventListener("beforeunload", () => {
   stopTimelinePlayback();
+  stopBreathingLoop();
 });
+
+loadPersistedSettings();
 
 if (edgeTextToggle) edgeTextToggle.checked = state.showEdgeText;
 if (nodeTextToggle) nodeTextToggle.checked = state.showNodeText;
@@ -1610,15 +2147,46 @@ if (llmMissToggle) llmMissToggle.checked = state.showInitialMissLinks;
 if (connectedNodeSizeRange) {
   connectedNodeSizeRange.value = String(Math.round(state.connectedNodeScale * 100));
 }
+if (breatheEnabledToggle) breatheEnabledToggle.checked = state.breathe.enabled;
+if (globalPulseToggle) globalPulseToggle.checked = state.breathe.globalPulse;
+if (globalPulseIntensityRange) {
+  globalPulseIntensityRange.value = String(Math.round(state.breathe.globalPulseIntensity * 100));
+}
+if (globalPulseSpeedRange) {
+  globalPulseSpeedRange.value = String(Math.round(state.breathe.globalPulseSpeed * 100));
+}
+if (phaseLagToggle) phaseLagToggle.checked = state.breathe.phaseLag;
+if (edgeShimmerToggle) edgeShimmerToggle.checked = state.breathe.edgeShimmer;
+if (edgeShimmerIntensityRange) {
+  edgeShimmerIntensityRange.value = String(Math.round(state.breathe.edgeShimmerIntensity * 100));
+}
+if (interactionRippleToggle) interactionRippleToggle.checked = state.breathe.interactionRipple;
+if (interactionRippleStrengthRange) {
+  interactionRippleStrengthRange.value = String(Math.round(state.breathe.interactionRippleStrength * 100));
+}
+if (ambientDriftToggle) ambientDriftToggle.checked = state.breathe.ambientDrift;
+if (ambientDriftStrengthRange) {
+  ambientDriftStrengthRange.value = String(Math.round(state.breathe.ambientDriftStrength * 100));
+}
+if (confidencePulseToggle) confidencePulseToggle.checked = state.breathe.confidencePulse;
+if (timelineHeartbeatToggle) timelineHeartbeatToggle.checked = state.breathe.timelineHeartbeat;
+if (timelineHeartbeatStrengthRange) {
+  timelineHeartbeatStrengthRange.value = String(Math.round(state.breathe.timelineHeartbeatStrength * 100));
+}
+if (backgroundFieldToggle) backgroundFieldToggle.checked = state.breathe.backgroundField;
+if (backgroundFieldIntensityRange) {
+  backgroundFieldIntensityRange.value = String(Math.round(state.breathe.backgroundFieldIntensity * 100));
+}
 if (timelineSlider) {
   timelineSlider.disabled = true;
   timelineSlider.value = "0";
 }
 if (timelinePlayBtn) timelinePlayBtn.disabled = true;
 syncConnectedNodeScaleLabel();
+syncBreathingLabels();
 updateTimelineLabel();
-setDrawerOpen(true);
-setQualityDrawerOpen(false);
-setInsightsDrawerOpen(false);
+setDrawerOpen(state.drawerOpen);
+setQualityDrawerOpen(state.qualityDrawerOpen);
+setInsightsDrawerOpen(state.insightsDrawerOpen);
 clearInsightsPanels("Loading insights...");
 loadGraph();
