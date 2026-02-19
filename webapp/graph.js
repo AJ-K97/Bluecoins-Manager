@@ -825,7 +825,12 @@ function setTimelineIndex(nextIndex, options = {}) {
   if (timelineSlider) timelineSlider.value = String(clamped);
   updateTimelineLabel();
   if (changed) triggerTimelineHeartbeatPulse();
-  if (shouldApply) applyVisualState({ animateTimeline: true });
+  if (shouldApply) {
+    applyVisualState({ animateTimeline: true });
+    if (state.activeView === "sankey") {
+      renderDecisionPathSankey(state.insightsData);
+    }
+  }
 }
 
 function setupTimeline(graph, nodeData, edgeData) {
@@ -1722,8 +1727,21 @@ function renderDecisionPathSankey(insightsPayload) {
     return;
   }
 
-  const cases = Array.isArray(insightsPayload?.case_inspector) ? insightsPayload.case_inspector : [];
+  const allCases = Array.isArray(insightsPayload?.case_inspector) ? insightsPayload.case_inspector : [];
+  const cutoff = getTimelineCutoffMs();
+  const hasTimeline = cutoff !== null;
+  const cases = allCases.filter((row) => {
+    if (!hasTimeline) return true;
+    const rowMs = timelineMsFromDate(row?.date);
+    if (rowMs === null) return true;
+    return rowMs <= cutoff;
+  });
+
   if (!cases.length) {
+    if (hasTimeline) {
+      clearSankeyPanel(`No case inspector rows available up to ${timelinePointLabel(cutoff)}.`);
+      return;
+    }
     clearSankeyPanel("No case inspector rows available.");
     return;
   }
@@ -1878,8 +1896,9 @@ function renderDecisionPathSankey(insightsPayload) {
       allLinks.classed("is-muted", false).classed("is-active", false);
     });
 
+  const rangeText = hasTimeline ? ` | through ${timelinePointLabel(cutoff)}` : "";
   sankeySummary.textContent =
-    `${cases.length} cases | ${nodes.length} nodes | ${links.length} paths | top ${keywordLimit}/${predictedLimit}/${resolvedLimit} buckets`;
+    `${cases.length}/${allCases.length} cases | ${nodes.length} nodes | ${links.length} paths | top ${keywordLimit}/${predictedLimit}/${resolvedLimit} buckets${rangeText}`;
   if (sankeyEmptyState) sankeyEmptyState.classList.add("hidden");
 }
 
