@@ -217,6 +217,56 @@ body {
   font-size: 1.08rem;
 }
 
+.sankey-controls {
+  margin-top: 0.52rem;
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 0.42rem;
+}
+
+.sankey-field {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 118px;
+}
+
+.sankey-search {
+  min-width: min(360px, 48%);
+  flex: 1 1 260px;
+}
+
+.sankey-field span {
+  font-family: "Space Mono", monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #61788c;
+}
+
+.sankey-field input,
+.sankey-field select {
+  border: 1px solid #c9d8e3;
+  border-radius: 8px;
+  background: #f8fcff;
+  color: #40586b;
+  font-size: 0.74rem;
+  padding: 0.35rem 0.44rem;
+}
+
+.sankey-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+  color: #4f677a;
+  font-size: 0.74rem;
+  padding-bottom: 0.2rem;
+}
+
+.sankey-check input {
+  accent-color: #2f80ab;
+}
+
 .sankey-view-head .quality-summary {
   margin-top: 0.3rem;
 }

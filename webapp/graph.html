@@ -40,6 +40,34 @@
                   ?
                 </button>
               </div>
+              <div class="sankey-controls" aria-label="Sankey search and filters">
+                <label class="sankey-field sankey-search">
+                  <span>Search</span>
+                  <input id="sankeySearchInput" type="text" placeholder="keyword, predicted, resolved..." />
+                </label>
+                <label class="sankey-field">
+                  <span>Field</span>
+                  <select id="sankeyFieldFilter">
+                    <option value="all">All</option>
+                    <option value="keyword">Keyword</option>
+                    <option value="predicted">Predicted</option>
+                    <option value="resolved">Resolved</option>
+                  </select>
+                </label>
+                <label class="sankey-field">
+                  <span>Outcome</span>
+                  <select id="sankeyOutcomeFilter">
+                    <option value="all">All</option>
+                    <option value="mismatch">Predicted != Resolved</option>
+                    <option value="match">Predicted == Resolved</option>
+                  </select>
+                </label>
+                <label class="sankey-check">
+                  <input id="sankeyVerifiedOnlyToggle" type="checkbox" />
+                  <span>Verified only</span>
+                </label>
+                <button id="sankeyFilterResetBtn" class="dock-icon-button" type="button">Reset</button>
+              </div>
               <div id="sankeySummary" class="quality-summary">Loading insights...</div>
             </div>
             <div class="sankey-chart-wrap">

@@ -32,6 +32,12 @@ const state = {
   nodeDetailRows: [],
   nodeDetailPage: 0,
   nodeDetailPageSize: 8,
+  sankeyFilters: {
+    search: "",
+    field: "all",
+    outcome: "all",
+    verifiedOnly: false,
+  },
   breathe: {
     enabled: true,
     globalPulse: true,
@@ -122,6 +128,11 @@ const insightsCloseBtn = document.getElementById("insightsCloseBtn");
 const sankeySummary = document.getElementById("sankeySummary");
 const sankeySvgEl = document.getElementById("sankeySvg");
 const sankeyEmptyState = document.getElementById("sankeyEmptyState");
+const sankeySearchInput = document.getElementById("sankeySearchInput");
+const sankeyFieldFilter = document.getElementById("sankeyFieldFilter");
+const sankeyOutcomeFilter = document.getElementById("sankeyOutcomeFilter");
+const sankeyVerifiedOnlyToggle = document.getElementById("sankeyVerifiedOnlyToggle");
+const sankeyFilterResetBtn = document.getElementById("sankeyFilterResetBtn");
 
 const zoomInBtn = document.getElementById("zoomInBtn");
 const zoomOutBtn = document.getElementById("zoomOutBtn");
@@ -559,6 +570,7 @@ function persistSettings() {
       qualityDrawerOpen: state.qualityDrawerOpen,
       insightsDrawerOpen: state.insightsDrawerOpen,
       activeView: state.activeView,
+      sankeyFilters: { ...state.sankeyFilters },
       breathe: { ...state.breathe },
     };
     window.localStorage.setItem(GRAPH_SETTINGS_STORAGE_KEY, JSON.stringify(payload));
@@ -582,6 +594,17 @@ function loadPersistedSettings() {
     if (typeof parsed.qualityDrawerOpen === "boolean") state.qualityDrawerOpen = parsed.qualityDrawerOpen;
     if (typeof parsed.insightsDrawerOpen === "boolean") state.insightsDrawerOpen = parsed.insightsDrawerOpen;
     if (parsed.activeView === "graph" || parsed.activeView === "sankey") state.activeView = parsed.activeView;
+    if (parsed.sankeyFilters && typeof parsed.sankeyFilters === "object") {
+      const input = parsed.sankeyFilters;
+      if (typeof input.search === "string") state.sankeyFilters.search = input.search.slice(0, 140);
+      if (input.field === "all" || input.field === "keyword" || input.field === "predicted" || input.field === "resolved") {
+        state.sankeyFilters.field = input.field;
+      }
+      if (input.outcome === "all" || input.outcome === "mismatch" || input.outcome === "match") {
+        state.sankeyFilters.outcome = input.outcome;
+      }
+      if (typeof input.verifiedOnly === "boolean") state.sankeyFilters.verifiedOnly = input.verifiedOnly;
+    }
     state.connectedNodeScale = clampNumber(parsed.connectedNodeScale, 0.55, 1.3, state.connectedNodeScale);
 
     if (parsed.breathe && typeof parsed.breathe === "object") {
@@ -746,6 +769,13 @@ function setActiveView(viewName) {
     renderGraph(state.graph);
   }
   persistSettings();
+}
+
+function applySankeyFilterControls() {
+  if (sankeySearchInput) sankeySearchInput.value = state.sankeyFilters.search || "";
+  if (sankeyFieldFilter) sankeyFieldFilter.value = state.sankeyFilters.field || "all";
+  if (sankeyOutcomeFilter) sankeyOutcomeFilter.value = state.sankeyFilters.outcome || "all";
+  if (sankeyVerifiedOnlyToggle) sankeyVerifiedOnlyToggle.checked = Boolean(state.sankeyFilters.verifiedOnly);
 }
 
 function updateWorkspaceLayout() {
@@ -1719,6 +1749,27 @@ function topLabelSet(rows, accessor, limit) {
   );
 }
 
+function caseMatchesSankeyFilters(row) {
+  const filters = state.sankeyFilters || {};
+  if (filters.verifiedOnly && !row?.is_verified) return false;
+
+  const predicted = String(row?.predicted_category || "").trim();
+  const resolved = String(row?.resolved_category || "").trim();
+  const isMatch = predicted && resolved && predicted === resolved;
+  if (filters.outcome === "mismatch" && isMatch) return false;
+  if (filters.outcome === "match" && !isMatch) return false;
+
+  const term = String(filters.search || "").trim().toLowerCase();
+  if (!term) return true;
+  const keyword = String(row?.keyword || "").toLowerCase();
+  const predictedText = predicted.toLowerCase();
+  const resolvedText = resolved.toLowerCase();
+  if (filters.field === "keyword") return keyword.includes(term);
+  if (filters.field === "predicted") return predictedText.includes(term);
+  if (filters.field === "resolved") return resolvedText.includes(term);
+  return keyword.includes(term) || predictedText.includes(term) || resolvedText.includes(term);
+}
+
 function renderDecisionPathSankey(insightsPayload) {
   if (!sankeySvgEl || !sankeySummary) return;
   const sankeyFactory = d3.sankey;
@@ -1730,14 +1781,25 @@ function renderDecisionPathSankey(insightsPayload) {
   const allCases = Array.isArray(insightsPayload?.case_inspector) ? insightsPayload.case_inspector : [];
   const cutoff = getTimelineCutoffMs();
   const hasTimeline = cutoff !== null;
-  const cases = allCases.filter((row) => {
+  const timelineCases = allCases.filter((row) => {
     if (!hasTimeline) return true;
     const rowMs = timelineMsFromDate(row?.date);
     if (rowMs === null) return true;
     return rowMs <= cutoff;
   });
+  const cases = timelineCases.filter(caseMatchesSankeyFilters);
 
   if (!cases.length) {
+    const term = String(state.sankeyFilters.search || "").trim();
+    const hasUserFilters =
+      term.length > 0 ||
+      state.sankeyFilters.field !== "all" ||
+      state.sankeyFilters.outcome !== "all" ||
+      state.sankeyFilters.verifiedOnly;
+    if (hasUserFilters) {
+      clearSankeyPanel("No rows match the current Sankey filters.");
+      return;
+    }
     if (hasTimeline) {
       clearSankeyPanel(`No case inspector rows available up to ${timelinePointLabel(cutoff)}.`);
       return;
@@ -1897,8 +1959,9 @@ function renderDecisionPathSankey(insightsPayload) {
     });
 
   const rangeText = hasTimeline ? ` | through ${timelinePointLabel(cutoff)}` : "";
+  const filteredText = timelineCases.length === cases.length ? "" : ` | filtered ${cases.length}/${timelineCases.length}`;
   sankeySummary.textContent =
-    `${cases.length}/${allCases.length} cases | ${nodes.length} nodes | ${links.length} paths | top ${keywordLimit}/${predictedLimit}/${resolvedLimit} buckets${rangeText}`;
+    `${cases.length}/${allCases.length} cases${filteredText} | ${nodes.length} nodes | ${links.length} paths | top ${keywordLimit}/${predictedLimit}/${resolvedLimit} buckets${rangeText}`;
   if (sankeyEmptyState) sankeyEmptyState.classList.add("hidden");
 }
 
@@ -2890,6 +2953,50 @@ if (sankeyViewTabBtn) {
   });
 }
 
+if (sankeySearchInput) {
+  sankeySearchInput.addEventListener("input", () => {
+    state.sankeyFilters.search = sankeySearchInput.value || "";
+    persistSettings();
+    if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
+  });
+}
+
+if (sankeyFieldFilter) {
+  sankeyFieldFilter.addEventListener("change", () => {
+    state.sankeyFilters.field = sankeyFieldFilter.value || "all";
+    persistSettings();
+    if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
+  });
+}
+
+if (sankeyOutcomeFilter) {
+  sankeyOutcomeFilter.addEventListener("change", () => {
+    state.sankeyFilters.outcome = sankeyOutcomeFilter.value || "all";
+    persistSettings();
+    if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
+  });
+}
+
+if (sankeyVerifiedOnlyToggle) {
+  sankeyVerifiedOnlyToggle.addEventListener("change", () => {
+    state.sankeyFilters.verifiedOnly = sankeyVerifiedOnlyToggle.checked;
+    persistSettings();
+    if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
+  });
+}
+
+if (sankeyFilterResetBtn) {
+  sankeyFilterResetBtn.addEventListener("click", () => {
+    state.sankeyFilters.search = "";
+    state.sankeyFilters.field = "all";
+    state.sankeyFilters.outcome = "all";
+    state.sankeyFilters.verifiedOnly = false;
+    applySankeyFilterControls();
+    persistSettings();
+    if (state.activeView === "sankey") renderDecisionPathSankey(state.insightsData);
+  });
+}
+
 if (nodeTxPrevBtn) {
   nodeTxPrevBtn.addEventListener("click", () => {
     state.nodeDetailPage = Math.max(0, state.nodeDetailPage - 1);
@@ -3023,6 +3130,7 @@ if (timelineSlider) {
 if (timelinePlayBtn) timelinePlayBtn.disabled = true;
 syncConnectedNodeScaleLabel();
 syncBreathingLabels();
+applySankeyFilterControls();
 updateSettingsSectionSummaries();
 updateTimelineLabel();
 setNodeDrawerOpen(state.nodeDrawerOpen);
