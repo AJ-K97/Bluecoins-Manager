@@ -9,6 +9,7 @@ const state = {
   zoomBehavior: null,
   showEdgeText: false,
   showNodeText: false,
+  showInitialMissLinks: true,
   connectedNodeScale: 0.78,
   drawerOpen: true,
   timelinePoints: [],
@@ -32,6 +33,7 @@ const refreshBtn = document.getElementById("refreshBtn");
 
 const edgeTextToggle = document.getElementById("edgeTextToggle");
 const nodeTextToggle = document.getElementById("nodeTextToggle");
+const llmMissToggle = document.getElementById("llmMissToggle");
 const connectedNodeSizeRange = document.getElementById("connectedNodeSizeRange");
 const connectedNodeSizeValue = document.getElementById("connectedNodeSizeValue");
 const drawerToggleBtn = document.getElementById("drawerToggleBtn");
@@ -54,6 +56,10 @@ function targetId(edge) {
 }
 
 function edgeReasonLabel(edge) {
+  if (edge.edge_type === "llm_initial_category") {
+    const strength = Math.round((Number(edge.decay_strength || 0) || 0) * 100);
+    return `Initial LLM guess (${strength}%)`;
+  }
   const text = edge.reason || "No explicit reason captured.";
   return text.length > 32 ? `${text.slice(0, 29)}...` : text;
 }
@@ -135,6 +141,7 @@ function setDefaultDetail() {
       "",
       "Merchant nodes connect to categories.",
       "Small satellite nodes are transactions linked by keyword.",
+      "Subtle red links show initial LLM category guesses that were later corrected.",
     ].join("\n"),
   );
 }
@@ -142,7 +149,8 @@ function setDefaultDetail() {
 function updateStats(stats) {
   statsPill.textContent =
     `Rows ${stats.rows_scanned} | Nodes ${stats.total_nodes} | ` +
-    `Edges ${stats.total_edges_after_limit} | Time ${stats.timeline_points || 0}`;
+    `Edges ${stats.total_edges_after_limit} | Time ${stats.timeline_points || 0} | ` +
+    `Initial misses ${stats.initial_miss_edges || 0}`;
 }
 
 function updateZoomIndicator(transform) {
@@ -360,7 +368,8 @@ function collectVisibilitySets() {
   });
 
   edgesInWindow.forEach((edge) => {
-    if (edge.edge_type !== "keyword_category") return;
+    if (edge.edge_type !== "keyword_category" && edge.edge_type !== "llm_initial_category") return;
+    if (edge.edge_type === "llm_initial_category" && !state.showInitialMissLinks) return;
     const keyword = edgeKeyword(edge);
     if (keyword && !keywordsWithVisibleTransactions.has(keyword)) return;
     visibleEdgeIds.add(edge.id);
@@ -522,6 +531,9 @@ function applyVisualState(options = {}) {
     .style("pointer-events", (d) => (visibility.visibleEdgeIds.has(d.id) ? null : "none"))
     .attr("stroke", (d) => {
       if (d.id === state.focusEdgeId) return "#5f8ea2";
+      if (d.edge_type === "llm_initial_category") {
+        return filtered && activeEdgeIds.has(d.id) ? "#b74a56" : "#cb727d";
+      }
       if (d.edge_type === "transaction_keyword") {
         return filtered && activeEdgeIds.has(d.id) ? "#8ea8b8" : "#bcc9d1";
       }
@@ -529,6 +541,10 @@ function applyVisualState(options = {}) {
     })
     .attr("stroke-width", (d) => {
       const base = strokeScale(d.weight);
+      if (d.edge_type === "llm_initial_category") {
+        const missBase = Math.max(1.05, base * 1.08);
+        return filtered && activeEdgeIds.has(d.id) ? missBase * 1.2 : missBase;
+      }
       if (d.edge_type === "transaction_keyword") {
         const txBase = Math.max(0.82, base * 0.92);
         return filtered && activeEdgeIds.has(d.id) ? txBase * 1.2 : txBase;
@@ -537,8 +553,15 @@ function applyVisualState(options = {}) {
     })
     .style("opacity", (d) => {
       if (!visibility.visibleEdgeIds.has(d.id)) return 0;
-      if (!filtered) return d.edge_type === "transaction_keyword" ? 0.5 : 0.56;
-      return activeEdgeIds.has(d.id) ? 0.95 : d.edge_type === "transaction_keyword" ? 0.22 : 0.12;
+      if (!filtered) {
+        if (d.edge_type === "transaction_keyword") return 0.5;
+        if (d.edge_type === "llm_initial_category") return 0.62;
+        return 0.56;
+      }
+      if (activeEdgeIds.has(d.id)) return 0.95;
+      if (d.edge_type === "transaction_keyword") return 0.22;
+      if (d.edge_type === "llm_initial_category") return 0.32;
+      return 0.12;
     });
 
   edgeLabel
@@ -597,6 +620,12 @@ function renderNodeDetails(node, edgeData, visibleEdgeIds = null) {
     .sort((a, b) => b.weight - a.weight)
     .slice(0, 4)
     .map((edge) => `${edge.keyword} -> ${edge.category_label} (${edge.weight.toFixed(2)})`);
+  const initialMissEdges = nodeEdges
+    .filter((edge) => edge.edge_type === "llm_initial_category")
+    .slice()
+    .sort((a, b) => b.weight - a.weight)
+    .slice(0, 3)
+    .map((edge) => `${edge.keyword} -> ${edge.category_label} [initial miss x${edge.miss_count}]`);
 
   const txCount = nodeEdges.filter((edge) => edge.edge_type === "transaction_keyword").length;
 
@@ -606,8 +635,11 @@ function renderNodeDetails(node, edgeData, visibleEdgeIds = null) {
       `${node.kind.toUpperCase()} NODE`,
       `Connections: ${nodeEdges.length}`,
       txCount > 0 ? `Transactions linked: ${txCount}` : "",
+      initialMissEdges.length > 0 ? `Initial LLM miss links: ${initialMissEdges.length}` : "",
       "",
       topEdges.length ? topEdges.join("\n") : "No category connections in this time window",
+      initialMissEdges.length ? "Initial LLM links:" : "",
+      initialMissEdges.length ? initialMissEdges.join("\n") : "",
     ]
       .filter(Boolean)
       .join("\n"),
@@ -615,6 +647,21 @@ function renderNodeDetails(node, edgeData, visibleEdgeIds = null) {
 }
 
 function renderEdgeDetails(edge) {
+  if (edge.edge_type === "llm_initial_category") {
+    setDetailPanel(
+      [
+        "Initial LLM Category Guess",
+        `Keyword: ${edge.keyword}`,
+        `Suggested category: ${edge.category_label}`,
+        `First seen: ${formatDate(edge.first_seen_date)}`,
+        `Miss count: ${edge.miss_count || edge.count || 0}`,
+        `Corrective decisions: ${edge.correction_count || 0}`,
+        `Residual strength: ${Math.round((Number(edge.decay_strength || 0) || 0) * 100)}%`,
+      ].join("\n"),
+    );
+    return;
+  }
+
   if (edge.edge_type === "transaction_keyword") {
     setDetailPanel(
       [
@@ -999,6 +1046,13 @@ if (nodeTextToggle) {
   });
 }
 
+if (llmMissToggle) {
+  llmMissToggle.addEventListener("change", () => {
+    state.showInitialMissLinks = llmMissToggle.checked;
+    applyVisualState();
+  });
+}
+
 if (connectedNodeSizeRange) {
   connectedNodeSizeRange.addEventListener("input", () => {
     state.connectedNodeScale = Number(connectedNodeSizeRange.value) / 100;
@@ -1063,6 +1117,7 @@ window.addEventListener("beforeunload", () => {
 
 if (edgeTextToggle) edgeTextToggle.checked = state.showEdgeText;
 if (nodeTextToggle) nodeTextToggle.checked = state.showNodeText;
+if (llmMissToggle) llmMissToggle.checked = state.showInitialMissLinks;
 if (connectedNodeSizeRange) {
   connectedNodeSizeRange.value = String(Math.round(state.connectedNodeScale * 100));
 }

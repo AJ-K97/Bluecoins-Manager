@@ -29,6 +29,18 @@ class EdgeAccumulator:
     last_seen_at: Optional[datetime] = None
 
 
+@dataclass
+class InitialGuessAccumulator:
+    keyword: str
+    category_id: int
+    miss_count: int = 0
+    correction_count: int = 0
+    decay_score: float = 0.0
+    reason_counts: Counter = field(default_factory=Counter)
+    first_seen_at: Optional[datetime] = None
+    last_seen_at: Optional[datetime] = None
+
+
 def _clean_keyword(raw_keyword: Optional[str]) -> str:
     keyword = (raw_keyword or "").strip()
     return " ".join(keyword.split())
@@ -141,6 +153,7 @@ async def build_keyword_category_graph(
 
     accumulators: Dict[Tuple[str, Optional[int]], EdgeAccumulator] = {}
     keyword_transactions: Dict[str, list] = defaultdict(list)
+    keyword_events: Dict[str, list] = defaultdict(list)
     seen_keyword_tx = set()
     category_ids = set()
 
@@ -199,6 +212,17 @@ async def build_keyword_category_graph(
 
         if category_id is not None:
             category_ids.add(category_id)
+        if ai_suggested_category_id is not None:
+            category_ids.add(ai_suggested_category_id)
+
+        keyword_events[keyword].append(
+            {
+                "resolved_category_id": category_id,
+                "suggested_category_id": ai_suggested_category_id,
+                "reason": reason_text,
+                "tx_dt": tx_dt,
+            }
+        )
 
         if transaction_id is not None:
             tx_key = (keyword, int(transaction_id))
@@ -287,9 +311,110 @@ async def build_keyword_category_graph(
     edges.sort(key=lambda item: item["weight"], reverse=True)
     edges = edges[:limit]
 
+    selected_keywords = {edge["keyword"] for edge in edges}
+    initial_guess_edges = []
+    decay_lambda = 0.38
+    initial_guess_accumulators: Dict[Tuple[str, int], InitialGuessAccumulator] = {}
+
+    for keyword, events in keyword_events.items():
+        if keyword not in selected_keywords:
+            continue
+
+        ordered_events = sorted(
+            events,
+            key=lambda item: (
+                item["tx_dt"] is None,
+                item["tx_dt"] or datetime.max.replace(tzinfo=timezone.utc),
+            ),
+        )
+        total_correct = sum(
+            1
+            for item in ordered_events
+            if item["resolved_category_id"] is not None
+            and item["suggested_category_id"] is not None
+            and item["resolved_category_id"] == item["suggested_category_id"]
+        )
+        running_correct = 0
+
+        for item in ordered_events:
+            resolved_category_id = item["resolved_category_id"]
+            suggested_category_id = item["suggested_category_id"]
+            tx_dt = item["tx_dt"]
+
+            if resolved_category_id is None or suggested_category_id is None:
+                continue
+
+            if resolved_category_id == suggested_category_id:
+                running_correct += 1
+                continue
+
+            future_correct = max(0, total_correct - running_correct)
+            residual = math.exp(-decay_lambda * future_correct)
+            acc_key = (keyword, int(suggested_category_id))
+            acc = initial_guess_accumulators.get(acc_key)
+            if acc is None:
+                acc = InitialGuessAccumulator(keyword=keyword, category_id=int(suggested_category_id))
+                initial_guess_accumulators[acc_key] = acc
+
+            acc.miss_count += 1
+            acc.correction_count = max(acc.correction_count, total_correct)
+            acc.decay_score += residual
+            reason_text = item["reason"] or "LLM initially selected this category."
+            acc.reason_counts[reason_text] += 1
+
+            if tx_dt is not None:
+                if acc.first_seen_at is None or tx_dt < acc.first_seen_at:
+                    acc.first_seen_at = tx_dt
+                if acc.last_seen_at is None or tx_dt > acc.last_seen_at:
+                    acc.last_seen_at = tx_dt
+
+    for miss in initial_guess_accumulators.values():
+        category_meta = category_map.get(
+            miss.category_id,
+            {"parent_name": "Unknown", "name": "Unknown", "type": "unknown"},
+        )
+        source_id = f"keyword::{miss.keyword}"
+        target_id = f"category::{miss.category_id}"
+        category_label = (
+            f"{category_meta['parent_name']} > {category_meta['name']} [{category_meta['type']}]"
+        )
+        reasons = [
+            {"text": text, "count": count}
+            for text, count in miss.reason_counts.most_common(3)
+        ]
+        reason = reasons[0]["text"] if reasons else "LLM initially selected this category."
+        decay_strength = (
+            miss.decay_score / miss.miss_count if miss.miss_count > 0 else 0.0
+        )
+        weight = max(0.1, min(1.6, 0.2 + miss.decay_score * 0.68))
+        initial_guess_edges.append(
+            {
+                "id": f"{source_id}->{target_id}::llm-initial",
+                "source": source_id,
+                "target": target_id,
+                "edge_type": "llm_initial_category",
+                "keyword": miss.keyword,
+                "category_id": miss.category_id,
+                "category_label": category_label,
+                "category_type": category_meta["type"],
+                "reason": reason,
+                "reasons": reasons,
+                "count": miss.miss_count,
+                "miss_count": miss.miss_count,
+                "correction_count": miss.correction_count,
+                "decay_strength": round(decay_strength, 4),
+                "weight": round(weight, 4),
+                "first_seen_date": _iso_date(miss.first_seen_at),
+                "last_seen_date": _iso_date(miss.last_seen_at),
+            }
+        )
+
+    if initial_guess_edges:
+        edges.extend(initial_guess_edges)
+
     tx_node_lookup = {}
     if include_transactions and edges:
-        keyword_set = {edge["keyword"] for edge in edges}
+        keyword_set = {edge["keyword"] for edge in edges if edge.get("edge_type") != "transaction_keyword"}
         tx_edges = []
         tx_nodes = {}
         tx_added = 0
@@ -350,7 +475,12 @@ async def build_keyword_category_graph(
     node_weight = defaultdict(float)
     node_timeline_bounds = {}
     for edge in edges:
-        multiplier = 1.0 if edge.get("edge_type") == "keyword_category" else 0.2
+        if edge.get("edge_type") == "keyword_category":
+            multiplier = 1.0
+        elif edge.get("edge_type") == "llm_initial_category":
+            multiplier = 0.5
+        else:
+            multiplier = 0.2
         node_weight[edge["source"]] += edge["weight"] * multiplier
         node_weight[edge["target"]] += edge["weight"] * multiplier
         edge_first = _as_utc_datetime(edge.get("first_seen_date") or edge.get("transaction_date"))
@@ -459,6 +589,7 @@ async def build_keyword_category_graph(
         "stats": {
             "rows_scanned": len(rows),
             "unique_pairs": len(accumulators),
+            "initial_miss_edges": len(initial_guess_edges),
             "total_edges_after_filter": total_edges_before_limit,
             "total_edges_after_limit": len(edges),
             "total_nodes": len(nodes),
