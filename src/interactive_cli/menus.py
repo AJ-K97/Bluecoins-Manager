@@ -36,6 +36,7 @@ from src.commands import (
 from src.database import Account, Transaction
 
 from .common import TRANSFER_CHOICE, choose_category_tree
+from .review import review_transactions
 from .ui import (
     _Ansi,
     _confirm_destructive,
@@ -375,92 +376,21 @@ async def review_queue_menu(session, account_id=None):
             _warn("No transactions pending review in queue.")
             return
 
-        choices = []
-        for tx in rows:
-            parent_name, cat_name = get_transaction_category_display(tx)
-            cat_type = tx.category.type if tx.category else tx.type
-            cat_name = format_category_label(parent_name, cat_name, cat_type)
-            label = (
-                f"[{tx.decision_state}/{tx.review_bucket}] p{tx.review_priority or 0} "
-                f"{tx.date.strftime('%Y-%m-%d')} | {tx.description[:24]:<24} | {tx.amount:>8.2f} | {cat_name}"
-            )
-            choices.append(Choice(value=tx, name=label))
-        choices.append(Choice(value=None, name="Back"))
-
         _render_menu_view(
             path="Home / Transactions / Review Queue",
             summary_lines=[
                 f"Rows in queue: {len(rows)}",
-                "Focus on needs_review and force_review transactions.",
+                "Launching Transaction Review App for queue processing.",
             ],
             pending=len(rows),
         )
-        selected_tx = await _select_with_search(
-            message="Select Transaction:",
-            long_instruction=_menu_help_panel(
-                [
-                    "Accept & Verify: Confirms category/type and exits queue status.",
-                    "Change Category: Manually set category and verify transaction.",
-                    "Delete Transaction: Remove row from transaction history.",
-                ]
-            ),
-            choices=choices,
-            threshold=18,
-        )
-        if not selected_tx:
-            return
-
-        tx_action = await inquirer.select(
-            message=f"Queue action for '{selected_tx.description}':",
-            choices=[
-                "Accept & Verify",
-                "Change Category",
-                "Edit Note",
-                "Delete Transaction",
-                Choice(value=None, name="Cancel"),
-            ],
+        await review_transactions(session, rows)
+        continue_review = await inquirer.confirm(
+            message="Return to queue and continue reviewing pending transactions?",
+            default=True,
         ).execute_async()
-
-        if tx_action == "Accept & Verify":
-            await mark_transaction_verified(session, selected_tx.id)
-            await _toast("Transaction verified.", level="ok")
-            continue
-
-        if tx_action == "Change Category":
-            selected_cat = await choose_category_tree(
-                session,
-                prompt_prefix="Queue: Select New Category",
-                default_type=selected_tx.type if selected_tx.type in {"income", "expense"} else None,
-                restrict_to_default_type=True,
-            )
-            if selected_cat == TRANSFER_CHOICE:
-                await update_transaction_category(session, selected_tx.id, category_id=None, set_transfer=True)
-                await _toast("Category updated and verified.", level="ok")
-            elif selected_cat:
-                await update_transaction_category(session, selected_tx.id, selected_cat.id)
-                await _toast("Category updated and verified.", level="ok")
-            continue
-
-        if tx_action == "Edit Note":
-            new_note = await inquirer.text(
-                message="Transaction note (used as export Item/Payee when present):",
-                default=selected_tx.note or "",
-            ).execute_async()
-            success, msg = await update_transaction_note(session, selected_tx.id, new_note)
-            await _toast(msg, level="ok" if success else "err")
-            continue
-
-        if tx_action == "Delete Transaction":
-            ok_delete = await _confirm_destructive(
-                path="Home / Transactions / Review Queue / Delete",
-                action_label=f"delete transaction #{selected_tx.id}",
-                typed_token="DELETE",
-                details=[selected_tx.description or ""],
-            )
-            if ok_delete:
-                await delete_transaction(session, selected_tx.id)
-                await _toast("Transaction deleted.", level="ok")
-            continue
+        if not continue_review:
+            return
 
 
 async def manage_categories_menu(session):

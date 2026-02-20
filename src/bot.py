@@ -24,10 +24,12 @@ from src.commands import (
     add_transaction,
     get_queue_transactions,
     mark_transaction_verified,
+    mark_transaction_skipped,
     update_transaction_category,
     get_category_display_from_values,
     update_account,
 )
+from src.policy import evaluate_decision_policy
 
 UPLOAD_REVIEW_STATE_KEY = "upload_review_state"
 UPLOAD_REVIEW_IDLE = "idle"
@@ -1049,6 +1051,13 @@ async def review_single_transaction(update: Update, context: ContextTypes.DEFAUL
         
     def e(s):
         return html.escape(str(s))
+    
+    conf_display = "N/A"
+    if tx.confidence_score is not None:
+        try:
+            conf_display = f"{float(tx.confidence_score):.2f}"
+        except (TypeError, ValueError):
+            conf_display = "N/A"
 
     msg = (
         f"🔎 <b>Review Transaction ID: {e(tx.id)}</b>\n"
@@ -1057,7 +1066,7 @@ async def review_single_transaction(update: Update, context: ContextTypes.DEFAUL
         f"📝 <b>{e(tx.description)}</b>\n"
         f"💰 <b>{tx.amount:.2f}</b>\n"
         f"🏷️ {e(cat_str)} <code>({e(tx.type)})</code>\n"
-        f"🤖 Conf: {tx.confidence_score:.2f} | Rsn: {e(tx.decision_reason or 'None')}"
+        f"🤖 Conf: {conf_display} | Rsn: {e(tx.decision_reason or 'None')}"
     )
     
     # Buttons
@@ -1078,45 +1087,78 @@ async def review_single_transaction(update: Update, context: ContextTypes.DEFAUL
     else:
         await update.message.reply_text(msg, parse_mode="HTML", reply_markup=reply_markup)
 
+async def _show_next_review_transaction(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    session,
+    exclude_tx_id: int = None,
+):
+    queue = await get_queue_transactions(session, limit=50)
+    next_tx = None
+    for tx in queue:
+        if exclude_tx_id is not None and tx.id == exclude_tx_id:
+            continue
+        next_tx = tx
+        break
+
+    if not next_tx:
+        done_msg = "✅ No more transactions pending review."
+        if update.callback_query:
+            await update.callback_query.edit_message_text(done_msg)
+        else:
+            await update.message.reply_text(done_msg)
+        return
+
+    await review_single_transaction(update, context, next_tx, session)
+
 async def review_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fetches one pending transaction and shows it."""
     async with AsyncSessionLocal() as session:
-        # Get one high priority item
-        queue = await get_queue_transactions(session, limit=1)
-        if not queue:
-            await update.message.reply_text("✅ Review Queue is empty!")
-            return
-        
-        await review_single_transaction(update, context, queue[0], session)
+        await _show_next_review_transaction(update, context, session)
 
 async def review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     
-    parts = data.split("_")
-    action = parts[1] # ok, skip, cat, del
-    tx_id = int(parts[2])
+    parts = (data or "").split("_")
+    if len(parts) < 2 or parts[0] != "rev":
+        await query.edit_message_text("Unknown review action.")
+        return
+
+    action = parts[1] # ok, skip, cat, del, cancel
+    tx_id = None
+    if action in {"ok", "skip", "cat", "del"}:
+        if len(parts) < 3:
+            await query.edit_message_text("Invalid review action payload.")
+            return
+        tx_id = int(parts[2])
     
     async with AsyncSessionLocal() as session:
+        if action == "cancel":
+            await _show_next_review_transaction(update, context, session)
+            return
+
         if action == "ok":
             success, msg = await mark_transaction_verified(session, tx_id)
             if success:
-                 await query.edit_message_text(f"✅ Verified transaction.")
-                 # Trigger next review? 
-                 # await review_command(update, context) # Recursive might be tricky with update obj
+                 await _show_next_review_transaction(update, context, session)
             else:
                  await query.edit_message_text(f"❌ Error: {msg}")
 
         elif action == "skip":
-             await query.edit_message_text(f"⏭️ Skipped.")
+             success, msg = await mark_transaction_skipped(session, tx_id)
+             if success:
+                 await _show_next_review_transaction(update, context, session)
+             else:
+                 await query.edit_message_text(f"❌ Error: {msg}")
         
         elif action == "del":
              # Implementation needed depending on policy (soft/hard delete)
              # For now just verify removed
              from src.commands import delete_transaction
              await delete_transaction(session, tx_id)
-             await query.edit_message_text(f"🗑️ Deleted.")
+             await _show_next_review_transaction(update, context, session)
 
         elif action == "cat":
              # This requires user input. We can't easily jump into conversation handler from callback 
@@ -1164,7 +1206,7 @@ async def set_category_callback(update: Update, context: ContextTypes.DEFAULT_TY
     async with AsyncSessionLocal() as session:
         success, msg = await update_transaction_category(session, tx_id, cat_id)
         if success:
-             await query.edit_message_text(f"✅ Category updated.")
+             await _show_next_review_transaction(update, context, session)
         else:
              await query.edit_message_text(f"❌ Error: {msg}")
 
@@ -1317,6 +1359,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 tx_type = suggested_type or tx["type"]
                 if tx_type == "transfer":
                     cat_id = None
+
+                conflict_flags = []
+                if tx_type != "transfer" and cat_id is None:
+                    conflict_flags.append("invalid_category_id")
+                if tx_type == "transfer" and cat_id is not None:
+                    conflict_flags.append("transfer_ambiguous")
+
+                decision = evaluate_decision_policy(confidence or 0.0, conflict_flags)
                 new_tx = Transaction(
                     date=tx["date"],
                     description=tx["description"],
@@ -1324,7 +1374,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     type=tx_type,
                     account_id=account.id,
                     category_id=cat_id,
-                    raw_csv_row=tx["raw_csv_row"]
+                    raw_csv_row=tx["raw_csv_row"],
+                    confidence_score=confidence or 0.0,
+                    is_verified=decision.can_auto_verify,
+                    decision_state=decision.state,
+                    decision_reason=decision.reason,
+                    review_priority=decision.priority,
+                    review_bucket=decision.bucket,
                 )
                 session.add(new_tx)
                 new_count += 1

@@ -995,6 +995,25 @@ async def mark_transaction_verified(session, tx_id):
             await session.rollback()
     return True, "Transaction verified."
 
+async def mark_transaction_skipped(session, tx_id):
+    stmt = select(Transaction).where(Transaction.id == tx_id)
+    result = await session.execute(stmt)
+    tx = result.scalar_one_or_none()
+
+    if not tx:
+        return False, "Transaction not found."
+
+    # Skip means user intentionally resolved this row without further edits.
+    # Mark as finalized so it no longer appears in review queues.
+    _finalize_as_verified(
+        tx,
+        reason="User skipped transaction during review.",
+        bucket="manual_review",
+    )
+    session.add(tx)
+    await session.commit()
+    return True, "Transaction skipped and finalized."
+
 async def delete_transaction(session, tx_id):
     stmt = delete(Transaction).where(Transaction.id == tx_id)
     await session.execute(stmt)
