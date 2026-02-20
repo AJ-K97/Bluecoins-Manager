@@ -63,6 +63,35 @@ async def _category_label_for_tx(session, tx_type, category_id):
     parent_name, cat_name = await get_category_display_from_values(session, tx_type, category_id)
     return format_category_label(parent_name, cat_name, tx_type)
 
+async def _refresh_ai_decision_for_tx(session, ai, tx):
+    locked_expected_type = tx.type if tx.type in {"expense", "income"} else None
+    candidates = await ai.suggest_category_candidates(
+        tx.description,
+        session,
+        min_candidates=3,
+        expected_type=locked_expected_type,
+    )
+    if not candidates:
+        return False, "No AI suggestion returned."
+
+    top = candidates[0]
+    suggested_type = top.get("type") or tx.type
+    suggested_cat_id = top.get("id")
+
+    if suggested_type == "transfer":
+        success, msg = await update_transaction_category(session, tx.id, category_id=None, set_transfer=True)
+    elif suggested_cat_id:
+        success, msg = await update_transaction_category(session, tx.id, suggested_cat_id)
+    else:
+        return False, "AI suggestion had no category id."
+
+    if not success:
+        return False, msg
+
+    await session.refresh(tx, ["category", "memory_entries"])
+    new_label = await _category_label_for_tx(session, tx.type, tx.category_id)
+    return True, f"{new_label} | conf={top.get('confidence', 0.0):.2f}"
+
 
 async def review_transactions(session, transactions):
     tx_ids = [t.id for t in transactions]
@@ -123,6 +152,46 @@ async def review_transactions(session, transactions):
                 default="coach",
             ).execute_async()
             action = follow_up
+
+        if action == "refresh":
+            scope = await inquirer.select(
+                message="Refresh AI decision scope:",
+                choices=[
+                    Choice(value="current", name="Current transaction only"),
+                    Choice(value="similar", name="Current + similar pending transactions"),
+                    Choice(value="cancel", name="Cancel"),
+                ],
+                default="current",
+            ).execute_async()
+            if scope == "cancel":
+                continue
+
+            targets = [tx]
+            if scope == "similar":
+                source_key = extract_pattern_key_result(tx.description).keyword
+                similar_rows = [
+                    row
+                    for row in review_list
+                    if (not row.is_verified)
+                    and row.id != tx.id
+                    and extract_pattern_key_result(row.description).keyword == source_key
+                ]
+                targets.extend(similar_rows)
+
+            updated = 0
+            failed = 0
+            for target in targets:
+                ok, detail = await _refresh_ai_decision_for_tx(session, ai, target)
+                if ok:
+                    updated += 1
+                else:
+                    failed += 1
+                    print(f"Refresh failed for tx #{target.id}: {detail}")
+
+            print(
+                f"Refreshed AI decisions: updated={updated}, failed={failed}, scope={scope}."
+            )
+            continue
 
         if action == "coach":
             coaching_text = await inquirer.text(

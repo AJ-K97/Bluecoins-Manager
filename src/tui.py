@@ -181,6 +181,8 @@ class TransactionReviewApp:
             ("class:footer", " modify category  "),
             ("class:hotkey", "N"),
             ("class:footer", " add/edit note  "),
+            ("class:hotkey", "F"),
+            ("class:footer", " refresh AI decision  "),
             ("class:hotkey", "C"),
             ("class:footer", " coach model  "),
             ("class:hotkey", "D"),
@@ -238,6 +240,12 @@ class TransactionReviewApp:
             if not self.transactions:
                 return
             event.app.exit(result=('note', self.transactions[self.selected_index]))
+
+        @kb.add('f')
+        def _(event):
+            if not self.transactions:
+                return
+            event.app.exit(result=('refresh', self.transactions[self.selected_index]))
 
         @kb.add('c')
         def _(event):
