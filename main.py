@@ -23,7 +23,6 @@ from src.commands import (
     get_queue_transactions,
     get_queue_stats,
     recalc_queue_decisions,
-    recalc_queue_decisions,
     format_category_obj_label,
     add_transaction,
 )
@@ -73,7 +72,8 @@ async def account_command(args):
                 for acc in accounts:
                     print(f" - {acc.name} ({acc.institution})")
         elif args.add:
-            success, msg = await add_account(session, args.add, args.add)
+            institution = args.institution if args.institution else args.add
+            success, msg = await add_account(session, args.add, institution)
             print(msg)
         elif args.delete:
             success, msg = await delete_account(session, args.delete)
@@ -664,6 +664,10 @@ async def main():
     group.add_argument("--list", action="store_true")
     group.add_argument("--add", help="Name")
     group.add_argument("--delete", help="Name")
+    acc_parser.add_argument(
+        "--institution",
+        help="Institution for --add (defaults to account name if omitted).",
+    )
     
     # Convert/Import
     conv_parser = subparsers.add_parser("convert")

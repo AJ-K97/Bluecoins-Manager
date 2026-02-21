@@ -6,3 +6,10 @@ data/
 .vscode/
 venv/
 backups/
+
+# Local OS/editor artifacts
+.DS_Store
+
+# Local exports generated during manual runs
+export.csv
+export_transactionTest.csv
