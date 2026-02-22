@@ -22,6 +22,7 @@ from src.database import (
     MerchantKeywordAlias,
     CategoryBenchmarkItem,
     CategoryBenchmarkRun,
+    OperationLog,
     Base,
     engine,
 )
@@ -121,6 +122,41 @@ def format_category_obj_label(category):
     if not category:
         return "Uncategorized > Uncategorized [unknown]"
     return format_category_label(category.parent_name, category.name, category.type)
+
+
+def _serialize_tx_snapshot(tx):
+    return {
+        "tx_id": int(tx.id),
+        "category_id": tx.category_id,
+        "tx_type": tx.type,
+        "amount": float(tx.amount) if tx.amount is not None else None,
+        "is_verified": bool(tx.is_verified),
+        "decision_state": tx.decision_state,
+        "decision_reason": tx.decision_reason,
+        "review_bucket": tx.review_bucket,
+        "review_priority": tx.review_priority,
+        "note": tx.note,
+        "confidence_score": float(tx.confidence_score) if tx.confidence_score is not None else None,
+    }
+
+
+def _serialize_memory_snapshot(memory):
+    if not memory:
+        return None
+    return {
+        "memory_id": int(memory.id),
+        "user_selected_category_id": memory.user_selected_category_id,
+        "reflection": memory.reflection,
+    }
+
+
+def _record_operation(session, operation_type, payload):
+    session.add(
+        OperationLog(
+            operation_type=operation_type,
+            payload_json=json.dumps(payload, ensure_ascii=True),
+        )
+    )
 
 
 async def rebuild_category_understanding(session, category_ids=None):
@@ -268,6 +304,7 @@ RESETTABLE_MODELS = {
     "llm_finetune_examples": LLMFineTuneExample,
     "category_benchmark_items": CategoryBenchmarkItem,
     "category_benchmark_runs": CategoryBenchmarkRun,
+    "operation_logs": OperationLog,
 }
 
 # parent -> hard dependent children (FK/consistency must be addressed first if non-empty)
@@ -709,6 +746,19 @@ async def process_import(session, bank_name, file_path, account_name, output_pat
         stmt = select(Transaction).options(selectinload(Transaction.category), selectinload(Transaction.account)).where(Transaction.id.in_(new_tx_ids))
         result = await session.execute(stmt)
         persisted = result.scalars().all()
+        _record_operation(
+            session,
+            "import_batch",
+            {
+                "tx_ids": [int(tx_id) for tx_id in new_tx_ids],
+                "account_name": account_name,
+                "bank_name": bank_name,
+                "source_file": str(file_path),
+                "imported_count": len(new_tx_ids),
+                "skipped_count": skipped,
+            },
+        )
+        await session.commit()
 
     return True, result_msg, persisted
 
@@ -836,6 +886,8 @@ async def update_transaction_category(session, tx_id, category_id=None, set_tran
     mem_stmt = select(AIMemory).where(AIMemory.transaction_id == tx_id).order_by(AIMemory.created_at.desc())
     mem_res = await session.execute(mem_stmt)
     memory = mem_res.scalars().first()
+    tx_before = _serialize_tx_snapshot(tx)
+    memory_before = _serialize_memory_snapshot(memory)
     
     # Check for change
     old_cat_id = tx.category_id
@@ -921,6 +973,15 @@ async def update_transaction_category(session, tx_id, category_id=None, set_tran
     if touched_categories:
         await rebuild_category_understanding(session, category_ids=touched_categories)
 
+    _record_operation(
+        session,
+        "review_action",
+        {
+            "action": "update_transaction_category",
+            "tx_snapshot": tx_before,
+            "memory_snapshot": memory_before,
+        },
+    )
     await session.commit()
     try:
         await keyword_resolver.learn_from_verified(session, tx.description, transaction_id=tx.id)
@@ -930,19 +991,29 @@ async def update_transaction_category(session, tx_id, category_id=None, set_tran
     return True, "Transaction category updated and verified."
 
 async def update_transaction_amount(session, tx_id, new_amount):
-    stmt = (
-        update(Transaction)
-        .where(Transaction.id == tx_id)
-        .values(
-            amount=new_amount,
-            is_verified=True,
-            decision_state="auto_approved",
-            review_bucket="manual_review",
-            review_priority=100,
-            decision_reason="User verified amount during review.",
-        )
+    stmt = select(Transaction).where(Transaction.id == tx_id)
+    result = await session.execute(stmt)
+    tx = result.scalar_one_or_none()
+    if not tx:
+        return False, "Transaction not found."
+
+    tx_before = _serialize_tx_snapshot(tx)
+    tx.amount = new_amount
+    tx.is_verified = True
+    tx.decision_state = "auto_approved"
+    tx.review_bucket = "manual_review"
+    tx.review_priority = 100
+    tx.decision_reason = "User verified amount during review."
+    session.add(tx)
+    _record_operation(
+        session,
+        "review_action",
+        {
+            "action": "update_transaction_amount",
+            "tx_snapshot": tx_before,
+            "memory_snapshot": None,
+        },
     )
-    await session.execute(stmt)
     await session.commit()
     return True, "Transaction amount updated and verified."
 
@@ -954,9 +1025,19 @@ async def update_transaction_note(session, tx_id, note):
     if not tx:
         return False, "Transaction not found."
 
+    tx_before = _serialize_tx_snapshot(tx)
     text = (note or "").strip()
     tx.note = text if text else None
     session.add(tx)
+    _record_operation(
+        session,
+        "review_action",
+        {
+            "action": "update_transaction_note",
+            "tx_snapshot": tx_before,
+            "memory_snapshot": None,
+        },
+    )
     await session.commit()
     return True, "Transaction note updated."
 
@@ -967,6 +1048,7 @@ async def mark_transaction_verified(session, tx_id):
     tx = result.scalar_one_or_none()
     
     if tx:
+        tx_before = _serialize_tx_snapshot(tx)
         _finalize_as_verified(
             tx,
             reason="User marked transaction as verified.",
@@ -978,6 +1060,7 @@ async def mark_transaction_verified(session, tx_id):
         mem_stmt = select(AIMemory).where(AIMemory.transaction_id == tx_id).order_by(AIMemory.created_at.desc())
         mem_res = await session.execute(mem_stmt)
         memory = mem_res.scalars().first()
+        memory_before = _serialize_memory_snapshot(memory)
         
         if memory:
             memory.user_selected_category_id = tx.category_id
@@ -985,6 +1068,16 @@ async def mark_transaction_verified(session, tx_id):
 
         if tx.category_id:
             await rebuild_category_understanding(session, category_ids=[tx.category_id])
+
+        _record_operation(
+            session,
+            "review_action",
+            {
+                "action": "mark_transaction_verified",
+                "tx_snapshot": tx_before,
+                "memory_snapshot": memory_before,
+            },
+        )
 
     await session.commit()
     if tx:
@@ -1003,6 +1096,7 @@ async def mark_transaction_skipped(session, tx_id):
     if not tx:
         return False, "Transaction not found."
 
+    tx_before = _serialize_tx_snapshot(tx)
     # Skip means user intentionally resolved this row without further edits.
     # Mark as finalized so it no longer appears in review queues.
     _finalize_as_verified(
@@ -1011,6 +1105,15 @@ async def mark_transaction_skipped(session, tx_id):
         bucket="manual_review",
     )
     session.add(tx)
+    _record_operation(
+        session,
+        "review_action",
+        {
+            "action": "mark_transaction_skipped",
+            "tx_snapshot": tx_before,
+            "memory_snapshot": None,
+        },
+    )
     await session.commit()
     return True, "Transaction skipped and finalized."
 
@@ -1019,6 +1122,84 @@ async def delete_transaction(session, tx_id):
     await session.execute(stmt)
     await session.commit()
     return True, "Transaction deleted."
+
+
+async def undo_last_operation(session):
+    stmt = (
+        select(OperationLog)
+        .where(OperationLog.undone_at.is_(None))
+        .order_by(OperationLog.created_at.desc(), OperationLog.id.desc())
+        .limit(1)
+    )
+    res = await session.execute(stmt)
+    row = res.scalar_one_or_none()
+    if not row:
+        return False, "No undoable operations found."
+
+    try:
+        payload = json.loads(row.payload_json or "{}")
+    except Exception:
+        payload = {}
+
+    if row.operation_type == "import_batch":
+        tx_ids = [int(x) for x in (payload.get("tx_ids") or []) if str(x).isdigit()]
+        if not tx_ids:
+            return False, "Last import operation has no transaction IDs to undo."
+
+        await session.execute(delete(AIMemory).where(AIMemory.transaction_id.in_(tx_ids)))
+        await session.execute(delete(LLMFineTuneExample).where(LLMFineTuneExample.source_transaction_id.in_(tx_ids)))
+        await session.execute(delete(Transaction).where(Transaction.id.in_(tx_ids)))
+        row.undone_at = datetime.utcnow()
+        session.add(row)
+        await session.commit()
+        return True, f"Undo complete: removed {len(tx_ids)} imported transactions."
+
+    if row.operation_type == "review_action":
+        tx_snapshot = payload.get("tx_snapshot") or {}
+        memory_snapshot = payload.get("memory_snapshot")
+        tx_id = tx_snapshot.get("tx_id")
+        if not tx_id:
+            return False, "Last review action is missing transaction snapshot."
+
+        tx_res = await session.execute(select(Transaction).where(Transaction.id == int(tx_id)))
+        tx = tx_res.scalar_one_or_none()
+        if not tx:
+            return False, f"Cannot undo review action: transaction #{tx_id} not found."
+
+        touched_categories = {tx.category_id, tx_snapshot.get("category_id")}
+        tx.category_id = tx_snapshot.get("category_id")
+        tx.type = tx_snapshot.get("tx_type") or tx.type
+        tx.amount = tx_snapshot.get("amount")
+        tx.is_verified = bool(tx_snapshot.get("is_verified"))
+        tx.decision_state = tx_snapshot.get("decision_state")
+        tx.decision_reason = tx_snapshot.get("decision_reason")
+        tx.review_bucket = tx_snapshot.get("review_bucket")
+        tx.review_priority = tx_snapshot.get("review_priority")
+        tx.note = tx_snapshot.get("note")
+        tx.confidence_score = tx_snapshot.get("confidence_score")
+        session.add(tx)
+
+        if memory_snapshot and memory_snapshot.get("memory_id"):
+            mem_res = await session.execute(
+                select(AIMemory).where(AIMemory.id == int(memory_snapshot["memory_id"]))
+            )
+            memory = mem_res.scalar_one_or_none()
+            if memory:
+                memory.user_selected_category_id = memory_snapshot.get("user_selected_category_id")
+                memory.reflection = memory_snapshot.get("reflection")
+                session.add(memory)
+
+        touched = [cat_id for cat_id in touched_categories if cat_id]
+        if touched:
+            await rebuild_category_understanding(session, category_ids=touched)
+
+        row.undone_at = datetime.utcnow()
+        session.add(row)
+        await session.commit()
+        action = payload.get("action") or "review action"
+        return True, f"Undo complete: reverted {action} on transaction #{tx_id}."
+
+    return False, f"Unsupported undo operation type: {row.operation_type}"
 
 async def add_transaction(
     session,

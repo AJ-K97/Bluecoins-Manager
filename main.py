@@ -25,9 +25,11 @@ from src.commands import (
     recalc_queue_decisions,
     format_category_obj_label,
     add_transaction,
+    undo_last_operation,
 )
 from src.local_llm import LocalLLMPipeline
 from src.graph_webapp import serve_graph_web_server
+from src.query_engine import plan_ask_db_query, plan_summary, run_ask_db_query
 from src.ai_config import (
     close_ollama_client,
     get_default_embedding_model,
@@ -325,6 +327,15 @@ async def db_command(args):
             selected = get_resettable_table_names() if args.all else args.tables
             ok, msg = await reset_selected_tables(session, selected)
             print(msg)
+
+
+async def undo_command(args):
+    if not args.last:
+        print("Error: only --last is currently supported.")
+        return
+    async with AsyncSessionLocal() as session:
+        ok, msg = await undo_last_operation(session)
+        print(msg)
 
 
 async def queue_command(args):
@@ -654,6 +665,51 @@ async def graph_web_command(args):
     )
 
 
+async def ask_db_command(args):
+    raw_query = (args.query or "").strip()
+    if not raw_query:
+        print("Error: --query is required.")
+        return
+
+    async with AsyncSessionLocal() as session:
+        plan = await plan_ask_db_query(session, raw_query, limit=args.limit)
+        result = await run_ask_db_query(session, plan)
+
+    print(f"Interpreted query: {plan_summary(plan)}")
+    if result["kind"] == "total":
+        print(f"Count: {result['count']}")
+        print(f"Total amount: {result['total']:.2f}")
+        return
+    if result["kind"] == "net":
+        print(f"Income: {result['income_total']:.2f}")
+        print(f"Expense: {result['expense_total']:.2f}")
+        print(f"Net: {result['net']:.2f}")
+        return
+    if result["kind"] == "by_category":
+        rows = result.get("rows") or []
+        if not rows:
+            print("No matching category aggregates.")
+            return
+        for parent_name, category_name, tx_type, count, total in rows:
+            parent = parent_name or "Uncategorized"
+            category = category_name or "Uncategorized"
+            print(f"{parent} > {category} [{tx_type or 'unknown'}] | n={count} | total={float(total or 0.0):.2f}")
+        return
+    if result["kind"] == "transactions":
+        rows = result.get("rows") or []
+        if not rows:
+            print("No matching transactions.")
+            return
+        for tx_id, tx_date, desc, amount, tx_type, account_name, parent_name, category_name in rows:
+            parent = parent_name or "Uncategorized"
+            category = category_name or "Uncategorized"
+            print(
+                f"#{tx_id} {tx_date.strftime('%Y-%m-%d')} {float(amount):.2f} [{tx_type}] "
+                f"{desc} | {account_name} | {parent} > {category}"
+            )
+        return
+
+
 async def main():
     parser = argparse.ArgumentParser(description="Financial CLI V2")
     subparsers = parser.add_subparsers(dest="command")
@@ -763,6 +819,14 @@ async def main():
         help="Table names to reset. Use `python3 main.py db list-tables` to view options.",
     )
 
+    undo_parser = subparsers.add_parser("undo", help="Undo the last tracked import/review operation.")
+    undo_parser.add_argument(
+        "--last",
+        action="store_true",
+        default=True,
+        help="Undo the most recent operation (default behavior).",
+    )
+
     # Review queue
     queue_parser = subparsers.add_parser("queue")
     queue_subparsers = queue_parser.add_subparsers(dest="queue_action", required=True)
@@ -864,6 +928,13 @@ async def main():
         help="Open the graph page in the default browser.",
     )
 
+    ask_db_parser = subparsers.add_parser(
+        "ask-db",
+        help="Run safe natural-language queries over transactions.",
+    )
+    ask_db_parser.add_argument("--query", required=True, help='Natural language query, e.g. "top categories last 30 days"')
+    ask_db_parser.add_argument("--limit", type=int, default=10, help="Result limit for list/aggregate queries")
+
     args = parser.parse_args()
 
     # Commands that do not require database connectivity.
@@ -896,12 +967,16 @@ async def main():
         await llm_command(args)
     elif args.command == "db":
         await db_command(args)
+    elif args.command == "undo":
+        await undo_command(args)
     elif args.command == "queue":
         await queue_command(args)
     elif args.command == "add-tx":
         await add_tx_command(args)
     elif args.command == "benchmark":
         await benchmark_command(args)
+    elif args.command == "ask-db":
+        await ask_db_command(args)
     else:
         parser.print_help()
 

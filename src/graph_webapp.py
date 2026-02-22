@@ -6,7 +6,7 @@ import webbrowser
 from collections import Counter, defaultdict
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 from sqlalchemy import select
 
-from src.database import AIMemory, AsyncSessionLocal, Category, Transaction
+from src.database import AIMemory, Account, AsyncSessionLocal, Category, Transaction
 
 
 @dataclass
@@ -81,6 +81,15 @@ def _coerce_int(value: Optional[str], default: int, minimum: int, maximum: int) 
     except (TypeError, ValueError):
         return default
     return max(minimum, min(maximum, parsed))
+
+
+def _coerce_date(value: Optional[str]) -> Optional[date]:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d").date()
+    except Exception:
+        return None
 
 
 def _node_size(total_weight: float, base: float) -> float:
@@ -168,6 +177,11 @@ async def build_keyword_category_graph(
     include_transactions: bool = False,
     tx_per_keyword: int = 12,
     tx_node_limit: int = 700,
+    account_id: Optional[int] = None,
+    tx_type: Optional[str] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    category_query: Optional[str] = None,
 ):
     stmt = (
         select(
@@ -189,6 +203,19 @@ async def build_keyword_category_graph(
     )
     if verified_only:
         stmt = stmt.where(Transaction.is_verified.is_(True))
+    if account_id:
+        stmt = stmt.where(Transaction.account_id == account_id)
+    if tx_type in {"expense", "income", "transfer"}:
+        stmt = stmt.where(Transaction.type == tx_type)
+    if start_date:
+        stmt = stmt.where(Transaction.date >= datetime.combine(start_date, time.min, tzinfo=None))
+    if end_date:
+        stmt = stmt.where(Transaction.date < datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=None))
+    if category_query:
+        like = f"%{category_query.strip()}%"
+        stmt = stmt.join(Category, Category.id == Transaction.category_id, isouter=True).where(
+            (Category.name.ilike(like)) | (Category.parent_name.ilike(like))
+        )
 
     res = await session.execute(stmt)
     rows = res.all()
@@ -608,6 +635,11 @@ async def build_keyword_category_graph(
             "include_transactions": include_transactions,
             "tx_per_keyword": tx_per_keyword,
             "tx_node_limit": tx_node_limit,
+            "account_id": account_id,
+            "tx_type": tx_type,
+            "start_date": start_date.isoformat() if start_date else None,
+            "end_date": end_date.isoformat() if end_date else None,
+            "category_query": category_query,
         },
         "stats": {
             "rows_scanned": len(rows),
@@ -1153,6 +1185,16 @@ async def _graph_payload_from_query(query):
         minimum=100,
         maximum=3000,
     )
+    account_id = _coerce_int(
+        query.get("account_id", [None])[0],
+        default=0,
+        minimum=0,
+        maximum=2_000_000_000,
+    )
+    tx_type = (query.get("tx_type", [None])[0] or "").strip().lower() or None
+    start_date = _coerce_date(query.get("start_date", [None])[0])
+    end_date = _coerce_date(query.get("end_date", [None])[0])
+    category_query = (query.get("category_query", [None])[0] or "").strip() or None
 
     async with AsyncSessionLocal() as session:
         return await build_keyword_category_graph(
@@ -1164,6 +1206,11 @@ async def _graph_payload_from_query(query):
             include_transactions=include_transactions,
             tx_per_keyword=tx_per_keyword,
             tx_node_limit=tx_node_limit,
+            account_id=account_id or None,
+            tx_type=tx_type,
+            start_date=start_date,
+            end_date=end_date,
+            category_query=category_query,
         )
 
 
@@ -1225,6 +1272,100 @@ async def _insights_payload_from_query(query):
             risk_limit=risk_limit,
             keyword_limit=keyword_limit,
         )
+
+
+async def _accounts_payload():
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(select(Account.id, Account.name).order_by(Account.name.asc()))
+        return {
+            "accounts": [{"id": int(account_id), "name": name} for account_id, name in res.all()],
+        }
+
+
+async def _transaction_payload_from_query(query):
+    tx_id = _coerce_int(query.get("id", [None])[0], default=0, minimum=0, maximum=2_000_000_000)
+    if not tx_id:
+        raise ValueError("Missing required query parameter: id")
+
+    async with AsyncSessionLocal() as session:
+        tx_res = await session.execute(
+            select(
+                Transaction.id,
+                Transaction.date,
+                Transaction.description,
+                Transaction.amount,
+                Transaction.type,
+                Transaction.note,
+                Transaction.confidence_score,
+                Transaction.decision_state,
+                Transaction.decision_reason,
+                Transaction.is_verified,
+                Account.name,
+                Category.parent_name,
+                Category.name,
+            )
+            .join(Account, Account.id == Transaction.account_id)
+            .outerjoin(Category, Category.id == Transaction.category_id)
+            .where(Transaction.id == tx_id)
+            .limit(1)
+        )
+        tx_row = tx_res.one_or_none()
+        if not tx_row:
+            raise ValueError(f"Transaction #{tx_id} not found.")
+
+        mem_res = await session.execute(
+            select(
+                AIMemory.pattern_key,
+                AIMemory.ai_reasoning,
+                AIMemory.reflection,
+                AIMemory.created_at,
+            )
+            .where(AIMemory.transaction_id == tx_id)
+            .order_by(AIMemory.created_at.desc())
+            .limit(1)
+        )
+        mem_row = mem_res.one_or_none()
+
+    (
+        row_tx_id,
+        row_date,
+        description,
+        amount,
+        tx_type,
+        note,
+        confidence,
+        decision_state,
+        decision_reason,
+        is_verified,
+        account_name,
+        parent_name,
+        category_name,
+    ) = tx_row
+
+    category_label = "Uncategorized > Uncategorized [unknown]"
+    if tx_type == "transfer" and not category_name:
+        category_label = "(Transfer) > (Transfer) [transfer]"
+    elif category_name:
+        category_label = f"{parent_name or 'Uncategorized'} > {category_name} [{tx_type or 'unknown'}]"
+
+    payload = {
+        "transaction_id": int(row_tx_id),
+        "date": _iso_date(row_date),
+        "description": description or "",
+        "amount": float(amount) if amount is not None else None,
+        "type": tx_type or "unknown",
+        "note": note,
+        "confidence": float(confidence) if confidence is not None else None,
+        "decision_state": decision_state,
+        "decision_reason": decision_reason,
+        "is_verified": bool(is_verified),
+        "account": account_name,
+        "category_label": category_label,
+        "keyword": mem_row[0] if mem_row else None,
+        "ai_reasoning": mem_row[1] if mem_row else None,
+        "reflection": mem_row[2] if mem_row else None,
+    }
+    return payload
 
 
 class AsyncLoopRunner:
@@ -1293,6 +1434,12 @@ class GraphRequestHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/graph":
             self._serve_graph_payload(parse_qs(parsed.query))
             return
+        if parsed.path == "/api/accounts":
+            self._serve_accounts_payload()
+            return
+        if parsed.path == "/api/transaction":
+            self._serve_transaction_payload(parse_qs(parsed.query))
+            return
         if parsed.path == "/api/quality":
             self._serve_quality_payload(parse_qs(parsed.query))
             return
@@ -1324,6 +1471,34 @@ class GraphRequestHandler(SimpleHTTPRequestHandler):
     def _serve_quality_payload(self, query):
         try:
             payload = self._run_async(_quality_payload_from_query(query))
+            data = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+        except Exception as exc:
+            data = json.dumps({"error": str(exc)}).encode("utf-8")
+            self.send_response(500)
+
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_accounts_payload(self):
+        try:
+            payload = self._run_async(_accounts_payload())
+            data = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+        except Exception as exc:
+            data = json.dumps({"error": str(exc)}).encode("utf-8")
+            self.send_response(500)
+
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_transaction_payload(self, query):
+        try:
+            payload = self._run_async(_transaction_payload_from_query(query))
             data = json.dumps(payload).encode("utf-8")
             self.send_response(200)
         except Exception as exc:

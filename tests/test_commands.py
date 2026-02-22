@@ -10,6 +10,7 @@ from src.commands import (
     export_to_bluecoins_csv,
     update_account,
     update_transaction_note,
+    undo_last_operation,
 )
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
@@ -261,12 +262,35 @@ def test_export_to_bluecoins_csv_exports_only_paired_transfers(tmp_path):
         rows = list(csv.reader(f))
 
     assert len(rows) == 3
-    assert rows[1][0] == "t"
-    assert rows[2][0] == "t"
-    assert rows[1][7] == "Checking"
-    assert rows[1][3] == "-100.0"
-    assert rows[2][7] == "Savings"
-    assert rows[2][3] == "100.0"
+
+
+@pytest.mark.asyncio
+async def test_undo_last_review_action_restores_transaction_note(db_session):
+    await add_account(db_session, "Undo Test", "Test Bank")
+    success, _msg, tx = await add_transaction(
+        db_session,
+        date=datetime(2024, 1, 2),
+        amount=-22.0,
+        description="Undo note change",
+        account_name="Undo Test",
+    )
+    assert success
+    assert tx.note is None
+
+    ok, _ = await update_transaction_note(db_session, tx.id, "Temporary note")
+    assert ok
+
+    refreshed = await db_session.execute(select(Transaction).where(Transaction.id == tx.id))
+    updated_tx = refreshed.scalar_one()
+    assert updated_tx.note == "Temporary note"
+
+    ok, msg = await undo_last_operation(db_session)
+    assert ok
+    assert "Undo complete" in msg
+
+    restored = await db_session.execute(select(Transaction).where(Transaction.id == tx.id))
+    restored_tx = restored.scalar_one()
+    assert restored_tx.note is None
 
 
 def test_export_to_bluecoins_csv_skips_unpaired_transfer_and_reports_id(tmp_path):

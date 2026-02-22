@@ -91,6 +91,8 @@ const nodeTxTableBody = document.getElementById("nodeTxTableBody");
 const nodeTxPrevBtn = document.getElementById("nodeTxPrevBtn");
 const nodeTxNextBtn = document.getElementById("nodeTxNextBtn");
 const nodeTxPageInfo = document.getElementById("nodeTxPageInfo");
+const txReasonPanel = document.getElementById("txReasonPanel");
+const txReasonBody = document.getElementById("txReasonBody");
 const detailPanel = document.getElementById("detailPanel");
 const workspace = document.getElementById("workspace");
 const externalPanels = document.getElementById("externalPanels");
@@ -101,6 +103,13 @@ const searchInput = document.getElementById("searchInput");
 const minWeightInput = document.getElementById("minWeightInput");
 const limitInput = document.getElementById("limitInput");
 const verifiedOnlyInput = document.getElementById("verifiedOnlyInput");
+const filterToggleBtn = document.getElementById("filterToggleBtn");
+const dockFilterTray = document.getElementById("dockFilterTray");
+const accountFilterInput = document.getElementById("accountFilterInput");
+const txTypeFilterInput = document.getElementById("txTypeFilterInput");
+const startDateFilterInput = document.getElementById("startDateFilterInput");
+const endDateFilterInput = document.getElementById("endDateFilterInput");
+const categoryFilterInput = document.getElementById("categoryFilterInput");
 const refreshBtn = document.getElementById("refreshBtn");
 
 const edgeTextToggle = document.getElementById("edgeTextToggle");
@@ -471,6 +480,11 @@ function buildQueryString() {
   params.set("min_weight", `${Number(minWeightInput.value || 0)}`);
   params.set("limit", `${Number(limitInput.value || 250)}`);
   params.set("verified_only", verifiedOnlyInput.checked ? "1" : "0");
+  if (accountFilterInput?.value) params.set("account_id", accountFilterInput.value);
+  if (txTypeFilterInput?.value) params.set("tx_type", txTypeFilterInput.value);
+  if (startDateFilterInput?.value) params.set("start_date", startDateFilterInput.value);
+  if (endDateFilterInput?.value) params.set("end_date", endDateFilterInput.value);
+  if (categoryFilterInput?.value) params.set("category_query", categoryFilterInput.value.trim());
   params.set("include_transactions", "1");
   params.set("tx_per_keyword", "14");
   params.set("tx_node_limit", "1200");
@@ -481,6 +495,8 @@ function resetNodeTable() {
   state.nodeDetailRows = [];
   state.nodeDetailPage = 0;
   if (nodeTxPanel) nodeTxPanel.classList.add("hidden");
+  if (txReasonPanel) txReasonPanel.classList.add("hidden");
+  if (txReasonBody) txReasonBody.textContent = "Select a transaction row to inspect reasoning.";
   if (nodeTxTableBody) nodeTxTableBody.innerHTML = "";
   if (nodeTxCount) nodeTxCount.textContent = "0";
   if (nodeTxPageInfo) nodeTxPageInfo.textContent = "Page 1 / 1";
@@ -513,8 +529,12 @@ function renderNodeTablePage() {
   nodeTxPanel.classList.remove("hidden");
   nodeTxTableBody.innerHTML = pageRows
     .map((row) => {
+      const txId = row.tx_id || "-";
+      const txButton = Number.isFinite(Number(txId))
+        ? `<button class=\"tx-drill-btn\" data-tx-id=\"${escapeHtml(txId)}\">${escapeHtml(txId)}</button>`
+        : escapeHtml(txId);
       return `<tr>
-        <td>${escapeHtml(row.tx_id || "-")}</td>
+        <td>${txButton}</td>
         <td>${escapeHtml(formatDate(row.date))}</td>
         <td title="${escapeHtml(row.label || "-")}">${escapeHtml(row.label || "-")}</td>
         <td>${row.amount === null || row.amount === undefined ? "-" : escapeHtml(formatAmount(Number(row.amount)))}</td>
@@ -900,6 +920,44 @@ async function fetchJsonOrThrow(url, label) {
     throw new Error(payload?.error || `${label} request failed (${response.status})`);
   }
   return payload;
+}
+
+async function loadAccountsFilterOptions() {
+  if (!accountFilterInput) return;
+  try {
+    const payload = await fetchJsonOrThrow("/api/accounts", "Accounts API");
+    const accounts = payload.accounts || [];
+    accountFilterInput.innerHTML = [
+      `<option value="">All</option>`,
+      ...accounts.map((acc) => `<option value="${escapeHtml(acc.id)}">${escapeHtml(acc.name)}</option>`),
+    ].join("");
+  } catch (_error) {
+    accountFilterInput.innerHTML = `<option value="">All</option>`;
+  }
+}
+
+async function loadTransactionReasoning(txId) {
+  if (!txReasonPanel || !txReasonBody || !txId) return;
+  txReasonPanel.classList.remove("hidden");
+  txReasonBody.textContent = "Loading transaction details...";
+  try {
+    const row = await fetchJsonOrThrow(`/api/transaction?id=${encodeURIComponent(txId)}`, "Transaction API");
+    const lines = [
+      `#${row.transaction_id} | ${row.date || "-"} | ${row.amount?.toFixed ? row.amount.toFixed(2) : row.amount ?? "-"}`,
+      `Type: ${row.type || "unknown"} | Account: ${row.account || "-"}`,
+      `Category: ${row.category_label || "-"}`,
+      `Decision: ${row.decision_state || "-"} | Verified: ${row.is_verified ? "yes" : "no"}`,
+      `Decision reason: ${row.decision_reason || "-"}`,
+      row.keyword ? `Keyword: ${row.keyword}` : "",
+      row.ai_reasoning ? `AI reasoning: ${row.ai_reasoning}` : "",
+      row.reflection ? `Reflection: ${row.reflection}` : "",
+      row.note ? `Note: ${row.note}` : "",
+      `Description: ${row.description || "-"}`,
+    ].filter(Boolean);
+    txReasonBody.textContent = lines.join("\n");
+  } catch (error) {
+    txReasonBody.textContent = `Failed to load transaction details: ${error.message}`;
+  }
 }
 
 function stopTimelinePlayback() {
@@ -3186,9 +3244,19 @@ async function loadGraph() {
   }
 }
 
-refreshBtn.addEventListener("click", () => {
-  loadGraph();
-});
+if (refreshBtn) {
+  refreshBtn.addEventListener("click", () => {
+    loadGraph();
+  });
+}
+
+if (filterToggleBtn && dockFilterTray) {
+  filterToggleBtn.addEventListener("click", () => {
+    const isHidden = dockFilterTray.classList.contains("hidden");
+    dockFilterTray.classList.toggle("hidden", !isHidden);
+    filterToggleBtn.textContent = isHidden ? "Hide Filters" : "Filters";
+  });
+}
 
 searchInput.addEventListener("input", () => {
   state.searchTerm = searchInput.value || "";
@@ -3583,6 +3651,30 @@ if (nodeTxNextBtn) {
   });
 }
 
+if (nodeTxTableBody) {
+  nodeTxTableBody.addEventListener("click", (event) => {
+    const button = event.target.closest(".tx-drill-btn");
+    if (!button) return;
+    const txId = button.dataset.txId;
+    if (!txId) return;
+    loadTransactionReasoning(txId);
+  });
+}
+
+const graphFilterInputs = [
+  accountFilterInput,
+  txTypeFilterInput,
+  startDateFilterInput,
+  endDateFilterInput,
+  categoryFilterInput,
+];
+graphFilterInputs.filter(Boolean).forEach((inputEl) => {
+  const eventName = inputEl.tagName === "INPUT" ? "change" : "change";
+  inputEl.addEventListener(eventName, () => {
+    loadGraph();
+  });
+});
+
 if (insightsCloseBtn) {
   insightsCloseBtn.addEventListener("click", () => {
     setInsightsDrawerOpen(false);
@@ -3712,4 +3804,5 @@ setInsightsDrawerOpen(state.insightsDrawerOpen);
 setActiveView(state.activeView);
 clearInsightsPanels("Loading insights...");
 if (sankeySummary) sankeySummary.textContent = "Loading decision paths...";
+loadAccountsFilterOptions();
 loadGraph();

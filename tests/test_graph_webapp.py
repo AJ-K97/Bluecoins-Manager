@@ -158,3 +158,55 @@ async def test_graph_uncategorized_toggle(db_session):
     assert len(hidden_unknown) == 0
     assert len(shown_unknown) == 1
     assert shown_unknown[0]["target"] == "category::uncategorized"
+
+
+@pytest.mark.asyncio
+async def test_graph_filters_by_account_type_and_date(db_session):
+    account_a = Account(name="Filter Account A", institution="Test")
+    account_b = Account(name="Filter Account B", institution="Test")
+    category = Category(name="Fuel", parent_name="Car", type="expense")
+    db_session.add_all([account_a, account_b, category])
+    await db_session.flush()
+
+    tx_a = Transaction(
+        date=datetime(2026, 1, 10),
+        description="Shell A",
+        amount=55.0,
+        type="expense",
+        account_id=account_a.id,
+        category_id=category.id,
+        confidence_score=0.8,
+        is_verified=True,
+    )
+    tx_b = Transaction(
+        date=datetime(2026, 2, 10),
+        description="Shell B",
+        amount=65.0,
+        type="expense",
+        account_id=account_b.id,
+        category_id=category.id,
+        confidence_score=0.8,
+        is_verified=True,
+    )
+    db_session.add_all([tx_a, tx_b])
+    await db_session.flush()
+
+    db_session.add_all(
+        [
+            AIMemory(transaction_id=tx_a.id, pattern_key="SHELL", ai_reasoning="Fuel"),
+            AIMemory(transaction_id=tx_b.id, pattern_key="SHELL", ai_reasoning="Fuel"),
+        ]
+    )
+    await db_session.flush()
+
+    payload = await build_keyword_category_graph(
+        db_session,
+        account_id=account_b.id,
+        tx_type="expense",
+        start_date=datetime(2026, 2, 1).date(),
+        end_date=datetime(2026, 2, 28).date(),
+        limit=100,
+    )
+    shell_edges = [edge for edge in payload["edges"] if edge.get("edge_type") == "keyword_category" and edge["keyword"] == "SHELL"]
+    assert len(shell_edges) == 1
+    assert shell_edges[0]["count"] == 1

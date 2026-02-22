@@ -600,6 +600,29 @@ body {
   font-family: "Space Mono", monospace;
 }
 
+.tx-reason-panel {
+  margin-top: 0.45rem;
+  border: 1px solid #d9e4ef;
+  border-radius: 8px;
+  background: #f7fbff;
+  padding: 0.42rem;
+}
+
+.tx-reason-panel.hidden {
+  display: none;
+}
+
+.tx-drill-btn {
+  border: 1px solid #c2d7e8;
+  background: #f2f9ff;
+  color: #2f6f95;
+  border-radius: 6px;
+  font-family: "Space Mono", monospace;
+  font-size: 0.69rem;
+  padding: 0.15rem 0.34rem;
+  cursor: pointer;
+}
+
 .settings-block {
   margin-top: 0.8rem;
   padding-top: 0.78rem;
@@ -1181,8 +1204,9 @@ body {
   width: min(1260px, 94vw);
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.7rem;
-  border-radius: 999px;
+  border-radius: 18px;
   border: 1px solid var(--line);
   background: var(--surface-1);
   padding: 0.56rem 0.78rem;
@@ -1197,15 +1221,17 @@ body {
 }
 
 .dock-group-query {
-  flex: 1.5;
+  flex: 1 1 560px;
+  flex-wrap: wrap;
 }
 
 .dock-group-timeline {
-  flex: 1.1;
+  flex: 1 1 340px;
+  min-width: 280px;
 }
 
 .dock-group-zoom {
-  flex: 0;
+  flex: 0 0 auto;
 }
 
 .dock-search {
@@ -1226,7 +1252,8 @@ body {
 }
 
 .dock-search input,
-.dock-field input {
+.dock-field input,
+.dock-field select {
   border: 0;
   background: transparent;
   color: var(--ink-strong);
@@ -1256,7 +1283,8 @@ body {
   padding: 0.22rem 0.38rem;
 }
 
-.dock-field input {
+.dock-field input,
+.dock-field select {
   width: 66px;
   border: 1px solid #ccdae6;
   border-radius: 6px;
@@ -1302,6 +1330,34 @@ body {
 .timeline-field input[type="range"] {
   width: min(36vw, 286px);
   accent-color: #2f80ab;
+}
+
+.dock-filter-tray {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  border: 1px solid #d4e1eb;
+  border-radius: 10px;
+  padding: 0.45rem 0.5rem;
+  background: rgba(246, 251, 255, 0.92);
+}
+
+.dock-filter-tray.hidden {
+  display: none;
+}
+
+.dock-filter-tray .compact-field input[type="date"] {
+  width: 132px;
+}
+
+.dock-filter-tray .compact-field select {
+  width: 116px;
+}
+
+.dock-filter-tray .compact-field input[type="text"] {
+  width: 170px;
 }
 
 .timeline-value {

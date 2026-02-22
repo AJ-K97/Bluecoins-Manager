@@ -238,6 +238,16 @@ class InteractionLog(Base):
     action_taken = Column(String, nullable=True)
     response_content = Column(Text, nullable=True)
 
+
+class OperationLog(Base):
+    __tablename__ = "operation_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    operation_type = Column(String, nullable=False, index=True)  # import_batch|review_action
+    payload_json = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    undone_at = Column(DateTime, nullable=True, index=True)
+
 # Add relationships to Transaction
 Transaction.memory_entries = relationship("AIMemory", back_populates="transaction", cascade="save-update, merge")
 Transaction.finetune_examples = relationship("LLMFineTuneExample", back_populates="transaction", cascade="save-update, merge")

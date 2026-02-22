@@ -187,6 +187,12 @@
                 <tbody id="nodeTxTableBody"></tbody>
               </table>
             </div>
+            <div id="txReasonPanel" class="tx-reason-panel hidden">
+              <div class="node-tx-head">
+                <h3>Transaction Reasoning</h3>
+              </div>
+              <div id="txReasonBody" class="node-detail-body">Select a transaction row to inspect reasoning.</div>
+            </div>
             <div class="node-tx-pagination">
               <button id="nodeTxPrevBtn" class="dock-icon-button" type="button" aria-label="Previous transactions page">
                 ←
@@ -496,6 +502,7 @@
             <input id="verifiedOnlyInput" type="checkbox" />
             <span>Verified</span>
           </label>
+          <button id="filterToggleBtn" class="dock-button" type="button">Filters</button>
           <button id="refreshBtn" class="dock-button dock-button-primary" type="button">Refresh</button>
           <button class="help-trigger dock-help" type="button" data-help-key="dock_query" aria-label="Help: Query and filters">
             ?
@@ -525,6 +532,36 @@
           <button class="help-trigger dock-help" type="button" data-help-key="dock_zoom" aria-label="Help: Zoom controls">
             ?
           </button>
+        </div>
+
+        <div id="dockFilterTray" class="dock-filter-tray hidden">
+          <label class="dock-field compact-field">
+            <span>Account</span>
+            <select id="accountFilterInput">
+              <option value="">All</option>
+            </select>
+          </label>
+          <label class="dock-field compact-field">
+            <span>Type</span>
+            <select id="txTypeFilterInput">
+              <option value="">All</option>
+              <option value="expense">Expense</option>
+              <option value="income">Income</option>
+              <option value="transfer">Transfer</option>
+            </select>
+          </label>
+          <label class="dock-field compact-field">
+            <span>From</span>
+            <input id="startDateFilterInput" type="date" />
+          </label>
+          <label class="dock-field compact-field">
+            <span>To</span>
+            <input id="endDateFilterInput" type="date" />
+          </label>
+          <label class="dock-field compact-field">
+            <span>Category</span>
+            <input id="categoryFilterInput" type="text" placeholder="food, rent..." />
+          </label>
         </div>
       </footer>
 
